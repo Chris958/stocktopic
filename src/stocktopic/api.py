@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hmac
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -195,11 +196,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def wecom_test():
         if not service.notifier.enabled:
             raise HTTPException(status_code=503, detail="WeCom not configured")
-        await asyncio.to_thread(
-            service.notifier.send_text,
-            "StockTopic连接测试",
-            "Mac mini题材情绪系统已成功连接企业微信。",
-        )
+        try:
+            await asyncio.to_thread(
+                service.notifier.send_text,
+                "StockTopic连接测试",
+                "Mac mini题材情绪系统已成功连接企业微信。",
+            )
+        except Exception as error:
+            logger.warning("WeCom connection test failed: %s", _safe_integration_error(error))
+            raise HTTPException(
+                status_code=502,
+                detail=f"企业微信发送失败：{_safe_integration_error(error)}",
+            ) from error
         return {"ok": True}
 
     return app
@@ -220,3 +228,10 @@ def _authorized(request: Request, settings: Settings) -> bool:
             password, settings.admin_password
         )
     return False
+
+
+def _safe_integration_error(error: Exception) -> str:
+    message = str(error)
+    message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1***", message)
+    message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
+    return message[:500] or type(error).__name__

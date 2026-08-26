@@ -8,6 +8,15 @@ from stocktopic.api import create_app
 from stocktopic.config import Settings
 
 
+class FailingWeComNotifier:
+    enabled = True
+
+    def send_text(self, title, body):
+        raise RuntimeError(
+            "request failed: access_token=sensitive-token&errcode=60020 not allowed from ip"
+        )
+
+
 def test_api_auth_and_csrf_guard():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
@@ -47,3 +56,9 @@ def test_api_auth_and_csrf_guard():
         response = client.post("/api/v1/admin/run-once", headers=basic)
         assert response.status_code == 200
         assert response.json()["status"] == "idle"
+
+        app.state.service.notifier = FailingWeComNotifier()
+        response = client.post("/api/v1/admin/wecom-test", headers=basic)
+        assert response.status_code == 502
+        assert "errcode=60020" in response.json()["detail"]
+        assert "sensitive-token" not in response.text

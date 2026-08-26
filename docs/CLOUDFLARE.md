@@ -8,8 +8,10 @@ https://stock.bnken.com
 
 ## Cloudflare Tunnel
 
-不要开放Mac mini路由器端口。建议为StockTopic建立独立Tunnel；如果复用已有Tunnel，
-也必须使用独立的Published application路由，不要复用Futu API路径。
+不要开放Mac mini路由器端口。如果同一台Mac mini已经有为 `futu-api.bnken.com` 服务的
+`cloudflared` 系统服务，直接复用这个Tunnel并增加第二条Published application路由。
+不要在同一台Mac上再次执行 `cloudflared service install`；一台主机只需要一个服务，
+同一Tunnel可以发布多个hostname和origin。
 
 在Cloudflare控制台进入：
 
@@ -26,6 +28,12 @@ Networking → Tunnels → 选择Tunnel → Routes
 | Domain | `bnken.com` |
 | Service URL | `http://127.0.0.1:8765` |
 
+保留原有 `futu-api.bnken.com` 路由不变；新增的是：
+
+```text
+stock.bnken.com → http://127.0.0.1:8765
+```
+
 保存后等待Tunnel显示Healthy。当前Web App使用StockTopic自身的会话登录；不要在同一主机名
 上叠加需要网页登录的Cloudflare Access，否则后续iOS API请求会被Access登录页拦截。
 
@@ -33,6 +41,22 @@ Networking → Tunnels → 选择Tunnel → Routes
 `127.0.0.1`而不是 `localhost`。如果 `cloudflared` 运行在Docker容器中，容器内的
 `127.0.0.1`不是Mac主机，此时应改用 `http://host.docker.internal:8765`，或把
 `cloudflared` 直接作为Mac服务运行。
+
+## Tunnel Token泄露或轮换
+
+Tunnel Token允许持有者启动该Tunnel的连接器，不能写入文档、聊天或GitHub。Token一旦泄露，
+在Cloudflare控制台进入 `Networking → Tunnels → 选择对应Tunnel → Overview`，执行
+`Rotate token`/`Refresh token`。如果泄露的是刚创建且从未成功安装的冗余Tunnel，可以先确认
+它不是 `futu-api.bnken.com` 正在使用的Tunnel，再删除该冗余Tunnel。
+
+只有当正在运行的Tunnel本身完成Token轮换后，才需要在维护窗口执行：
+
+```bash
+sudo cloudflared service uninstall
+sudo cloudflared service install <NEW_TOKEN>
+```
+
+不要在未确认Tunnel身份时卸载现有服务，否则会同时中断 `futu-api.bnken.com`。
 
 建议在Cloudflare中为 `/api/*` 增加限速规则，例如单个IP每分钟不超过60次；不要缓存
 `/api/*`，静态文件 `/static/*` 可以使用Cloudflare默认缓存策略。
