@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>StockTopic · 题材情绪</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div><div class="eyebrow">MARKET FIRST · NEWS SECOND</div><h1>题材情绪</h1></div>
+    <div id="marketState" class="status-pill">正在连接</div>
+  </header>
+  <main>
+    <section class="hero-grid">
+      <article class="metric"><span>主板覆盖</span><strong id="universeCount">—</strong><small>沪深主板 · 排除ST/退市</small></article>
+      <article class="metric"><span>实时频率</span><strong>5 min</strong><small>休市自动停止</small></article>
+      <article class="metric"><span>聚类频率</span><strong>15 min</strong><small>重要异动即时触发</small></article>
+      <article class="metric"><span>最近采集</span><strong id="lastRun">—</strong><small id="lastRunDetail">等待行情</small></article>
+    </section>
+    <nav class="tabs" aria-label="内容切换">
+      <button class="tab active" data-tab="candidates">候选题材 <span id="candidateCount">0</span></button>
+      <button class="tab" data-tab="confirmed">正式题材 <span id="confirmedCount">0</span></button>
+      <button class="tab" data-tab="anomalies">异动池 <span id="anomalyCount">0</span></button>
+      <button class="tab" data-tab="alerts">预警 <span id="alertCount">0</span></button>
+    </nav>
+    <section id="candidates" class="tab-panel active">
+      <div class="section-heading"><div><h2>机器发现，人工确认</h2><p>确认前仅显示成员和原因，绝不计算评分。</p></div><button id="refresh" class="quiet">刷新</button></div>
+      <div id="candidateList" class="card-list empty">暂无候选题材</div>
+    </section>
+    <section id="confirmed" class="tab-panel">
+      <div class="section-heading"><div><h2>正式题材</h2><p>Heat、Persistence和Entry Risk独立呈现。</p></div></div>
+      <div id="confirmedList" class="card-list empty">暂无已确认题材</div>
+    </section>
+    <section id="anomalies" class="tab-panel">
+      <div class="section-heading"><div><h2>全市场异动池</h2><p>硬事件直接进入，普通股票需同时满足两项条件。</p></div></div>
+      <div id="anomalyList" class="event-list empty">当前没有异动</div>
+    </section>
+    <section id="alerts" class="tab-panel">
+      <div class="section-heading"><div><h2>系统预警</h2><p>高价值机会、接盘风险和数据异常。</p></div><button id="wecomTest" class="quiet">测试微信</button></div>
+      <div id="alertList" class="event-list empty">暂无预警</div>
+    </section>
+  </main>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
