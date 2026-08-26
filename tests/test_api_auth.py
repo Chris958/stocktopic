@@ -35,6 +35,10 @@ def test_api_auth_and_csrf_guard():
         assert dashboard.status_code == 200
         assert dashboard.headers["cache-control"] == "no-store"
         assert dashboard.headers["x-frame-options"] == "DENY"
+        assert dashboard.json()["data_context"] == {
+            "anomaly_trade_date": None,
+            "has_intraday_data": False,
+        }
 
         basic_value = base64.b64encode(b"admin:password").decode()
         basic = {"Authorization": f"Basic {basic_value}"}

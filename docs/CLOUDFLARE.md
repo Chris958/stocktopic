@@ -24,10 +24,15 @@ Networking → Tunnels → 选择Tunnel → Routes
 |---|---|
 | Subdomain | `stock` |
 | Domain | `bnken.com` |
-| Service URL | `http://localhost:8765` |
+| Service URL | `http://127.0.0.1:8765` |
 
 保存后等待Tunnel显示Healthy。当前Web App使用StockTopic自身的会话登录；不要在同一主机名
 上叠加需要网页登录的Cloudflare Access，否则后续iOS API请求会被Access登录页拦截。
+
+如果本地 `http://127.0.0.1:8765` 正常而公网返回502，优先确认Service URL使用的是
+`127.0.0.1`而不是 `localhost`。如果 `cloudflared` 运行在Docker容器中，容器内的
+`127.0.0.1`不是Mac主机，此时应改用 `http://host.docker.internal:8765`，或把
+`cloudflared` 直接作为Mac服务运行。
 
 建议在Cloudflare中为 `/api/*` 增加限速规则，例如单个IP每分钟不超过60次；不要缓存
 `/api/*`，静态文件 `/static/*` 可以使用Cloudflare默认缓存策略。

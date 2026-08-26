@@ -322,18 +322,27 @@ class Database:
         sql += " ORDER BY captured_at DESC, severity DESC"
         with self.connect() as connection:
             rows = connection.execute(sql, params).fetchall()
-        result = []
-        for row in rows:
-            item = dict(row)
-            for source, target in (
-                ("event_types_json", "event_types"),
-                ("reasons_json", "reasons"),
-                ("metrics_json", "metrics"),
-            ):
-                item[target] = json.loads(item.pop(source))
-            result.append(item)
-        return result
+        return _decode_anomaly_rows(rows)
 
+    def latest_anomaly_trade_date(self) -> str | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT MAX(trade_date) AS trade_date FROM anomaly_events"
+            ).fetchone()
+        return str(row["trade_date"]) if row and row["trade_date"] else None
+
+    def anomalies_for_trade_date(
+        self, trade_date: str, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM anomaly_events WHERE trade_date=?
+                ORDER BY captured_at DESC, severity DESC LIMIT ?
+                """,
+                (trade_date, limit),
+            ).fetchall()
+        return _decode_anomaly_rows(rows)
     def tags_for_codes(self, codes: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
         if not codes:
             return {}
@@ -964,6 +973,20 @@ class Database:
         with self.connect() as connection:
             row = connection.execute("PRAGMA quick_check").fetchone()
         return str(row[0])
+
+
+def _decode_anomaly_rows(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        item = dict(row)
+        for source, target in (
+            ("event_types_json", "event_types"),
+            ("reasons_json", "reasons"),
+            ("metrics_json", "metrics"),
+        ):
+            item[target] = json.loads(item.pop(source))
+        result.append(item)
+    return result
 
 
 def _split_tags(value: str) -> list[str]:

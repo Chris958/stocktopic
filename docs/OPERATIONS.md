@@ -33,6 +33,20 @@ git pull --ff-only
 
 停止服务，编辑 `.env`，再重新启动。不要把 `.env` 内容发到聊天、Issue或GitHub。
 
+需要重新配置OpenAI或企业微信时，推荐使用交互脚本，秘密字段输入时不会回显，直接回车会
+保留原值：
+
+```bash
+./scripts/configure_integrations.sh
+```
+
+企业微信自建应用需要 `CorpID`、`AgentID`、应用 `Secret` 和接收成员的 `UserID`。同时确认：
+
+1. 接收成员位于该自建应用的可见范围内；
+2. 应用管理页如果要求“企业可信IP”，已加入Mac mini当前公网出口IPv4；
+3. 修改配置并重启后，在网页“预警”页点击“测试企业微信”；
+4. 若家庭宽带公网IP发生变化，需要同步更新企业可信IP。
+
 使用兼容OpenAI协议的服务时，至少确认以下三项：
 
 ```dotenv

@@ -172,7 +172,7 @@ async function load(manual = false) {
 
 function render() {
   if (!state.data) return;
-  const { health, themes, anomalies, alerts } = state.data;
+  const { health, themes, anomalies, alerts, data_context: dataContext = {} } = state.data;
   const pending = themes.filter(theme => theme.status === 'pending');
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
   const market = health.market;
@@ -184,7 +184,11 @@ function render() {
     : marketLabel(market.session);
   marketNode.querySelector('small').textContent = market.realtime_collection_enabled
     ? '5分钟实时行情'
-    : marketReason(market.reason);
+    : dataContext.has_intraday_data
+      ? `保留最近交易日 · ${formatDate(dataContext.anomaly_trade_date)}`
+      : market.reason === 'closed'
+        ? '等待下个交易窗口首次采集'
+        : marketReason(market.reason);
   $('#universeCount').textContent = health.universe_count?.toLocaleString() || '—';
   $('#candidateMetric').textContent = pending.length.toLocaleString();
   $('#confirmedMetric').textContent = confirmed.length.toLocaleString();
@@ -227,6 +231,11 @@ function formatTime(value) {
   if (!value) return '—';
   const match = String(value).match(/T?(\d{2}):(\d{2})/);
   return match ? `${match[1]}:${match[2]}` : '—';
+}
+
+function formatDate(value) {
+  const match = String(value || '').match(/(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[2]}-${match[3]}` : '—';
 }
 
 function renderThemes(selector, items, pending) {

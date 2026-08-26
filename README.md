@@ -58,9 +58,18 @@ cd stocktopic
 open http://127.0.0.1:8765
 ```
 
+以后重新配置OpenAI或企业微信，不需要删除 `.env`，运行：
+
+```bash
+./scripts/configure_integrations.sh
+```
+
 公网过渡版使用 `https://stock.bnken.com`，通过Cloudflare Tunnel转发到
 `http://127.0.0.1:8765`。首次打开使用`.env`中的管理用户名和密码登录；凭据仅保存在
 当前浏览器会话。iPhone Safari可通过“分享 → 添加到主屏幕”作为独立Web App使用。
+
+异动页盘中显示当日数据；收市后保留最近一个已采集交易日，供晚间复盘。首次安装若发生在
+收市后，系统不会绕过交易时段调用 `rt_k`，因此要到下一个交易窗口才会产生首批分钟异动。
 
 停用服务但保留全部数据：
 

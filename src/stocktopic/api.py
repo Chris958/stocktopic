@@ -5,7 +5,6 @@ import base64
 import hmac
 import logging
 from contextlib import asynccontextmanager
-from datetime import timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -106,13 +105,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/dashboard")
     async def dashboard():
-        now = service.clock.china_now()
-        anomalies = service.database.recent_anomalies(now - timedelta(hours=6))
+        latest_anomaly_date = service.database.latest_anomaly_trade_date()
+        anomalies = (
+            service.database.anomalies_for_trade_date(latest_anomaly_date)
+            if latest_anomaly_date
+            else []
+        )
         return {
             "health": await asyncio.to_thread(service.health),
             "themes": service.database.list_themes(),
-            "anomalies": anomalies[:200],
+            "anomalies": anomalies,
             "alerts": service.database.recent_alerts(100),
+            "data_context": {
+                "anomaly_trade_date": latest_anomaly_date,
+                "has_intraday_data": bool(latest_anomaly_date),
+            },
         }
 
     @app.get("/api/v1/themes")

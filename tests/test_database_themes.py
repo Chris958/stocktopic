@@ -1,8 +1,11 @@
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from unittest import TestCase
+from zoneinfo import ZoneInfo
 
 from stocktopic.db import Database
+from stocktopic.domain import Anomaly, Direction
 from stocktopic.themes import ThemeDiscovery
 
 
@@ -88,3 +91,27 @@ class ThemeDatabaseTests(TestCase):
         tags = self.db.tags_for_codes(["600000.SH"])["600000.SH"]
         self.assertEqual({item["tag"] for item in tags}, {"金融科技", "并购重组"})
 
+    def test_latest_trade_day_anomalies_remain_available_after_hours(self):
+        captured_at = datetime(2026, 8, 26, 14, 55, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self.db.save_anomalies(
+            [
+                Anomaly(
+                    code="600000.SH",
+                    name="浦发银行",
+                    captured_at=captured_at,
+                    direction=Direction.POSITIVE,
+                    severity=80,
+                    pct_change=7.5,
+                    change_5m=2.1,
+                    amount_delta=10_000_000,
+                    trade_delta=500,
+                    is_hard_event=False,
+                    event_types=("rapid_rise",),
+                    reasons=("5分钟快速拉升",),
+                )
+            ]
+        )
+        self.assertEqual(self.db.latest_anomaly_trade_date(), "2026-08-26")
+        items = self.db.anomalies_for_trade_date("2026-08-26")
+        self.assertEqual(items[0]["code"], "600000.SH")
+        self.assertEqual(items[0]["event_types"], ["rapid_rise"])
