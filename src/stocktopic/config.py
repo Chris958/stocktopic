@@ -39,6 +39,7 @@ class Settings:
     cluster_interval_minutes: int = 15
     stale_after_seconds: int = 120
     openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-5.5"
     wecom_corp_id: str = ""
     wecom_agent_id: str = ""
@@ -68,6 +69,10 @@ class Settings:
             host=os.getenv("STOCKTOPIC_HOST", "127.0.0.1"),
             port=int(os.getenv("STOCKTOPIC_PORT", "8765")),
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
+            openai_base_url=(
+                os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
+                or "https://api.openai.com/v1"
+            ),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5").strip(),
             wecom_corp_id=os.getenv("WECOM_CORP_ID", "").strip(),
             wecom_agent_id=os.getenv("WECOM_AGENT_ID", "").strip(),
@@ -97,4 +102,3 @@ class Settings:
 
 def generate_secret() -> str:
     return secrets.token_urlsafe(32)
-

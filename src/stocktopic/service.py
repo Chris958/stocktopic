@@ -30,7 +30,9 @@ class StockTopicService:
         self.discovery = ThemeDiscovery(self.database)
         self.scorer = ThemeScorer(self.database)
         self.explainer = OpenAIThemeExplainer(
-            settings.openai_api_key, settings.openai_model
+            settings.openai_api_key,
+            settings.openai_model,
+            settings.openai_base_url,
         )
         self.notifier = WeComNotifier(
             settings.wecom_corp_id,

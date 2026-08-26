@@ -35,6 +35,10 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   echo "首次配置：密钥只会保存在Mac mini本地的.env文件中。"
   read -r -s -p "Tushare Token: " TUSHARE_TOKEN_INPUT; echo
   read -r -s -p "OpenAI API Key: " OPENAI_KEY_INPUT; echo
+  read -r -p "OpenAI Base URL [https://api.openai.com/v1]: " OPENAI_BASE_URL_INPUT
+  OPENAI_BASE_URL_INPUT="${OPENAI_BASE_URL_INPUT:-https://api.openai.com/v1}"
+  read -r -p "OpenAI模型 [gpt-5.5]: " OPENAI_MODEL_INPUT
+  OPENAI_MODEL_INPUT="${OPENAI_MODEL_INPUT:-gpt-5.5}"
   read -r -p "企业微信 CorpID: " WECOM_CORP_INPUT
   read -r -p "企业微信 AgentID: " WECOM_AGENT_INPUT
   read -r -s -p "企业微信 Secret: " WECOM_SECRET_INPUT; echo
@@ -52,7 +56,8 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   {
     printf 'TUSHARE_TOKEN=%s\n' "$TUSHARE_TOKEN_INPUT"
     printf 'OPENAI_API_KEY=%s\n' "$OPENAI_KEY_INPUT"
-    printf 'OPENAI_MODEL=gpt-5.5\n'
+    printf 'OPENAI_BASE_URL=%s\n' "$OPENAI_BASE_URL_INPUT"
+    printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL_INPUT"
     printf 'WECOM_CORP_ID=%s\n' "$WECOM_CORP_INPUT"
     printf 'WECOM_AGENT_ID=%s\n' "$WECOM_AGENT_INPUT"
     printf 'WECOM_SECRET=%s\n' "$WECOM_SECRET_INPUT"
@@ -66,6 +71,17 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     printf 'STOCKTOPIC_PORT=8765\n'
     printf 'LOG_LEVEL=INFO\n'
   } > "$APP_DIR/.env"
+  chmod 600 "$APP_DIR/.env"
+fi
+
+if ! grep -q '^OPENAI_BASE_URL=' "$APP_DIR/.env"; then
+  OPENAI_BASE_URL_INPUT="https://api.openai.com/v1"
+  if [[ -t 0 ]]; then
+    echo "检测到旧版.env缺少OPENAI_BASE_URL。"
+    read -r -p "OpenAI Base URL [https://api.openai.com/v1]: " OPENAI_BASE_URL_INPUT
+    OPENAI_BASE_URL_INPUT="${OPENAI_BASE_URL_INPUT:-https://api.openai.com/v1}"
+  fi
+  printf '\nOPENAI_BASE_URL=%s\n' "$OPENAI_BASE_URL_INPUT" >> "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
 fi
 
@@ -86,4 +102,3 @@ echo "管理页面：http://127.0.0.1:8765"
 echo "健康检查：http://127.0.0.1:8765/health"
 echo "日志目录：$LOG_DIR"
 echo "请运行：$APP_DIR/scripts/doctor.sh"
-

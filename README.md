@@ -46,6 +46,11 @@ cd stocktopic
 
 安装程序会在本机提示输入Tushare、OpenAI及企业微信凭据，生成个人App API Token，并注册 `com.chris958.stocktopic` LaunchAgent。真实凭据只保存在权限为600的 `.env`，不会写入仓库。
 
+如果OpenAI Key来自兼容服务商，安装时把Base URL填写为服务商提供的API根地址，通常形如
+`https://provider.example/v1`。系统会自动请求其 `/responses` 端点；也允许直接填写完整的
+`https://provider.example/v1/responses`。该服务必须支持Responses API和 `web_search` 工具，
+否则题材命名可保留，但72小时新闻解释无法按当前方式执行。
+
 安装完成后：
 
 ```bash

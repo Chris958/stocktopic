@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -10,11 +11,19 @@ from .themes import candidate_for_ai
 
 
 class OpenAIThemeExplainer:
-    endpoint = "https://api.openai.com/v1/responses"
+    default_base_url = "https://api.openai.com/v1"
 
-    def __init__(self, api_key: str, model: str, timeout: float = 90.0):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str = default_base_url,
+        timeout: float = 90.0,
+    ):
         self.api_key = api_key.strip()
         self.model = model
+        self.base_url = (base_url or self.default_base_url).strip().rstrip("/")
+        self.endpoint = _responses_endpoint(self.base_url)
         self.timeout = timeout
 
     @property
@@ -95,6 +104,19 @@ def _output_text(response: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _responses_endpoint(base_url: str) -> str:
+    parsed = urllib.parse.urlsplit(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("OPENAI_BASE_URL must be an absolute http(s) URL")
+    if parsed.username or parsed.password:
+        raise ValueError("OPENAI_BASE_URL must not contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("OPENAI_BASE_URL must not contain a query string or fragment")
+    if parsed.path.rstrip("/").endswith("/responses"):
+        return base_url.rstrip("/")
+    return f"{base_url.rstrip('/')}/responses"
+
+
 def _parse_json_object(text: str) -> dict[str, Any]:
     cleaned = text.strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
@@ -123,4 +145,3 @@ def _sources(response: dict[str, Any]) -> list[dict[str, str]]:
                 if url:
                     found[url] = {"url": url, "title": str(annotation.get("title") or url)}
     return list(found.values())
-
