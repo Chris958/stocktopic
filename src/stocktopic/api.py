@@ -59,21 +59,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def authentication(request: Request, call_next):
-        if request.url.path == "/health":
-            return await call_next(request)
-        if not _authorized(request, settings):
-            return JSONResponse(
+        public_path = (
+            request.url.path in {"/", "/health", "/favicon.ico"}
+            or request.url.path.startswith("/static/")
+        )
+        if not public_path and not _authorized(request, settings):
+            response = JSONResponse(
                 {"detail": "Unauthorized"},
                 status_code=401,
                 headers={"WWW-Authenticate": 'Basic realm="StockTopic"'},
             )
-        if (
+        elif (
             request.method not in {"GET", "HEAD", "OPTIONS"}
             and request.headers.get("Authorization", "").startswith("Basic ")
             and request.headers.get("X-StockTopic-Request") != "1"
         ):
-            return JSONResponse({"detail": "CSRF check failed"}, status_code=403)
-        return await call_next(request)
+            response = JSONResponse({"detail": "CSRF check failed"}, status_code=403)
+        else:
+            response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; img-src 'self' data:; "
+            "style-src 'self' 'unsafe-inline'; script-src 'self'; "
+            "connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+            "form-action 'self'"
+        )
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     static_dir = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")

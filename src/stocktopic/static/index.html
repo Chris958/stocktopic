@@ -3,46 +3,160 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="题材情绪">
   <title>StockTopic · 题材情绪</title>
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header class="topbar">
-    <div><div class="eyebrow">MARKET FIRST · NEWS SECOND</div><h1>题材情绪</h1></div>
-    <div id="marketState" class="status-pill">正在连接</div>
+  <div class="ambient ambient-one" aria-hidden="true"></div>
+  <div class="ambient ambient-two" aria-hidden="true"></div>
+
+  <header class="app-header">
+    <div class="header-inner">
+      <button class="brand pressable" data-view="candidates" aria-label="返回候选题材">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span><strong>StockTopic</strong><small>资金共识 · 题材生命周期</small></span>
+      </button>
+      <nav class="desktop-nav" aria-label="主要页面">
+        <button class="nav-item active pressable" data-view="candidates" aria-current="page">发现</button>
+        <button class="nav-item pressable" data-view="confirmed">题材</button>
+        <button class="nav-item pressable" data-view="anomalies">异动</button>
+        <button class="nav-item pressable" data-view="alerts">预警</button>
+      </nav>
+      <div class="header-actions">
+        <button id="refresh" class="icon-button pressable" aria-label="刷新数据" title="刷新数据">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 5v6h-6"/></svg>
+        </button>
+        <button id="accountButton" class="avatar pressable" aria-label="账户设置">C</button>
+      </div>
+    </div>
+    <div class="scroll-edge" aria-hidden="true"></div>
   </header>
-  <main>
-    <section class="hero-grid">
-      <article class="metric"><span>主板覆盖</span><strong id="universeCount">—</strong><small>沪深主板 · 排除ST/退市</small></article>
-      <article class="metric"><span>实时频率</span><strong>5 min</strong><small>休市自动停止</small></article>
-      <article class="metric"><span>聚类频率</span><strong>15 min</strong><small>重要异动即时触发</small></article>
-      <article class="metric"><span>最近采集</span><strong id="lastRun">—</strong><small id="lastRunDetail">等待行情</small></article>
+
+  <main class="app-main">
+    <section class="market-hero" aria-labelledby="pageTitle">
+      <div class="hero-copy">
+        <p class="eyebrow">MARKET FIRST · NEWS SECOND</p>
+        <h1 id="pageTitle">发现市场正在形成的共识</h1>
+        <p id="pageSummary" class="hero-summary">从全市场异动反推题材，确认后再判断热度、持续性和接盘风险。</p>
+      </div>
+      <div id="marketState" class="market-state loading" role="status">
+        <span class="state-dot"></span>
+        <span><strong>正在连接</strong><small>等待服务状态</small></span>
+      </div>
     </section>
-    <nav class="tabs" aria-label="内容切换">
-      <button class="tab active" data-tab="candidates">候选题材 <span id="candidateCount">0</span></button>
-      <button class="tab" data-tab="confirmed">正式题材 <span id="confirmedCount">0</span></button>
-      <button class="tab" data-tab="anomalies">异动池 <span id="anomalyCount">0</span></button>
-      <button class="tab" data-tab="alerts">预警 <span id="alertCount">0</span></button>
-    </nav>
-    <section id="candidates" class="tab-panel active">
-      <div class="section-heading"><div><h2>机器发现，人工确认</h2><p>确认前仅显示成员和原因，绝不计算评分。</p></div><button id="refresh" class="quiet">刷新</button></div>
-      <div id="candidateList" class="card-list empty">暂无候选题材</div>
+
+    <section class="glance-grid" aria-label="系统概览">
+      <article class="glance-card">
+        <div class="glance-icon blue" aria-hidden="true">市</div>
+        <span>主板覆盖</span>
+        <strong id="universeCount">—</strong>
+        <small>沪深主板 · 排除 ST/退市</small>
+      </article>
+      <article class="glance-card">
+        <div class="glance-icon red" aria-hidden="true">候</div>
+        <span>待确认</span>
+        <strong id="candidateMetric">—</strong>
+        <small>确认前不生成评分</small>
+      </article>
+      <article class="glance-card">
+        <div class="glance-icon green" aria-hidden="true">题</div>
+        <span>正式题材</span>
+        <strong id="confirmedMetric">—</strong>
+        <small>独立计算三项分数</small>
+      </article>
+      <article class="glance-card">
+        <div class="glance-icon amber" aria-hidden="true">时</div>
+        <span>最近采集</span>
+        <strong id="lastRun">—</strong>
+        <small id="lastRunDetail">等待行情</small>
+      </article>
     </section>
-    <section id="confirmed" class="tab-panel">
-      <div class="section-heading"><div><h2>正式题材</h2><p>Heat、Persistence和Entry Risk独立呈现。</p></div></div>
-      <div id="confirmedList" class="card-list empty">暂无已确认题材</div>
-    </section>
-    <section id="anomalies" class="tab-panel">
-      <div class="section-heading"><div><h2>全市场异动池</h2><p>硬事件直接进入，普通股票需同时满足两项条件。</p></div></div>
-      <div id="anomalyList" class="event-list empty">当前没有异动</div>
-    </section>
-    <section id="alerts" class="tab-panel">
-      <div class="section-heading"><div><h2>系统预警</h2><p>高价值机会、接盘风险和数据异常。</p></div><button id="wecomTest" class="quiet">测试微信</button></div>
-      <div id="alertList" class="event-list empty">暂无预警</div>
+
+    <section class="content-shell">
+      <div class="section-toolbar">
+        <div>
+          <p class="section-kicker" id="sectionKicker">候选题材</p>
+          <h2 id="sectionTitle">机器发现，人工确认</h2>
+          <p id="sectionDescription">股票成员由确定性规则产生，AI只负责命名与解释。</p>
+        </div>
+        <div class="count-badge" id="sectionCount">0</div>
+      </div>
+
+      <section id="candidates" class="view-panel active" aria-label="候选题材">
+        <div id="candidateList" class="theme-list skeleton-list" aria-live="polite">
+          <div class="skeleton-card"></div><div class="skeleton-card"></div>
+        </div>
+      </section>
+      <section id="confirmed" class="view-panel" aria-label="正式题材">
+        <div id="confirmedList" class="theme-list"></div>
+      </section>
+      <section id="anomalies" class="view-panel" aria-label="异动池">
+        <div class="filter-row" role="group" aria-label="异动方向筛选">
+          <button class="filter-chip active pressable" data-filter="all">全部</button>
+          <button class="filter-chip pressable" data-filter="positive">上涨</button>
+          <button class="filter-chip pressable" data-filter="negative">负反馈</button>
+        </div>
+        <div id="anomalyList" class="event-list"></div>
+      </section>
+      <section id="alerts" class="view-panel" aria-label="预警">
+        <div class="inline-action">
+          <p>高价值机会、接盘风险和数据异常会同步推送企业微信。</p>
+          <button id="wecomTest" class="secondary-button pressable">测试企业微信</button>
+        </div>
+        <div id="alertList" class="event-list"></div>
+      </section>
     </section>
   </main>
-  <div id="toast" role="status" aria-live="polite"></div>
+
+  <nav class="mobile-tabbar" aria-label="移动端导航">
+    <button class="mobile-tab active pressable" data-view="candidates" aria-current="page"><span class="tab-icon">⌁</span><span>发现</span><b id="candidateCount">0</b></button>
+    <button class="mobile-tab pressable" data-view="confirmed"><span class="tab-icon">▱</span><span>题材</span><b id="confirmedCount">0</b></button>
+    <button class="mobile-tab pressable" data-view="anomalies"><span class="tab-icon">ϟ</span><span>异动</span><b id="anomalyCount">0</b></button>
+    <button class="mobile-tab pressable" data-view="alerts"><span class="tab-icon">◌</span><span>预警</span><b id="alertCount">0</b></button>
+  </nav>
+
+  <div id="sheetBackdrop" class="sheet-backdrop" hidden></div>
+  <section id="actionSheet" class="action-sheet" role="dialog" aria-modal="true" aria-labelledby="sheetTitle" hidden>
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <div><p class="section-kicker" id="sheetKicker">题材操作</p><h2 id="sheetTitle">确认题材</h2></div>
+      <button class="close-button pressable" data-close-sheet aria-label="关闭">×</button>
+    </div>
+    <form id="sheetForm">
+      <div id="sheetFields"></div>
+      <p id="sheetHint" class="sheet-hint"></p>
+      <div class="sheet-actions">
+        <button type="button" class="secondary-button pressable" data-close-sheet>取消</button>
+        <button id="sheetSubmit" type="submit" class="primary-button pressable">确认</button>
+      </div>
+    </form>
+  </section>
+
+  <div id="loginBackdrop" class="login-backdrop">
+    <section class="login-card" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
+      <div class="login-symbol" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="eyebrow">STOCKTOPIC</p>
+      <h2 id="loginTitle">进入题材情绪</h2>
+      <p>凭据只保存在当前浏览器会话，关闭页面后自动清除。</p>
+      <form id="loginForm">
+        <label>用户名<input id="loginUsername" name="username" autocomplete="username" value="admin" required></label>
+        <label>密码<input id="loginPassword" name="password" type="password" autocomplete="current-password" required></label>
+        <p id="loginError" class="form-error" aria-live="polite"></p>
+        <button id="loginSubmit" class="primary-button pressable" type="submit">安全登录</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
   <script src="/static/app.js" defer></script>
 </body>
 </html>

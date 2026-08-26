@@ -16,7 +16,8 @@
 - 独立计算 Theme Heat、Theme Persistence、Entry Risk，并识别生命周期与龙头—板块背离。
 - 企业微信高价值机会、高风险和数据故障推送，含数据库级去重。
 - Mac mini `launchd` 常驻、自检、日志、每日备份、旧快照压缩归档。
-- 私人管理页面和SwiftUI iOS客户端骨架。
+- Apple风格响应式Web App，支持会话登录、手机底部导航、题材确认/合并/拆分和添加到主屏幕。
+- SwiftUI iOS客户端骨架。
 
 ## 数据链路
 
@@ -51,6 +52,10 @@ cd stocktopic
 ./scripts/doctor.sh
 open http://127.0.0.1:8765
 ```
+
+公网过渡版使用 `https://stock.bnken.com`，通过Cloudflare Tunnel转发到
+`http://127.0.0.1:8765`。首次打开使用`.env`中的管理用户名和密码登录；凭据仅保存在
+当前浏览器会话。iPhone Safari可通过“分享 → 添加到主屏幕”作为独立Web App使用。
 
 停用服务但保留全部数据：
 
@@ -91,4 +96,4 @@ python3 -m venv .venv
 .venv/bin/pytest -q
 ```
 
-详细规则见 [MVP规格](docs/MVP_SPEC.md)、[评分说明](docs/SCORING.md)、[运维手册](docs/OPERATIONS.md) 和 [外网访问](docs/CLOUDFLARE.md)。
+详细规则见 [MVP规格](docs/MVP_SPEC.md)、[评分说明](docs/SCORING.md)、[运维手册](docs/OPERATIONS.md) 和 [stock.bnken.com接入](docs/CLOUDFLARE.md)。

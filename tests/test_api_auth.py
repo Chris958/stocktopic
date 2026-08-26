@@ -23,9 +23,18 @@ def test_api_auth_and_csrf_guard():
         app.state.service.database.initialize()
         client = TestClient(app)
 
+        assert client.get("/").status_code == 200
+        assert client.get("/static/app.js").status_code == 200
+        assert client.get("/static/manifest.webmanifest").status_code == 200
+        icon = client.get("/static/app-icon-180.png")
+        assert icon.status_code == 200
+        assert icon.headers["content-type"] == "image/png"
         assert client.get("/api/v1/dashboard").status_code == 401
         bearer = {"Authorization": "Bearer app-token"}
-        assert client.get("/api/v1/dashboard", headers=bearer).status_code == 200
+        dashboard = client.get("/api/v1/dashboard", headers=bearer)
+        assert dashboard.status_code == 200
+        assert dashboard.headers["cache-control"] == "no-store"
+        assert dashboard.headers["x-frame-options"] == "DENY"
 
         basic_value = base64.b64encode(b"admin:password").decode()
         basic = {"Authorization": f"Basic {basic_value}"}
