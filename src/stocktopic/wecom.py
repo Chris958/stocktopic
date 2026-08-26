@@ -7,6 +7,8 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from .http import open_url
+
 
 class WeComNotifier:
     def __init__(
@@ -64,8 +66,9 @@ class WeComNotifier:
             if self._token and time.time() < self._expires_at:
                 return self._token
             query = urllib.parse.urlencode({"corpid": self.corp_id, "corpsecret": self.secret})
-            with urllib.request.urlopen(
-                f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?{query}", timeout=self.timeout
+            with open_url(
+                f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?{query}",
+                timeout=self.timeout,
             ) as response:
                 result = json.loads(response.read().decode("utf-8"))
             if int(result.get("errcode", -1)) != 0:
@@ -81,5 +84,5 @@ class WeComNotifier:
             method="POST",
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with open_url(request, timeout=self.timeout) as response:
             return json.loads(response.read().decode("utf-8"))

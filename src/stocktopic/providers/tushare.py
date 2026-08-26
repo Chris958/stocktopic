@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Any
 
 from ..domain import Quote
+from ..http import open_url
 
 
 class TushareError(RuntimeError):
@@ -48,7 +49,7 @@ class TushareClient:
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with open_url(request, timeout=self.timeout) as response:
                 result = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError) as error:
             raise TushareError("network", str(error)) from error
