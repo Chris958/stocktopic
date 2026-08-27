@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import logging
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time, timedelta
 from typing import Any
 
@@ -343,31 +344,65 @@ class StockTopicService:
             str(item.get("final_name") or item.get("suggested_name") or item["provisional_name"])
             for item in themes
         ]
+        with self._ai_lock:
+            selected = [
+                theme for theme in themes if int(theme["id"]) not in self._ai_inflight
+            ]
+            self._ai_inflight.update(int(theme["id"]) for theme in selected)
+        started_at = self.clock.china_now().isoformat()
+        self.database.set_metadata("last_catalyst_refresh_started_at", started_at)
+
+        def update_one(theme: dict[str, Any]) -> tuple[int, int]:
+            theme_id = int(theme["id"])
+            existing = [
+                {
+                    "title": item.get("title"),
+                    "url": item.get("source_url"),
+                    "published_at": item.get("published_at"),
+                }
+                for item in theme.get("catalysts", [])[:12]
+            ]
+            item = self.explainer.explain(theme, names, existing)
+            self.database.save_ai_explanation(theme_id, item)
+            inserted_count = self.database.save_theme_catalysts(
+                theme_id, item.get("catalysts", [])
+            )
+            self.database.set_suggested_name(theme_id, item["suggested_name"])
+            return theme_id, inserted_count
+
         updated = 0
         inserted = 0
-        with self._ai_lock:
-            for theme in themes:
-                theme_id = int(theme["id"])
-                try:
-                    existing = [
-                        {
-                            "title": item.get("title"),
-                            "url": item.get("source_url"),
-                            "published_at": item.get("published_at"),
-                        }
-                        for item in theme.get("catalysts", [])[:12]
-                    ]
-                    item = self.explainer.explain(theme, names, existing)
-                    self.database.save_ai_explanation(theme_id, item)
-                    inserted += self.database.save_theme_catalysts(
-                        theme_id, item.get("catalysts", [])
-                    )
-                    self.database.set_suggested_name(theme_id, item["suggested_name"])
-                    updated += 1
-                except Exception as error:
-                    logger.warning("Catalyst refresh failed for theme %s: %s", theme_id, error)
-        self.database.set_metadata("last_catalyst_refresh_at", self.clock.china_now().isoformat())
-        return {"status": "success", "updated": updated, "new_catalysts": inserted}
+        failures = 0
+        try:
+            with ThreadPoolExecutor(max_workers=min(3, max(1, len(selected)))) as executor:
+                futures = {
+                    executor.submit(update_one, theme): int(theme["id"])
+                    for theme in selected
+                }
+                for future in as_completed(futures):
+                    theme_id = futures[future]
+                    try:
+                        _, inserted_count = future.result()
+                        inserted += inserted_count
+                        updated += 1
+                    except Exception as error:
+                        failures += 1
+                        logger.warning("Catalyst refresh failed for theme %s: %s", theme_id, error)
+        finally:
+            with self._ai_lock:
+                self._ai_inflight.difference_update(int(theme["id"]) for theme in selected)
+        completed_at = self.clock.china_now().isoformat()
+        self.database.set_metadata("last_catalyst_refresh_at", completed_at)
+        self.database.set_metadata(
+            "last_catalyst_refresh_result",
+            f"updated={updated},new={inserted},failed={failures}",
+        )
+        return {
+            "status": "success" if updated else "degraded",
+            "updated": updated,
+            "new_catalysts": inserted,
+            "failed": failures,
+        }
 
     def _catalyst_refresh_slot(self, now: datetime) -> str | None:
         slots = sorted(
@@ -588,6 +623,12 @@ class StockTopicService:
             },
             "latest_catalyst_refresh_at": self.database.get_metadata(
                 "last_catalyst_refresh_at"
+            ),
+            "latest_catalyst_refresh_started_at": self.database.get_metadata(
+                "last_catalyst_refresh_started_at"
+            ),
+            "latest_catalyst_refresh_result": self.database.get_metadata(
+                "last_catalyst_refresh_result"
             ),
             "daily_metrics_trade_date": self.database.get_metadata(
                 "daily_metrics_synced_date"

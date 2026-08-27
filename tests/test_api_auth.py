@@ -32,8 +32,13 @@ def test_api_auth_and_csrf_guard():
         app.state.service.database.initialize()
         client = TestClient(app)
 
-        assert client.get("/").status_code == 200
-        assert client.get("/static/app.js").status_code == 200
+        page = client.get("/")
+        assert page.status_code == 200
+        assert "app.js?v=0.2.1" in page.text
+        assert page.headers["cache-control"] == "no-store, must-revalidate"
+        script = client.get("/static/app.js")
+        assert script.status_code == 200
+        assert script.headers["cache-control"] == "no-store, must-revalidate"
         assert client.get("/static/manifest.webmanifest").status_code == 200
         icon = client.get("/static/app-icon-180.png")
         assert icon.status_code == 200

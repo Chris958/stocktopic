@@ -91,6 +91,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
+        elif request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, must-revalidate"
         return response
 
     static_dir = Path(__file__).with_name("static")
