@@ -50,7 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.1.0",
+        version="0.2.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -108,7 +108,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def dashboard():
         latest_anomaly_date = service.database.latest_anomaly_trade_date()
         anomalies = (
-            service.database.anomalies_for_trade_date(latest_anomaly_date)
+            service.database.high_signal_anomalies_for_trade_date(
+                latest_anomaly_date,
+                settings.anomaly_display_min_severity,
+            )
             if latest_anomaly_date
             else []
         )
@@ -184,8 +187,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ]
         item = await asyncio.to_thread(service.explainer.explain, theme, names)
         service.database.save_ai_explanation(theme_id, item)
+        service.database.save_theme_catalysts(theme_id, item.get("catalysts", []))
         service.database.set_suggested_name(theme_id, item["suggested_name"])
         return {key: value for key, value in item.items() if key != "raw"}
+
+    @app.post("/api/v1/admin/refresh-catalysts")
+    async def refresh_catalysts():
+        if not service.explainer.enabled:
+            raise HTTPException(status_code=503, detail="OpenAI API not configured")
+        return await asyncio.to_thread(service.refresh_theme_catalysts)
 
     @app.post("/api/v1/admin/run-once")
     async def run_once():

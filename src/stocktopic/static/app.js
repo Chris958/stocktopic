@@ -234,7 +234,7 @@ function formatTime(value) {
 }
 
 function formatDate(value) {
-  const match = String(value || '').match(/(\d{4})-(\d{2})-(\d{2})/);
+  const match = String(value || '').match(/(\d{4})-?(\d{2})-?(\d{2})/);
   return match ? `${match[2]}-${match[3]}` : '—';
 }
 
@@ -257,11 +257,16 @@ function renderThemes(selector, items, pending) {
 function themeCard(theme, pending) {
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
   const activeMembers = theme.members.filter(member => member.active);
-  const members = activeMembers.map(member => {
-    const reasons = (member.evidence?.anomaly_reasons || []).join('；') || '共享题材标签';
-    return `<div class="member" title="${escapeHtml(reasons)}"><strong>${escapeHtml(member.name)}</strong><small>${escapeHtml(member.code)}</small></div>`;
-  }).join('');
+  const returnLabel = pending ? '发现后' : '确认后';
+  const members = activeMembers.map((member, index) => memberRow(member, index + 1, returnLabel)).join('');
   const score = theme.score;
+  const summary = theme.market_summary || {};
+  const summaryHtml = `<div class="market-summary">
+    ${summaryMetric('当前平均', formatPct(summary.current_average_pct))}
+    ${summaryMetric(`${returnLabel}平均`, formatPct(summary.confirmed_average_return))}
+    ${summaryMetric('上涨家数', `${summary.up_count ?? 0}/${summary.member_count ?? activeMembers.length}`)}
+    ${summaryMetric('涨停 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
+  </div>`;
   const scoreHtml = score ? `<div class="score-grid">
     ${scoreCell('热度', score.heat, 'heat')}
     ${scoreCell('持续性', score.persistence, 'persistence')}
@@ -280,13 +285,69 @@ function themeCard(theme, pending) {
   </div>` : `<div class="card-actions">
     <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">更新新闻解释</button>
   </div>`;
+  const explanation = theme.latest_explanation;
+  const catalystHtml = catalystList(theme.catalysts || [], explanation);
   return `<article class="theme-card">
     <div class="theme-head"><div><div class="theme-title">${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
     ${scoreHtml}
-    <div class="members" aria-label="题材成员">${members}</div>
-    <p class="theme-footnote">${activeMembers.length}只成员 · Day 1 ${escapeHtml(theme.day1_date)}</p>
+    ${summaryHtml}
+    <div class="member-section-head"><div><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · 龙头信号为辅助判断</small></div><span>${activeMembers.length}只</span></div>
+    <div class="member-table" role="table" aria-label="${escapeHtml(title)}股票行情">
+      <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span></div>
+      <div class="member-table-body">${members}</div>
+    </div>
+    <p class="theme-footnote">Day 1 ${escapeHtml(theme.day1_date)} · 行情 ${escapeHtml(formatDataTime(summary.market_data_at))} · 市值 ${escapeHtml(formatDate(summary.metric_trade_date))}</p>
+    ${catalystHtml}
     ${actions}
   </article>`;
+}
+
+function memberRow(member, position, returnLabel) {
+  const reasons = (member.evidence?.anomaly_reasons || []).join('；') || '共享题材标签';
+  const current = Number(member.current_pct);
+  const cumulative = member.confirmed_return;
+  const leader = Number(member.leader_rank) === 1;
+  const boardHistory = (member.board_history || [])
+    .map(item => `${formatDate(item.trade_date)} ${item.status || item.tag || '普通'}`)
+    .join(' · ');
+  const board = member.board_status || (member.latest_board_tag ? `近期${member.latest_board_tag}` : '—');
+  const sequence = member.limit_sequence ? `第${member.limit_sequence}封板` : '';
+  const follow = Number(member.follow_count_30m || 0);
+  return `<div class="member-row ${leader ? 'leader-row' : ''}" role="row" title="${escapeHtml(reasons)}">
+    <div class="member-name" role="cell"><span class="member-rank">${position}</span><span><strong>${escapeHtml(member.name)}</strong><small>${escapeHtml(member.code)}${member.signal_active ? ' · 当前异动' : ''}</small></span>${leader ? '<b class="leader-badge">龙头候选</b>' : ''}</div>
+    <div class="member-number ${valueClass(current)}" role="cell"><strong>${formatPct(current)}</strong><small>${escapeHtml(formatPrice(member.current_price))}</small></div>
+    <div class="member-number ${valueClass(cumulative)}" role="cell"><strong>${formatPct(cumulative)}</strong><small>${escapeHtml(returnLabel)}累计</small></div>
+    <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, timeLabel(member.first_limit_time)].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
+    <div class="member-number neutral" role="cell"><strong>${formatMarketCap(member.circ_mv_billion)}</strong><small>${member.turnover_rate != null ? `换手 ${Number(member.turnover_rate).toFixed(1)}%` : '亿元'}</small></div>
+    <div class="drive-cell" role="cell"><strong>${follow}</strong><small>30分钟跟随</small></div>
+  </div>`;
+}
+
+function summaryMetric(label, value) {
+  return `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function catalystList(items, explanation) {
+  if (!items.length && !explanation) return '';
+  const rows = items.map(item => {
+    const url = safeUrl(item.source_url);
+    const title = url
+      ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a>`
+      : `<strong>${escapeHtml(item.title)}</strong>`;
+    return `<li><div><span class="catalyst-type">${escapeHtml(item.catalyst_type || '更新')}</span><span class="evidence-level">${escapeHtml(item.evidence_level || '合理推断')}</span><time>${escapeHtml(formatCatalystTime(item.published_at || item.captured_at))}</time></div>${title}<p>${escapeHtml(item.summary)}</p></li>`;
+  }).join('');
+  const summary = explanation?.catalyst_summary
+    ? `<p class="catalyst-summary">${escapeHtml(explanation.catalyst_summary)}</p>` : '';
+  return `<section class="catalyst-panel"><div class="catalyst-head"><div><strong>新闻催化</strong><small>定时更新 · 事实与推断分开标记</small></div><time>${escapeHtml(formatDataTime(explanation?.created_at))}</time></div>${summary}<ol>${rows}</ol></section>`;
+}
+
+function safeUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+  } catch (_) {
+    return '';
+  }
 }
 
 function scoreCell(label, value, className) {
@@ -301,12 +362,51 @@ function renderAnomalies(items) {
   $('#anomalyList').innerHTML = filtered.length ? filtered.map(item => {
     const negative = item.direction === 'negative';
     const pct = Number(item.pct_change || 0);
+    const tags = [...(item.themes || []), ...(item.industries || [])].slice(0, 5);
     return `<article class="event-card">
       <time class="event-time">${escapeHtml(formatTime(item.captured_at))}</time>
-      <div class="event-main"><strong>${escapeHtml(item.name)} · ${escapeHtml(item.code)}</strong><small>${escapeHtml((item.reasons || []).join('；'))}</small></div>
+      <div class="event-main"><strong>${escapeHtml(item.name)} · ${escapeHtml(item.code)}</strong><small>${escapeHtml((item.reasons || []).join('；'))}</small>${tags.length ? `<div class="event-tags">${tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')}</div>` : ''}</div>
       <div class="event-value ${negative ? 'negative' : ''}">${pct > 0 ? '+' : ''}${pct.toFixed(2)}%</div>
     </article>`;
   }).join('') : emptyState('当前没有匹配异动', '系统仅显示符合平衡模式规则的股票。');
+}
+
+function formatPct(value) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '—';
+  const number = Number(value);
+  return `${number > 0 ? '+' : ''}${number.toFixed(2)}%`;
+}
+
+function valueClass(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number === 0) return 'neutral';
+  return number > 0 ? 'rise' : 'fall';
+}
+
+function formatPrice(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? `¥${number.toFixed(2)}` : '价格待采集';
+}
+
+function formatMarketCap(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) return '—';
+  return number >= 1000 ? `${(number / 1000).toFixed(2)}千亿` : `${number.toFixed(number >= 100 ? 0 : 1)}亿`;
+}
+
+function timeLabel(value) {
+  const digits = String(value || '').replace(/\D/g, '').padStart(6, '0');
+  return digits && digits !== '000000' ? `${digits.slice(0, 2)}:${digits.slice(2, 4)}` : '';
+}
+
+function formatDataTime(value) {
+  if (!value) return '待采集';
+  return `${formatDate(value)} ${formatTime(value)}`;
+}
+
+function formatCatalystTime(value) {
+  if (!value) return '时间待确认';
+  return formatDataTime(value);
 }
 
 function renderAlerts(items) {

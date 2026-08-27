@@ -12,12 +12,24 @@ from .domain import CandidateStatus
 class ThemeDiscovery:
     """Deterministic tag clustering. AI is intentionally absent from membership decisions."""
 
-    def __init__(self, database: Database):
+    def __init__(
+        self,
+        database: Database,
+        minimum_severity: float = 65.0,
+        maximum_candidates: int = 8,
+    ):
         self.database = database
+        self.minimum_severity = minimum_severity
+        self.maximum_candidates = maximum_candidates
 
     def discover(self, now: datetime, lookback_minutes: int = 20) -> list[int]:
         since = now - timedelta(minutes=lookback_minutes)
-        anomalies = self.database.recent_anomalies(since, direction="positive")
+        anomalies = [
+            item
+            for item in self.database.recent_anomalies(since, direction="positive")
+            if item.get("is_hard_event")
+            or float(item.get("severity") or 0) >= self.minimum_severity
+        ]
         latest_by_code: dict[str, dict[str, Any]] = {}
         for anomaly in anomalies:
             latest_by_code.setdefault(str(anomaly["code"]), anomaly)
@@ -39,32 +51,80 @@ class ThemeDiscovery:
                             "tag_source": tag["source"],
                             "anomaly_reasons": anomaly["reasons"],
                             "severity": anomaly["severity"],
+                            "is_hard_event": bool(anomaly.get("is_hard_event")),
                         },
                     }
                 )
         created: list[int] = []
-        eligible: list[tuple[str, str, list[dict[str, Any]]]] = []
+        eligible: list[dict[str, Any]] = []
         for (tag_type, tag), members in clusters.items():
             unique_members = {member["code"]: member for member in members}
             minimum = 4 if tag_type == "industry" else 3
             if len(unique_members) < minimum:
                 continue
-            ordered_members = [unique_members[code] for code in sorted(unique_members)]
-            eligible.append((tag_type, tag, ordered_members))
+            ordered_members = sorted(
+                unique_members.values(),
+                key=lambda item: float(item["evidence"].get("severity") or 0),
+                reverse=True,
+            )
+            severities = [
+                float(member["evidence"].get("severity") or 0)
+                for member in ordered_members
+            ]
+            hard_count = sum(
+                bool(member["evidence"].get("is_hard_event"))
+                for member in ordered_members
+            )
+            average_severity = sum(severities) / len(severities)
+            if hard_count == 0 and average_severity < 75:
+                continue
+            strength = (
+                hard_count * 24
+                + sum(severities[:6]) / 6
+                + min(18, len(ordered_members) * 2)
+                + (8 if tag_type == "theme" else 0)
+            )
+            eligible.append(
+                {
+                    "tag_type": tag_type,
+                    "tag": tag,
+                    "members": ordered_members,
+                    "codes": set(unique_members),
+                    "hard_count": hard_count,
+                    "average_severity": average_severity,
+                    "strength": strength,
+                }
+            )
 
         specific_sets = [
-            {member["code"] for member in members}
-            for tag_type, _, members in eligible
-            if tag_type != "industry"
+            item["codes"] for item in eligible if item["tag_type"] != "industry"
         ]
-        for tag_type, tag, ordered_members in eligible:
-            member_codes = {member["code"] for member in ordered_members}
+        eligible.sort(key=lambda item: float(item["strength"]), reverse=True)
+        selected: list[dict[str, Any]] = []
+        for item in eligible:
+            tag_type = str(item["tag_type"])
+            member_codes = item["codes"]
             if tag_type == "industry" and any(
                 len(member_codes & specific) / len(member_codes) >= 0.6
                 for specific in specific_sets
             ):
                 # Prefer the smaller, more specific shared logic over a broad industry label.
                 continue
+            if any(
+                len(member_codes & previous["codes"])
+                / max(1, min(len(member_codes), len(previous["codes"])))
+                >= 0.72
+                for previous in selected
+            ):
+                continue
+            selected.append(item)
+            if len(selected) >= self.maximum_candidates:
+                break
+
+        for item in selected:
+            tag_type = str(item["tag_type"])
+            tag = str(item["tag"])
+            ordered_members = item["members"]
             fingerprint = self.database.recent_live_theme_fingerprint(
                 tag, "positive", now - timedelta(days=10)
             ) or hashlib.sha256(
@@ -72,7 +132,8 @@ class ThemeDiscovery:
             ).hexdigest()
             reason = (
                 f"最近{lookback_minutes}分钟内有{len(ordered_members)}只异动股票"
-                f"共享{tag_type}标签“{tag}”；成员由标签与异动规则确定"
+                f"共享{tag_type}标签“{tag}”；高强度事件{item['hard_count']}只，"
+                f"平均异动强度{item['average_severity']:.1f}；成员由标签与异动规则确定"
             )
             theme_id = self.database.upsert_candidate(
                 fingerprint=fingerprint,

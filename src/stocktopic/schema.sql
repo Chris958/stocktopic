@@ -71,6 +71,22 @@ CREATE TABLE IF NOT EXISTS daily_limits (
     PRIMARY KEY (trade_date, code)
 );
 
+CREATE TABLE IF NOT EXISTS stock_daily_metrics (
+    trade_date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    close REAL,
+    turnover_rate REAL,
+    volume_ratio REAL,
+    float_share REAL,
+    total_mv REAL,
+    circ_mv REAL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (trade_date, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_metrics_code_date
+ON stock_daily_metrics(code, trade_date DESC);
+
 CREATE TABLE IF NOT EXISTS quote_snapshots (
     trade_date TEXT NOT NULL,
     slot TEXT NOT NULL,
@@ -190,6 +206,24 @@ CREATE TABLE IF NOT EXISTS ai_explanations (
     sources_json TEXT NOT NULL,
     raw_response_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS theme_catalysts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    theme_id INTEGER NOT NULL REFERENCES candidate_themes(id) ON DELETE CASCADE,
+    fingerprint TEXT NOT NULL,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    source_name TEXT,
+    source_url TEXT,
+    published_at TEXT,
+    catalyst_type TEXT NOT NULL DEFAULT 'update',
+    evidence_level TEXT NOT NULL DEFAULT 'inference',
+    captured_at TEXT NOT NULL,
+    UNIQUE(theme_id, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_theme_catalysts_time
+ON theme_catalysts(theme_id, captured_at DESC);
 
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

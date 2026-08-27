@@ -9,15 +9,15 @@ from .domain import Anomaly, Direction, Quote, StockContext
 
 @dataclass(frozen=True, slots=True)
 class DetectorThresholds:
-    strong_pct: float = 5.0
-    rapid_5m_pct: float = 2.0
+    strong_pct: float = 6.5
+    rapid_5m_pct: float = 2.5
     hard_rapid_5m_pct: float = 4.0
     negative_pct: float = -5.0
     hard_negative_pct: float = -7.0
-    amount_delta: float = 30_000_000.0
-    hard_amount_delta: float = 50_000_000.0
-    acceleration_ratio: float = 2.0
-    minimum_trade_delta: int = 300
+    amount_delta: float = 50_000_000.0
+    hard_amount_delta: float = 80_000_000.0
+    acceleration_ratio: float = 2.5
+    minimum_trade_delta: int = 600
     limit_tolerance: float = 0.005
 
 
@@ -105,24 +105,25 @@ class AnomalyDetector:
             event_types.append("hard_rapid_rise")
             reasons.append(f"5分钟上涨{change_5m:.2f}%且增量成交额较大")
 
-        conditions = 0
+        price_confirmed = False
+        liquidity_confirmed = False
         if quote.pct_change >= t.strong_pct:
-            conditions += 1
+            price_confirmed = True
             event_types.append("strong_gain")
             reasons.append(f"当日涨幅{quote.pct_change:.2f}%")
         if change_5m >= t.rapid_5m_pct:
-            conditions += 1
+            price_confirmed = True
             event_types.append("rapid_rise")
             reasons.append(f"5分钟上涨{change_5m:.2f}%")
         if amount_delta >= t.amount_delta and amount_acceleration >= t.acceleration_ratio:
-            conditions += 1
+            liquidity_confirmed = True
             event_types.append("amount_acceleration")
             reasons.append(f"成交额增速达到前一周期的{amount_acceleration:.1f}倍")
         if trade_delta >= t.minimum_trade_delta and trade_acceleration >= t.acceleration_ratio:
-            conditions += 1
+            liquidity_confirmed = True
             event_types.append("trade_acceleration")
             reasons.append(f"成交笔数增速达到前一周期的{trade_acceleration:.1f}倍")
-        if not hard and conditions < 2:
+        if not hard and not (price_confirmed and liquidity_confirmed):
             return None
         severity = min(
             100.0,

@@ -27,7 +27,11 @@ class StockTopicService:
         self.database = Database(settings.db_path, settings.archive_dir)
         self.provider = TushareClient(settings.tushare_token)
         self.detector = AnomalyDetector()
-        self.discovery = ThemeDiscovery(self.database)
+        self.discovery = ThemeDiscovery(
+            self.database,
+            settings.anomaly_discovery_min_severity,
+            settings.maximum_candidates_per_run,
+        )
         self.scorer = ThemeScorer(self.database)
         self.explainer = OpenAIThemeExplainer(
             settings.openai_api_key,
@@ -74,6 +78,28 @@ class StockTopicService:
             self.sync_kpl_concepts(previous_date)
         if self.database.calendar_status(compact):
             self.sync_daily_limits(now)
+        recent_dates = self.database.open_trade_dates(compact, 6)
+        current_metrics_ready = bool(
+            self.database.calendar_status(compact) and now.time() >= time(17, 0)
+        )
+        reference_date = (
+            compact
+            if current_metrics_ready
+            else previous_date or (recent_dates[0] if recent_dates else None)
+        )
+        if (
+            reference_date
+            and self.database.get_metadata("daily_metrics_synced_date") != reference_date
+        ):
+            self.sync_daily_metrics(reference_date)
+        if (
+            recent_dates
+            and self.database.get_metadata("kpl_history_bootstrapped") != recent_dates[0]
+        ):
+            for trade_date in reversed(recent_dates[:5]):
+                if not self.database.has_kpl_events_for_date(trade_date):
+                    self.sync_kpl_events(trade_date)
+            self.database.set_metadata("kpl_history_bootstrapped", recent_dates[0])
 
     def sync_calendar(self, now: datetime | None = None) -> int:
         now = now or self.clock.china_now()
@@ -120,6 +146,21 @@ class StockTopicService:
             # Limit data improves accuracy but quote collection can still run without it.
             self.database.finish_run(run_id, "degraded", detail=str(error))
             logger.warning("Daily limit sync degraded: %s", error)
+            return 0
+
+    def sync_daily_metrics(self, trade_date: str) -> int:
+        run_id = self.database.begin_run("sync_daily_metrics")
+        try:
+            rows = self.provider.daily_basic(trade_date)
+            count = self.database.upsert_daily_metrics(rows)
+            if count < 2000:
+                raise RuntimeError(f"Daily metric coverage abnormal: {count}")
+            self.database.set_metadata("daily_metrics_synced_date", trade_date)
+            self.database.finish_run(run_id, "success", count)
+            return count
+        except Exception as error:
+            self.database.finish_run(run_id, "degraded", detail=str(error))
+            logger.warning("Daily metric sync degraded: %s", error)
             return 0
 
     def sync_kpl_events(self, trade_date: str) -> int:
@@ -270,12 +311,73 @@ class StockTopicService:
                 try:
                     item = self.explainer.explain(theme, other_names)
                     self.database.save_ai_explanation(theme_id, item)
+                    self.database.save_theme_catalysts(
+                        theme_id, item.get("catalysts", [])
+                    )
                     self.database.set_suggested_name(theme_id, item["suggested_name"])
                 except Exception as error:
                     logger.warning("AI explanation failed for theme %s: %s", theme_id, error)
         finally:
             with self._ai_lock:
                 self._ai_inflight.difference_update(selected)
+
+    def refresh_theme_catalysts(self, limit: int = 8) -> dict[str, Any]:
+        if not self.explainer.enabled:
+            return {"status": "disabled", "updated": 0, "new_catalysts": 0}
+        themes = [
+            item
+            for item in self.database.list_themes()
+            if item.get("status") in {"confirmed", "pending"}
+        ]
+        themes.sort(
+            key=lambda item: (
+                item.get("status") == "confirmed",
+                sum(bool(member.get("signal_active")) for member in item.get("members", [])),
+                float((item.get("score") or {}).get("heat") or 0),
+                float((item.get("market_summary") or {}).get("current_average_pct") or 0),
+            ),
+            reverse=True,
+        )
+        themes = themes[:limit]
+        names = [
+            str(item.get("final_name") or item.get("suggested_name") or item["provisional_name"])
+            for item in themes
+        ]
+        updated = 0
+        inserted = 0
+        with self._ai_lock:
+            for theme in themes:
+                theme_id = int(theme["id"])
+                try:
+                    existing = [
+                        {
+                            "title": item.get("title"),
+                            "url": item.get("source_url"),
+                            "published_at": item.get("published_at"),
+                        }
+                        for item in theme.get("catalysts", [])[:12]
+                    ]
+                    item = self.explainer.explain(theme, names, existing)
+                    self.database.save_ai_explanation(theme_id, item)
+                    inserted += self.database.save_theme_catalysts(
+                        theme_id, item.get("catalysts", [])
+                    )
+                    self.database.set_suggested_name(theme_id, item["suggested_name"])
+                    updated += 1
+                except Exception as error:
+                    logger.warning("Catalyst refresh failed for theme %s: %s", theme_id, error)
+        self.database.set_metadata("last_catalyst_refresh_at", self.clock.china_now().isoformat())
+        return {"status": "success", "updated": updated, "new_catalysts": inserted}
+
+    def _catalyst_refresh_slot(self, now: datetime) -> str | None:
+        slots = sorted(
+            value.strip()
+            for value in self.settings.catalyst_refresh_hours.split(",")
+            if value.strip()
+        )
+        current = now.strftime("%H:%M")
+        due = [slot for slot in slots if slot <= current]
+        return due[-1] if due else None
 
     def _evaluate_theme_alerts(
         self, now: datetime, theme_ids: list[int], stale: bool
@@ -364,6 +466,7 @@ class StockTopicService:
             self.sync_daily_limits(now)
             self.sync_kpl_events(compact)
             self.sync_kpl_concepts(compact)
+            self.sync_daily_metrics(compact)
             cohort_count = self._record_daily_cohorts(now)
             backup = self.database.backup()
             self.database.prune_backups()
@@ -442,6 +545,15 @@ class StockTopicService:
                     )
             elif calendar and time(15, 5) <= now.time() <= time(15, 20):
                 await asyncio.to_thread(self.end_of_day, now)
+            catalyst_slot = self._catalyst_refresh_slot(now) if calendar else None
+            if catalyst_slot and now.second < 25:
+                refresh_key = f"catalyst_refresh:{now.date().isoformat()}:{catalyst_slot}"
+                if not self.database.get_metadata(refresh_key):
+                    self.database.set_metadata(refresh_key, now.isoformat())
+                    asyncio.create_task(
+                        asyncio.to_thread(self.refresh_theme_catalysts),
+                        name=f"catalyst-refresh-{catalyst_slot.replace(':', '')}",
+                    )
             current = self.clock.china_now()
             delay = max(0.25, 10.0 - (current.second % 10) - current.microsecond / 1_000_000)
             try:
@@ -474,6 +586,12 @@ class StockTopicService:
                 "wecom": self.notifier.enabled,
                 "apns": False,
             },
+            "latest_catalyst_refresh_at": self.database.get_metadata(
+                "last_catalyst_refresh_at"
+            ),
+            "daily_metrics_trade_date": self.database.get_metadata(
+                "daily_metrics_synced_date"
+            ),
             "warnings": self.settings.validate_integrations(),
         }
 

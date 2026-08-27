@@ -5,7 +5,7 @@ from unittest import TestCase
 from zoneinfo import ZoneInfo
 
 from stocktopic.db import Database
-from stocktopic.domain import Anomaly, Direction
+from stocktopic.domain import Anomaly, Direction, Quote
 from stocktopic.themes import ThemeDiscovery
 
 
@@ -115,3 +115,139 @@ class ThemeDatabaseTests(TestCase):
         items = self.db.anomalies_for_trade_date("2026-08-26")
         self.assertEqual(items[0]["code"], "600000.SH")
         self.assertEqual(items[0]["event_types"], ["rapid_rise"])
+
+    def test_theme_members_include_market_stage_and_are_sorted_by_current_gain(self):
+        self.db.upsert_stocks(
+            [
+                {"ts_code": "600000.SH", "name": "龙头股份", "market": "主板"},
+                {"ts_code": "600001.SH", "name": "跟随股份", "market": "主板"},
+            ]
+        )
+        theme_id = self.db.upsert_candidate(
+            fingerprint="market-context",
+            provisional_name="算力配套异动",
+            shared_tag="算力配套",
+            direction="positive",
+            discovered_at="2026-08-26T10:00:00+08:00",
+            day1_date="2026-08-26",
+            discovery_reason="测试",
+            members=[
+                {"code": "600000.SH", "name": "龙头股份"},
+                {"code": "600001.SH", "name": "跟随股份"},
+            ],
+        )
+        self.db.set_theme_status(theme_id, "confirmed", "算力配套")
+        captured_at = datetime(2026, 8, 26, 14, 55, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self.db.save_quotes(
+            [
+                Quote(
+                    code="600000.SH",
+                    name="龙头股份",
+                    pre_close=10,
+                    open=10,
+                    high=11,
+                    low=10,
+                    close=11,
+                    volume=100,
+                    amount=1000,
+                    trades=50,
+                    trade_time="14:55:00",
+                    captured_at=captured_at,
+                ),
+                Quote(
+                    code="600001.SH",
+                    name="跟随股份",
+                    pre_close=10,
+                    open=10,
+                    high=10.5,
+                    low=10,
+                    close=10.5,
+                    volume=100,
+                    amount=1000,
+                    trades=50,
+                    trade_time="14:55:00",
+                    captured_at=captured_at,
+                ),
+            ],
+            "2026-08-26",
+            "14:55",
+        )
+        self.db.upsert_daily_metrics(
+            [
+                {
+                    "trade_date": "20260826",
+                    "ts_code": "600000.SH",
+                    "circ_mv": 350000,
+                    "turnover_rate": 12.5,
+                },
+                {
+                    "trade_date": "20260826",
+                    "ts_code": "600001.SH",
+                    "circ_mv": 900000,
+                    "turnover_rate": 6.2,
+                },
+            ]
+        )
+        self.db.upsert_kpl_events(
+            [
+                {
+                    "trade_date": "20260826",
+                    "ts_code": "600000.SH",
+                    "name": "龙头股份",
+                    "tag": "涨停",
+                    "theme": "算力配套",
+                    "status": "3连板",
+                    "lu_time": "093105",
+                    "last_time": "093105",
+                    "limit_order": 50000000,
+                }
+            ]
+        )
+        theme = self.db.get_theme(theme_id)
+        self.assertEqual(theme["members"][0]["code"], "600000.SH")
+        self.assertEqual(theme["members"][0]["board_height"], 3)
+        self.assertEqual(theme["members"][0]["limit_sequence"], 1)
+        self.assertEqual(theme["members"][0]["circ_mv_billion"], 35.0)
+        self.assertEqual(theme["market_summary"]["limit_up_count"], 1)
+
+    def test_high_signal_anomalies_are_deduplicated_and_include_tags(self):
+        self.db.upsert_stocks(
+            [{"ts_code": "600000.SH", "name": "浦发银行", "market": "主板", "industry": "银行"}]
+        )
+        self.db.upsert_kpl_events(
+            [{
+                "trade_date": "20260826", "ts_code": "600000.SH", "name": "浦发银行",
+                "tag": "涨停", "theme": "金融科技", "status": "首板",
+            }]
+        )
+        base = datetime(2026, 8, 26, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        for minute, severity in ((0, 70), (5, 82)):
+            self.db.save_anomalies([
+                Anomaly(
+                    code="600000.SH", name="浦发银行",
+                    captured_at=base.replace(minute=minute), direction=Direction.POSITIVE,
+                    severity=severity, pct_change=7.5, change_5m=2.8,
+                    amount_delta=80_000_000, trade_delta=900, is_hard_event=False,
+                    event_types=("rapid_rise",), reasons=("量价齐升",),
+                )
+            ])
+        items = self.db.high_signal_anomalies_for_trade_date("2026-08-26")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["severity"], 82)
+        self.assertIn("金融科技", items[0]["themes"])
+        self.assertIn("银行", items[0]["industries"])
+
+    def test_catalysts_are_deduplicated(self):
+        theme_id = self.create_candidate()
+        catalyst = {
+            "title": "隔夜算力需求超预期",
+            "summary": "海外业绩强化算力基础设施需求预期",
+            "source": "测试媒体",
+            "url": "https://example.com/news",
+            "published_at": "2026-08-26T22:00:00+08:00",
+            "catalyst_type": "强化催化",
+            "evidence_level": "合理推断",
+        }
+        self.assertEqual(self.db.save_theme_catalysts(theme_id, [catalyst]), 1)
+        self.assertEqual(self.db.save_theme_catalysts(theme_id, [catalyst]), 0)
+        self.assertEqual(len(self.db.get_theme(theme_id)["catalysts"]), 1)

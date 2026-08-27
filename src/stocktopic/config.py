@@ -37,6 +37,10 @@ class Settings:
     market_timezone: str = "Asia/Shanghai"
     quote_interval_minutes: int = 5
     cluster_interval_minutes: int = 15
+    anomaly_display_min_severity: float = 68.0
+    anomaly_discovery_min_severity: float = 65.0
+    maximum_candidates_per_run: int = 8
+    catalyst_refresh_hours: str = "08:40,10:30,13:30,15:30"
     stale_after_seconds: int = 120
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
@@ -68,6 +72,18 @@ class Settings:
             archive_dir=archive_dir,
             host=os.getenv("STOCKTOPIC_HOST", "127.0.0.1"),
             port=int(os.getenv("STOCKTOPIC_PORT", "8765")),
+            anomaly_display_min_severity=float(
+                os.getenv("ANOMALY_DISPLAY_MIN_SEVERITY", "68")
+            ),
+            anomaly_discovery_min_severity=float(
+                os.getenv("ANOMALY_DISCOVERY_MIN_SEVERITY", "65")
+            ),
+            maximum_candidates_per_run=int(
+                os.getenv("MAXIMUM_CANDIDATES_PER_RUN", "8")
+            ),
+            catalyst_refresh_hours=os.getenv(
+                "CATALYST_REFRESH_HOURS", "08:40,10:30,13:30,15:30"
+            ).strip(),
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             openai_base_url=(
                 os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()

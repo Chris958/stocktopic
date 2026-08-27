@@ -52,6 +52,13 @@ class AnomalyDetectorTests(TestCase):
         self.assertIn("strong_gain", positive[0].event_types)
         self.assertIn("rapid_rise", positive[0].event_types)
 
+    def test_two_price_signals_without_liquidity_confirmation_are_rejected(self):
+        current = quote(close=10.8, amount=115_000_000, trades=4_600)
+        previous = history(current.captured_at - timedelta(minutes=5), 10.4, 100_000_000, 4_500)
+        prior = history(current.captured_at - timedelta(minutes=10), 10.3, 90_000_000, 4_400)
+        events = self.detector.detect(current, self.context, [previous, prior])
+        self.assertFalse(any(event.direction == Direction.POSITIVE for event in events))
+
     def test_limit_up_is_hard_event(self):
         current = quote(close=11.0, high=11.0)
         events = self.detector.detect(current, self.context, [])
@@ -72,4 +79,3 @@ class AnomalyDetectorTests(TestCase):
         events = self.detector.detect(current, self.context, [previous])
         for event in events:
             self.assertEqual(event.change_5m, 0)
-

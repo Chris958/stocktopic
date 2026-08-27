@@ -31,7 +31,12 @@ class OpenAIThemeExplainer:
     def enabled(self) -> bool:
         return bool(self.api_key)
 
-    def explain(self, theme: dict[str, Any], other_theme_names: list[str]) -> dict[str, Any]:
+    def explain(
+        self,
+        theme: dict[str, Any],
+        other_theme_names: list[str],
+        existing_catalysts: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("OpenAI API is not configured")
         immutable_candidate = candidate_for_ai(theme)
@@ -45,8 +50,12 @@ class OpenAIThemeExplainer:
 系统中其他题材名称：
 {json.dumps(other_theme_names, ensure_ascii=False)}
 
-请搜索最近72小时内能够解释这些股票共同异动的公开信息，优先监管机构、政府、交易所、
-上市公司公告和权威媒体。区分明确证据、合理推断和未找到证据。新闻只是解释和验证市场行为。
+已经收录的催化（不得重复）：
+{json.dumps(existing_catalysts or [], ensure_ascii=False)}
+
+请持续搜索最近72小时、特别是最近24小时内能够解释这些股票共同异动的公开信息，
+同时覆盖海外隔夜事件。优先监管机构、政府、交易所、上市公司公告和权威媒体。
+区分明确证据、合理推断和未找到证据。新闻只是解释和验证市场行为。
 
 只返回一个JSON对象，不要Markdown：
 {{
@@ -54,7 +63,18 @@ class OpenAIThemeExplainer:
   "explanation": "为何共同异动，明确标注证据或推断",
   "catalyst_summary": "催化摘要或未找到明确催化",
   "catalyst_duration": "一次性/数日/数周/数月/未知",
-  "merge_suggestions": ["仅给题材名称建议，不改变成员"]
+  "merge_suggestions": ["仅给题材名称建议，不改变成员"],
+  "catalysts": [
+    {{
+      "title": "新闻或公告标题",
+      "summary": "它如何催化该题材，明确事实或推断",
+      "source": "来源名称",
+      "url": "原始来源URL",
+      "published_at": "带时区的ISO时间；无法确认则为空",
+      "catalyst_type": "首次催化/强化催化/降温证伪/背景",
+      "evidence_level": "明确证据/合理推断"
+    }}
+  ]
 }}
 """.strip()
         payload = {
@@ -82,6 +102,22 @@ class OpenAIThemeExplainer:
             raise RuntimeError(f"OpenAI HTTP {error.code}: {body[:500]}") from error
         text = _output_text(raw)
         parsed = _parse_json_object(text)
+        sources = _sources(raw)
+        catalysts = _normalize_catalysts(parsed.get("catalysts"), sources)
+        if not catalysts and sources:
+            summary = str(parsed.get("catalyst_summary") or "公开信息可能与题材异动相关")
+            catalysts = [
+                {
+                    "title": source["title"],
+                    "summary": summary,
+                    "source": source["title"],
+                    "url": source["url"],
+                    "published_at": None,
+                    "catalyst_type": "背景",
+                    "evidence_level": "合理推断",
+                }
+                for source in sources[:5]
+            ]
         return {
             "model": self.model,
             "suggested_name": str(parsed.get("suggested_name") or theme["provisional_name"]),
@@ -89,7 +125,8 @@ class OpenAIThemeExplainer:
             "catalyst_summary": str(parsed.get("catalyst_summary") or "未找到明确催化"),
             "catalyst_duration": str(parsed.get("catalyst_duration") or "未知"),
             "merge_suggestions": list(parsed.get("merge_suggestions") or []),
-            "sources": _sources(raw),
+            "sources": sources,
+            "catalysts": catalysts,
             "raw": raw,
         }
 
@@ -146,3 +183,37 @@ def _sources(response: dict[str, Any]) -> list[dict[str, str]]:
                 if url:
                     found[url] = {"url": url, "title": str(annotation.get("title") or url)}
     return list(found.values())
+
+
+def _normalize_catalysts(
+    value: Any, sources: list[dict[str, str]]
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    known_urls = {source["url"] for source in sources}
+    result = []
+    for raw in value[:8]:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or "").strip()
+        summary = str(raw.get("summary") or "").strip()
+        url = str(raw.get("url") or "").strip()
+        if not title or not summary:
+            continue
+        if url and known_urls and url not in known_urls:
+            # Do not persist URLs that were not actually returned by web search.
+            url = ""
+        result.append(
+            {
+                "title": title,
+                "summary": summary,
+                "source": str(raw.get("source") or "").strip(),
+                "url": url,
+                "published_at": str(raw.get("published_at") or "").strip() or None,
+                "catalyst_type": str(raw.get("catalyst_type") or "背景").strip(),
+                "evidence_level": str(
+                    raw.get("evidence_level") or "合理推断"
+                ).strip(),
+            }
+        )
+    return result

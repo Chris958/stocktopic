@@ -54,3 +54,16 @@ class ServiceGuardTests(TestCase):
         self.assertEqual(result["status"], "idle")
         self.assertEqual(result["session"], "lunch_break")
 
+    def test_catalyst_schedule_catches_up_to_latest_due_slot(self):
+        self.assertEqual(
+            self.service._catalyst_refresh_slot(
+                datetime(2026, 8, 26, 9, 5, tzinfo=CN)
+            ),
+            "08:40",
+        )
+        self.assertEqual(
+            self.service._catalyst_refresh_slot(
+                datetime(2026, 8, 26, 14, 10, tzinfo=CN)
+            ),
+            "13:30",
+        )

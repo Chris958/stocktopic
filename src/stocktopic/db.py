@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import re
 import sqlite3
@@ -107,6 +108,18 @@ class Database:
                 (start, end),
             ).fetchone()
         return int(row["count"])
+
+    def open_trade_dates(self, end: str, limit: int = 10) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT cal_date FROM trading_calendar
+                WHERE cal_date<=? AND is_open=1
+                ORDER BY cal_date DESC LIMIT ?
+                """,
+                (end, limit),
+            ).fetchall()
+        return [str(row["cal_date"]) for row in rows]
 
     def upsert_stocks(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
@@ -226,6 +239,44 @@ class Database:
             for row in rows
         }
 
+    def upsert_daily_metrics(self, rows: Sequence[dict[str, Any]]) -> int:
+        now = utc_now_iso()
+        active = self.active_stock_map()
+        values = [
+            (
+                str(row.get("trade_date") or ""),
+                str(row.get("ts_code") or ""),
+                row.get("close"),
+                row.get("turnover_rate"),
+                row.get("volume_ratio"),
+                row.get("float_share"),
+                row.get("total_mv"),
+                row.get("circ_mv"),
+                now,
+            )
+            for row in rows
+            if str(row.get("ts_code") or "") in active and row.get("trade_date")
+        ]
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO stock_daily_metrics(
+                    trade_date, code, close, turnover_rate, volume_ratio,
+                    float_share, total_mv, circ_mv, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, code) DO UPDATE SET
+                    close=excluded.close,
+                    turnover_rate=excluded.turnover_rate,
+                    volume_ratio=excluded.volume_ratio,
+                    float_share=excluded.float_share,
+                    total_mv=excluded.total_mv,
+                    circ_mv=excluded.circ_mv,
+                    updated_at=excluded.updated_at
+                """,
+                values,
+            )
+        return len(values)
+
     def latest_quote_history(
         self, trade_date: str, depth: int = 2
     ) -> dict[str, list[dict[str, Any]]]:
@@ -343,6 +394,35 @@ class Database:
                 (trade_date, limit),
             ).fetchall()
         return _decode_anomaly_rows(rows)
+
+    def high_signal_anomalies_for_trade_date(
+        self, trade_date: str, minimum_severity: float = 68.0, limit: int = 160
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER(
+                        PARTITION BY code, direction
+                        ORDER BY captured_at DESC, severity DESC
+                    ) AS rn
+                    FROM anomaly_events
+                    WHERE trade_date=? AND (severity>=? OR is_hard_event=1)
+                )
+                SELECT * FROM ranked WHERE rn=1
+                ORDER BY is_hard_event DESC, severity DESC, pct_change DESC
+                LIMIT ?
+                """,
+                (trade_date, minimum_severity, limit),
+            ).fetchall()
+        items = _decode_anomaly_rows(rows)
+        tags = self.tags_for_codes([str(item["code"]) for item in items])
+        for item in items:
+            stock_tags = tags.get(str(item["code"]), [])
+            item["themes"] = _unique_tags(stock_tags, "theme")[:6]
+            item["industries"] = _unique_tags(stock_tags, "industry")[:3]
+        return items
+
     def tags_for_codes(self, codes: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
         if not codes:
             return {}
@@ -460,6 +540,13 @@ class Database:
             result.append(item)
         return result
 
+    def has_kpl_events_for_date(self, trade_date: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM kpl_events WHERE trade_date=? LIMIT 1", (trade_date,)
+            ).fetchone()
+        return row is not None
+
     def recent_live_theme_fingerprint(
         self, shared_tag: str, direction: str, since: datetime
     ) -> str | None:
@@ -567,19 +654,68 @@ class Database:
         with self.connect() as connection:
             themes = [dict(row) for row in connection.execute(sql, params).fetchall()]
             for theme in themes:
+                baseline_at = str(theme.get("confirmed_at") or theme["discovered_at"])
                 member_rows = connection.execute(
                     """
-                    SELECT code, name, membership_source, evidence_json,
-                           first_seen_at, last_seen_at, active, role
-                    FROM theme_members WHERE theme_id=? ORDER BY active DESC, code
+                    SELECT tm.code, tm.name, tm.membership_source, tm.evidence_json,
+                           tm.first_seen_at, tm.last_seen_at, tm.active, tm.role,
+                           (SELECT q.close FROM quote_snapshots q
+                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
+                               AS current_price,
+                           (SELECT q.pct_change FROM quote_snapshots q
+                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
+                               AS current_pct,
+                           (SELECT q.captured_at FROM quote_snapshots q
+                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
+                               AS quote_captured_at,
+                           (SELECT m.trade_date FROM stock_daily_metrics m
+                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
+                               AS metric_trade_date,
+                           (SELECT m.turnover_rate FROM stock_daily_metrics m
+                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
+                               AS turnover_rate,
+                           (SELECT m.volume_ratio FROM stock_daily_metrics m
+                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
+                               AS volume_ratio,
+                           (SELECT m.float_share FROM stock_daily_metrics m
+                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
+                               AS float_share,
+                           (SELECT m.total_mv FROM stock_daily_metrics m
+                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
+                               AS total_mv,
+                           (SELECT m.circ_mv FROM stock_daily_metrics m
+                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
+                               AS circ_mv,
+                           COALESCE(
+                               (SELECT b.close FROM quote_snapshots b
+                                WHERE b.code=tm.code AND b.captured_at<=?
+                                ORDER BY b.captured_at DESC LIMIT 1),
+                               (SELECT a.close FROM quote_snapshots a
+                                WHERE a.code=tm.code AND a.captured_at>?
+                                ORDER BY a.captured_at ASC LIMIT 1)
+                           ) AS baseline_price
+                    FROM theme_members tm WHERE tm.theme_id=?
                     """,
-                    (theme["id"],),
+                    (baseline_at, baseline_at, theme["id"]),
                 ).fetchall()
                 theme["members"] = []
                 for row in member_rows:
                     member = dict(row)
                     member["evidence"] = json.loads(member.pop("evidence_json"))
+                    current = _number(member.get("current_price"))
+                    baseline = _number(member.get("baseline_price"))
+                    member["confirmed_return"] = (
+                        round((current / baseline - 1.0) * 100.0, 3)
+                        if current and baseline
+                        else None
+                    )
+                    circ_mv = _number(member.get("circ_mv"))
+                    member["circ_mv_billion"] = (
+                        round(circ_mv / 10_000.0, 2) if circ_mv else None
+                    )
                     theme["members"].append(member)
+                self._attach_board_context(connection, theme)
+                self._attach_theme_market_summary(theme)
                 score = connection.execute(
                     """
                     SELECT * FROM theme_scores WHERE theme_id=?
@@ -590,7 +726,220 @@ class Database:
                 theme["score"] = dict(score) if score else None
                 if theme["score"]:
                     theme["score"]["details"] = json.loads(theme["score"].pop("details_json"))
+                explanation = connection.execute(
+                    """
+                    SELECT created_at, model, suggested_name, explanation,
+                           catalyst_summary, catalyst_duration, sources_json
+                    FROM ai_explanations WHERE theme_id=?
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (theme["id"],),
+                ).fetchone()
+                theme["latest_explanation"] = dict(explanation) if explanation else None
+                if theme["latest_explanation"]:
+                    theme["latest_explanation"]["sources"] = json.loads(
+                        theme["latest_explanation"].pop("sources_json")
+                    )
+                catalyst_rows = connection.execute(
+                    """
+                    SELECT title, summary, source_name, source_url, published_at,
+                           catalyst_type, evidence_level, captured_at
+                    FROM theme_catalysts WHERE theme_id=?
+                    ORDER BY COALESCE(published_at, captured_at) DESC, id DESC LIMIT 12
+                    """,
+                    (theme["id"],),
+                ).fetchall()
+                theme["catalysts"] = [dict(row) for row in catalyst_rows]
         return themes
+
+    def _attach_board_context(
+        self, connection: sqlite3.Connection, theme: dict[str, Any]
+    ) -> None:
+        members = theme["members"]
+        codes = [str(member["code"]) for member in members]
+        if not codes:
+            return
+        placeholders = ",".join("?" for _ in codes)
+        rows = connection.execute(
+            f"""
+            WITH ranked AS (
+                SELECT *, ROW_NUMBER() OVER(
+                    PARTITION BY code ORDER BY trade_date DESC, synced_at DESC
+                ) AS rn
+                FROM kpl_events WHERE code IN ({placeholders})
+            )
+            SELECT * FROM ranked WHERE rn<=8 ORDER BY code, trade_date DESC
+            """,
+            codes,
+        ).fetchall()
+        histories: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            item = dict(row)
+            raw = json.loads(item.pop("raw_json") or "{}")
+            item["themes"] = json.loads(item.pop("themes_json"))
+            item["board_height"] = _board_height(item.get("status"))
+            item["limit_order"] = raw.get("limit_order")
+            item["turnover_rate"] = raw.get("turnover_rate")
+            histories.setdefault(str(item["code"]), []).append(item)
+
+        anomaly_date_row = connection.execute(
+            "SELECT MAX(trade_date) AS trade_date FROM anomaly_events"
+        ).fetchone()
+        anomaly_date = str(anomaly_date_row["trade_date"] or "")
+        first_moves: dict[str, str] = {}
+        if anomaly_date:
+            move_rows = connection.execute(
+                f"""
+                SELECT code, MIN(captured_at) AS first_move_at
+                FROM anomaly_events
+                WHERE trade_date=? AND direction='positive'
+                  AND code IN ({placeholders})
+                GROUP BY code
+                """,
+                [anomaly_date, *codes],
+            ).fetchall()
+            first_moves = {
+                str(row["code"]): str(row["first_move_at"])
+                for row in move_rows
+                if row["first_move_at"]
+            }
+
+        limit_members = []
+        for member in members:
+            history = histories.get(str(member["code"]), [])
+            latest = {}
+            if history:
+                latest_date = str(history[0].get("trade_date") or "")
+                same_day = [
+                    item
+                    for item in history
+                    if str(item.get("trade_date") or "") == latest_date
+                ]
+                current_pct = _number(member.get("current_pct"))
+                preferred_tag = "涨停" if current_pct >= 9.5 else "炸板"
+                latest = next(
+                    (item for item in same_day if item.get("board_tag") == preferred_tag),
+                    same_day[0],
+                )
+            member["board_status"] = latest.get("status")
+            member["board_height"] = int(latest.get("board_height") or 0)
+            member["latest_board_tag"] = latest.get("board_tag")
+            member["latest_limit_trade_date"] = latest.get("trade_date")
+            member["first_limit_time"] = latest.get("limit_up_time")
+            member["last_limit_time"] = latest.get("last_limit_time")
+            member["open_time"] = latest.get("open_time")
+            member["limit_order"] = latest.get("limit_order")
+            member["first_move_at"] = first_moves.get(str(member["code"]))
+            member["signal_active"] = str(member["code"]) in first_moves
+            member["board_history"] = [
+                {
+                    "trade_date": item.get("trade_date"),
+                    "tag": item.get("board_tag"),
+                    "status": item.get("status"),
+                    "first_limit_time": item.get("limit_up_time"),
+                }
+                for item in _one_board_event_per_day(history)[:5]
+            ]
+            if latest.get("board_tag") == "涨停" and latest.get("limit_up_time"):
+                limit_members.append(member)
+
+        limit_members.sort(key=lambda item: _clock_sort(item.get("first_limit_time")))
+        for sequence, member in enumerate(limit_members, 1):
+            member["limit_sequence"] = sequence
+
+        move_times = {
+            code: _parse_datetime(value) for code, value in first_moves.items()
+        }
+        move_times = {code: value for code, value in move_times.items() if value}
+        for member in members:
+            moved_at = move_times.get(str(member["code"]))
+            follower_count = 0
+            if moved_at:
+                follower_count = sum(
+                    0 < (other - moved_at).total_seconds() <= 30 * 60
+                    for code, other in move_times.items()
+                    if code != str(member["code"])
+                )
+            member["follow_count_30m"] = follower_count
+            member["leader_signal"] = round(
+                int(member.get("board_height") or 0) * 25
+                + max(0.0, _number(member.get("current_pct"))) * 2
+                + follower_count * 3
+                + max(0, 12 - int(member.get("limit_sequence") or 12)),
+                2,
+            )
+        leader_order = sorted(
+            members,
+            key=lambda item: (
+                _number(item.get("leader_signal")),
+                _number(item.get("current_pct")),
+            ),
+            reverse=True,
+        )
+        for rank, member in enumerate(leader_order, 1):
+            member["leader_rank"] = rank
+        members.sort(
+            key=lambda item: (
+                int(item.get("active") or 0),
+                _number(item.get("current_pct")),
+                int(bool(item.get("signal_active"))),
+                _number(item.get("leader_signal")),
+            ),
+            reverse=True,
+        )
+
+    def _attach_theme_market_summary(self, theme: dict[str, Any]) -> None:
+        members = [member for member in theme["members"] if member.get("active", 1)]
+        current_values = [
+            _number(member["current_pct"])
+            for member in members
+            if member.get("current_pct") is not None
+        ]
+        confirmed_values = [
+            _number(member["confirmed_return"])
+            for member in members
+            if member.get("confirmed_return") is not None
+        ]
+        current_limit_date = max(
+            (str(member.get("latest_limit_trade_date") or "") for member in members),
+            default="",
+        )
+        theme["market_summary"] = {
+            "member_count": len(members),
+            "current_average_pct": round(sum(current_values) / len(current_values), 3)
+            if current_values
+            else None,
+            "confirmed_average_return": round(
+                sum(confirmed_values) / len(confirmed_values), 3
+            )
+            if confirmed_values
+            else None,
+            "up_count": sum(value > 0 for value in current_values),
+            "strong_count": sum(value >= 5 for value in current_values),
+            "limit_up_count": sum(
+                member.get("latest_board_tag") == "涨停"
+                and str(member.get("latest_limit_trade_date") or "") == current_limit_date
+                for member in members
+            ),
+            "failed_limit_count": sum(
+                member.get("latest_board_tag") == "炸板"
+                and str(member.get("latest_limit_trade_date") or "") == current_limit_date
+                for member in members
+            ),
+            "leader_code": min(
+                members,
+                key=lambda item: int(item.get("leader_rank") or 9999),
+                default={},
+            ).get("code"),
+            "market_data_at": max(
+                (str(member.get("quote_captured_at") or "") for member in members),
+                default="",
+            ),
+            "metric_trade_date": max(
+                (str(member.get("metric_trade_date") or "") for member in members),
+                default="",
+            ),
+        }
 
     def get_theme(self, theme_id: int) -> dict[str, Any] | None:
         for theme in self.list_themes():
@@ -861,6 +1210,44 @@ class Database:
                 ),
             )
 
+    def save_theme_catalysts(
+        self, theme_id: int, catalysts: Sequence[dict[str, Any]]
+    ) -> int:
+        captured_at = utc_now_iso()
+        inserted = 0
+        with self.connect() as connection:
+            for item in catalysts:
+                title = str(item.get("title") or "").strip()
+                summary = str(item.get("summary") or "").strip()
+                url = str(item.get("url") or "").strip()
+                if not title or not summary:
+                    continue
+                fingerprint = hashlib.sha256(
+                    f"{url}|{title}|{str(item.get('published_at') or '')[:10]}".encode()
+                ).hexdigest()
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO theme_catalysts(
+                        theme_id, fingerprint, title, summary, source_name,
+                        source_url, published_at, catalyst_type, evidence_level, captured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        theme_id,
+                        fingerprint,
+                        title,
+                        summary,
+                        item.get("source"),
+                        url or None,
+                        item.get("published_at"),
+                        str(item.get("catalyst_type") or "update"),
+                        str(item.get("evidence_level") or "inference"),
+                        captured_at,
+                    ),
+                )
+                inserted += cursor.rowcount
+        return inserted
+
     def has_ai_explanation(self, theme_id: int) -> bool:
         with self.connect() as connection:
             row = connection.execute(
@@ -992,3 +1379,49 @@ def _decode_anomaly_rows(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
 def _split_tags(value: str) -> list[str]:
     normalized = value.replace("，", ",").replace("、", ",").replace("/", ",")
     return list(dict.fromkeys(part.strip() for part in normalized.split(",") if part.strip()))
+
+
+def _unique_tags(tags: Sequence[dict[str, Any]], tag_type: str) -> list[str]:
+    ordered = sorted(
+        (tag for tag in tags if str(tag.get("tag_type")) == tag_type),
+        key=lambda item: float(item.get("confidence") or 0),
+        reverse=True,
+    )
+    return list(dict.fromkeys(str(item["tag"]) for item in ordered if item.get("tag")))
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _board_height(value: Any) -> int:
+    text = str(value or "")
+    if "首板" in text:
+        return 1
+    match = re.search(r"(\d+)\s*连板", text)
+    return int(match.group(1)) if match else 0
+
+
+def _clock_sort(value: Any) -> str:
+    digits = "".join(character for character in str(value or "") if character.isdigit())
+    return digits.zfill(6) if digits else "999999"
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    try:
+        return datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _one_board_event_per_day(history: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_date: dict[str, dict[str, Any]] = {}
+    for item in history:
+        trade_date = str(item.get("trade_date") or "")
+        existing = by_date.get(trade_date)
+        if not existing or item.get("board_tag") == "涨停":
+            by_date[trade_date] = item
+    return list(by_date.values())
