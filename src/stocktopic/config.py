@@ -39,7 +39,7 @@ class Settings:
     cluster_interval_minutes: int = 5
     anomaly_display_min_severity: float = 68.0
     anomaly_discovery_min_severity: float = 65.0
-    maximum_candidates_per_run: int = 4
+    maximum_candidates_per_run: int = 0
     minimum_limit_touches: int = 4
     novelty_lookback_trade_days: int = 60
     novelty_confidence_threshold: float = 70.0
@@ -81,7 +81,7 @@ class Settings:
             port=int(os.getenv("STOCKTOPIC_PORT", "8765")),
             anomaly_display_min_severity=float(os.getenv("ANOMALY_DISPLAY_MIN_SEVERITY", "68")),
             anomaly_discovery_min_severity=float(os.getenv("ANOMALY_DISCOVERY_MIN_SEVERITY", "65")),
-            maximum_candidates_per_run=int(os.getenv("MAXIMUM_CANDIDATES_PER_RUN", "4")),
+            maximum_candidates_per_run=int(os.getenv("MAXIMUM_CANDIDATES_PER_RUN", "0")),
             minimum_limit_touches=int(os.getenv("MINIMUM_LIMIT_TOUCHES", "4")),
             novelty_lookback_trade_days=int(os.getenv("NOVELTY_LOOKBACK_TRADE_DAYS", "60")),
             novelty_confidence_threshold=float(os.getenv("NOVELTY_CONFIDENCE_THRESHOLD", "70")),

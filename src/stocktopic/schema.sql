@@ -62,6 +62,24 @@ CREATE TABLE IF NOT EXISTS kpl_events (
 
 CREATE INDEX IF NOT EXISTS idx_kpl_events_date_tag ON kpl_events(trade_date, board_tag);
 
+CREATE TABLE IF NOT EXISTS kpl_concept_memberships (
+    trade_date TEXT NOT NULL,
+    concept_id TEXT NOT NULL,
+    concept_name TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    hot_num INTEGER,
+    synced_at TEXT NOT NULL,
+    PRIMARY KEY(trade_date, concept_id, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_kpl_concept_member_code
+ON kpl_concept_memberships(code, trade_date DESC);
+
+CREATE INDEX IF NOT EXISTS idx_kpl_concept_member_name
+ON kpl_concept_memberships(concept_name, trade_date DESC);
+
 CREATE TABLE IF NOT EXISTS daily_limits (
     trade_date TEXT NOT NULL,
     code TEXT NOT NULL,
@@ -152,6 +170,12 @@ CREATE TABLE IF NOT EXISTS candidate_themes (
     admission_status TEXT NOT NULL DEFAULT 'legacy',
     admission_reason TEXT,
     admission_reviewed_at TEXT,
+    theme_level TEXT NOT NULL DEFAULT 'candidate',
+    observation_at TEXT,
+    cluster_method TEXT NOT NULL DEFAULT 'exact_tag',
+    cluster_confidence REAL NOT NULL DEFAULT 0,
+    cluster_aliases_json TEXT NOT NULL DEFAULT '[]',
+    evidence_grade TEXT NOT NULL DEFAULT 'unreviewed',
     updated_at TEXT NOT NULL
 );
 
@@ -223,6 +247,7 @@ CREATE TABLE IF NOT EXISTS theme_catalysts (
     published_at TEXT,
     catalyst_type TEXT NOT NULL DEFAULT 'update',
     evidence_level TEXT NOT NULL DEFAULT 'inference',
+    source_kind TEXT NOT NULL DEFAULT 'unknown',
     captured_at TEXT NOT NULL,
     UNIQUE(theme_id, fingerprint)
 );
@@ -242,6 +267,7 @@ CREATE TABLE IF NOT EXISTS theme_admission_reviews (
     leader_candidate_code TEXT,
     leader_upside_scenario_pct REAL NOT NULL,
     admitted INTEGER NOT NULL,
+    decision_level TEXT NOT NULL DEFAULT 'rejected',
     decision_reason TEXT NOT NULL,
     historical_matches_json TEXT NOT NULL,
     proposed_members_json TEXT NOT NULL,
@@ -251,6 +277,20 @@ CREATE TABLE IF NOT EXISTS theme_admission_reviews (
 
 CREATE INDEX IF NOT EXISTS idx_admission_reviews_theme
 ON theme_admission_reviews(theme_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS semantic_cluster_runs (
+    trade_date TEXT NOT NULL,
+    input_signature TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL,
+    clusters_json TEXT NOT NULL,
+    error TEXT,
+    PRIMARY KEY(trade_date, input_signature)
+);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_cluster_runs_date
+ON semantic_cluster_runs(trade_date, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

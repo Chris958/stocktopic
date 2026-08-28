@@ -139,6 +139,8 @@ class OpenAIThemeExplainer:
 “新题材”指新的最小共同炒作逻辑或首次形成广泛资金共识；旧题材出现一条新新闻、换名、
 反复轮动，不算新题材。持续性与30%空间必须是有催化路径的情景判断，不得伪装成确定预测。
 优先政府、监管、交易所、上市公司公告、产业链原始信息和权威媒体；必须列出反证和风险。
+如果市场已形成至少4只触板的广泛共识，但只有机构研报或供应链消息、尚无官方确认，仍可判定
+为新题材和具有持续性；证据等级必须如实写为“供应链未确认”，由系统放入早期观察而非正式题材。
 
 只返回一个JSON对象，不要Markdown：
 {{
@@ -161,7 +163,8 @@ class OpenAIThemeExplainer:
     {{
       "title":"标题", "summary":"与题材关系", "source":"来源", "url":"原始URL",
       "published_at":"带时区ISO时间或空", "catalyst_type":"首次催化/强化催化/反证",
-      "evidence_level":"明确证据/合理推断"
+      "evidence_level":"官方确认/多源交叉验证/供应链未确认/合理推断",
+      "source_kind":"official/company_disclosure/industry_primary/authoritative_media/brokerage_research/supply_chain_report/social"
     }}
   ]
 }}
@@ -208,6 +211,119 @@ class OpenAIThemeExplainer:
             "catalysts": _normalize_catalysts(parsed.get("catalysts"), sources),
             "raw": raw,
         }
+
+    def cluster_limit_events(
+        self, trade_date: str, events: list[dict[str, Any]], minimum_members: int = 4
+    ) -> list[dict[str, Any]]:
+        """Cluster touched-limit stocks by one concrete shared event, not exact tag text."""
+        if not self.enabled:
+            raise RuntimeError("OpenAI API is not configured")
+        compact_events = []
+        allowed_codes: set[str] = set()
+        for event in events:
+            code = str(event.get("code") or "")
+            if not code:
+                continue
+            allowed_codes.add(code)
+            compact_events.append(
+                {
+                    "code": code,
+                    "name": event.get("name"),
+                    "board_tag": event.get("board_tag"),
+                    "status": event.get("status"),
+                    "limit_reason": event.get("limit_reason"),
+                    "source_themes": event.get("themes", []),
+                    "concept_tags": [
+                        item.get("tag")
+                        for item in event.get("concept_tags", [])[:10]
+                        if item.get("tag")
+                    ],
+                }
+            )
+        prompt = f"""
+你是A股涨停共同事件聚类器。交易日：{trade_date}。
+目标是发现“同一个具体催化事件/新增产业逻辑”驱动的股票组合，而不是按标签文字完全相同分组。
+必须使用web_search核查当日及隔夜新闻。综合涨停原因、开盘啦标签、题材成分和新闻催化。
+
+硬约束：
+1. 只返回至少{minimum_members}只输入股票共同指向同一具体事件的组合，涨停和炸板都计入。
+2. 股票代码只能来自输入；不得为了凑数加入仅有宽泛行业关系的股票。
+3. “AI、英伟达、化工、国企、并购”等宽泛标签本身不是共同事件，必须下钻到最小炒作逻辑。
+4. 不同标签可以合并，例如PTFE、氟化工、PCB材料可因同一Rubin背板选材事件合并；
+   但必须逐只说明为什么与该事件有关。
+5. 同一组股票不要重复输出近义题材。没有合格组合就返回空数组。
+
+输入股票：
+{json.dumps(compact_events, ensure_ascii=False)}
+
+只返回JSON对象：
+{{
+  "clusters": [
+    {{
+      "canonical_name": "具体共同事件题材名",
+      "common_logic": "事件→产业变化→股票受益的共同链条",
+      "member_codes": ["只能来自输入"],
+      "aliases": ["输入标签或常用近义名"],
+      "cluster_confidence": 0,
+      "catalysts": [
+        {{
+          "title":"标题", "summary":"与共同事件的关系", "source":"来源",
+          "url":"web_search实际返回URL", "published_at":"ISO时间或空",
+          "catalyst_type":"首次催化/强化催化/反证",
+          "evidence_level":"官方确认/多源交叉验证/供应链未确认/合理推断",
+          "source_kind":"official/company_disclosure/industry_primary/authoritative_media/brokerage_research/supply_chain_report/social"
+        }}
+      ]
+    }}
+  ]
+}}
+        """.strip()
+        raw, parsed, sources = self._call_prompt(prompt, reasoning_effort="medium")
+        clusters = parsed.get("clusters")
+        if not isinstance(clusters, list):
+            raise RuntimeError("AI semantic cluster response missing clusters array")
+        result = []
+        seen: set[tuple[str, ...]] = set()
+        for cluster in clusters[:20]:
+            if not isinstance(cluster, dict):
+                continue
+            codes = list(
+                dict.fromkeys(
+                    str(code).strip()
+                    for code in cluster.get("member_codes", [])
+                    if str(code).strip() in allowed_codes
+                )
+            )
+            if len(codes) < minimum_members:
+                continue
+            signature = tuple(sorted(codes))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            name = str(cluster.get("canonical_name") or "").strip()
+            logic = str(cluster.get("common_logic") or "").strip()
+            if not name or not logic:
+                continue
+            aliases = [
+                str(value).strip()
+                for value in cluster.get("aliases", [])[:12]
+                if str(value).strip()
+            ]
+            result.append(
+                {
+                    "tag": name[:60],
+                    "common_logic": logic[:1000],
+                    "member_codes": codes,
+                    "aliases": list(dict.fromkeys([name, *aliases])),
+                    "cluster_confidence": _bounded_number(cluster.get("cluster_confidence")),
+                    "cluster_method": "semantic_event",
+                    "catalysts": _normalize_catalysts(cluster.get("catalysts"), sources),
+                    "sources": sources,
+                    "model": self.model,
+                    "raw": raw,
+                }
+            )
+        return result
 
     def _call_prompt(
         self, prompt: str, *, reasoning_effort: str
@@ -319,6 +435,7 @@ def _normalize_catalysts(value: Any, sources: list[dict[str, str]]) -> list[dict
                 "published_at": str(raw.get("published_at") or "").strip() or None,
                 "catalyst_type": str(raw.get("catalyst_type") or "背景").strip(),
                 "evidence_level": str(raw.get("evidence_level") or "合理推断").strip(),
+                "source_kind": str(raw.get("source_kind") or "unknown").strip(),
             }
         )
     return result

@@ -34,6 +34,9 @@ struct Theme: Decodable, Identifiable {
     let finalName: String?
     let sharedTag: String
     let status: String
+    let themeLevel: String?
+    let admissionReason: String?
+    let evidenceGrade: String?
     let discoveryReason: String
     let day1Date: String
     let members: [ThemeMember]

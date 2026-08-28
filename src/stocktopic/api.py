@@ -54,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.3.0",
+        version="0.4.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -121,7 +121,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/themes")
     async def themes(status: str | None = None):
-        if status not in {None, "pending", "confirmed", "rejected", "merged", "archived"}:
+        if status not in {
+            None,
+            "pending",
+            "watching",
+            "confirmed",
+            "rejected",
+            "merged",
+            "archived",
+        }:
             raise HTTPException(status_code=400, detail="Invalid theme status")
         return {"items": service.database.list_themes(status)}
 
@@ -218,6 +226,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def run_once():
         # This endpoint never bypasses the market clock or trading calendar.
         return await asyncio.to_thread(service.collect_once)
+
+    @app.post("/api/v1/admin/backfill-discovery")
+    async def backfill_discovery():
+        return await asyncio.to_thread(
+            service.backfill_recent_trade_days,
+            service.clock.china_now(),
+            refresh_sources=True,
+            source="manual",
+        )
 
     @app.post("/api/v1/admin/wecom-test")
     async def wecom_test():

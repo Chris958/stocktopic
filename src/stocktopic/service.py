@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
+from . import __version__
 from .ai import OpenAIThemeExplainer
 from .anomaly import AnomalyDetector
 from .config import Settings
@@ -32,7 +35,6 @@ class StockTopicService:
         self.discovery = ThemeDiscovery(
             self.database,
             settings.minimum_limit_touches,
-            settings.maximum_candidates_per_run,
         )
         self.scorer = ThemeScorer(self.database)
         self.explainer = OpenAIThemeExplainer(
@@ -48,8 +50,11 @@ class StockTopicService:
         )
         self.clock = MarketClock()
         self._collector_lock = threading.Lock()
+        self._discovery_lock = threading.Lock()
         self._ai_lock = threading.Lock()
         self._ai_inflight: set[int] = set()
+        self._discovery_inflight: set[str] = set()
+        self._startup_backfill_pending = True
         self._stop_event = asyncio.Event()
 
     def initialize(self) -> None:
@@ -193,6 +198,11 @@ class StockTopicService:
         try:
             rows = self.provider.kpl_concept_members(trade_date)
             count = self.database.upsert_kpl_concept_members(rows)
+            if rows and count == 0:
+                raise RuntimeError(
+                    "KPL concept rows returned but none mapped to active stocks; "
+                    "check kpl_concept_cons field mapping and universe"
+                )
             self.database.set_metadata("kpl_concepts_synced_date", trade_date)
             self.database.set_metadata(
                 "kpl_concepts_may_be_truncated", "true" if len(rows) >= 3000 else "false"
@@ -204,6 +214,159 @@ class StockTopicService:
             logger.warning("KPL concept sync degraded: %s", error)
             self._data_pull_failure("sync_kpl_concepts", error)
             return 0
+
+    def discover_trade_date(
+        self, trade_date: str, now: datetime | None = None
+    ) -> list[int]:
+        """Discover threshold candidates using a cached event-level semantic clustering pass."""
+        observed_at = self.clock.normalize(now or self.clock.china_now())
+        with self._discovery_lock:
+            events = self.database.limit_touch_events(trade_date)
+            if len(events) < self.settings.minimum_limit_touches:
+                return []
+            signature_payload = [
+                {
+                    "code": event.get("code"),
+                    "board_tag": event.get("board_tag"),
+                    "status": event.get("status"),
+                    "themes": event.get("themes", []),
+                    "limit_reason": event.get("limit_reason"),
+                    "concept_tags": [
+                        item.get("tag") for item in event.get("concept_tags", [])
+                    ],
+                }
+                for event in events
+            ]
+            input_signature = hashlib.sha256(
+                json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode()
+            ).hexdigest()
+            cached = self.database.semantic_cluster_run(trade_date, input_signature)
+            semantic_clusters: list[dict[str, Any]] | None = None
+            if cached and cached.get("status") == "success":
+                semantic_clusters = list(cached.get("clusters") or [])
+            recent_failed_run = bool(
+                cached
+                and cached.get("status") == "failed"
+                and _within_retry_cooldown(cached.get("created_at"), observed_at, minutes=30)
+            )
+            if semantic_clusters is None and self.explainer.enabled and not recent_failed_run:
+                try:
+                    semantic_clusters = self.explainer.cluster_limit_events(
+                        trade_date,
+                        events,
+                        self.settings.minimum_limit_touches,
+                    )
+                    self.database.save_semantic_cluster_run(
+                        trade_date,
+                        input_signature,
+                        self.settings.openai_model,
+                        "success",
+                        semantic_clusters,
+                    )
+                except Exception as error:
+                    safe = _safe_error(error)
+                    self.database.save_semantic_cluster_run(
+                        trade_date,
+                        input_signature,
+                        self.settings.openai_model,
+                        "failed",
+                        [],
+                        safe,
+                    )
+                    self._data_pull_failure("semantic_event_clustering", error, observed_at)
+                    logger.warning("Semantic event clustering failed: %s", safe)
+
+            if semantic_clusters is None:
+                # Resilient fallback when AI is disabled or unavailable. It is marked
+                # explicitly so the audit page never presents exact-tag grouping as semantic.
+                return self.discovery.discover_for_date(trade_date, observed_at)
+
+            event_by_code = {str(event["code"]): event for event in events}
+            enriched = []
+            for cluster in semantic_clusters:
+                members = [
+                    event_by_code[code]
+                    for code in cluster.get("member_codes", [])
+                    if code in event_by_code
+                ]
+                if len(members) < self.settings.minimum_limit_touches:
+                    continue
+                enriched.append(
+                    {
+                        **cluster,
+                        "members": members,
+                        "touch_count": len(members),
+                        "sealed_count": sum(
+                            member.get("board_tag") == "涨停" for member in members
+                        ),
+                        "failed_count": sum(
+                            member.get("board_tag") == "炸板" for member in members
+                        ),
+                    }
+                )
+            return self.discovery.discover_for_date(
+                trade_date,
+                observed_at,
+                semantic_clusters=enriched,
+            )
+
+    def backfill_recent_trade_days(
+        self,
+        now: datetime | None = None,
+        *,
+        refresh_sources: bool = True,
+        source: str = "startup",
+    ) -> dict[str, Any]:
+        """Replay discovery for the latest two open days without touching realtime rt_k."""
+        observed_at = self.clock.normalize(now or self.clock.china_now())
+        compact = observed_at.strftime("%Y%m%d")
+        trade_dates = self.database.open_trade_dates(compact, 2)
+        run_id = self.database.begin_run("discovery_backfill")
+        candidate_ids: list[int] = []
+        failures: list[str] = []
+        for trade_date in reversed(trade_dates):
+            try:
+                if refresh_sources:
+                    if self.sync_kpl_events(trade_date) < 0:
+                        raise RuntimeError(f"KPL events unavailable for {trade_date}")
+                    self.sync_kpl_concepts(trade_date)
+                candidate_ids.extend(self.discover_trade_date(trade_date, observed_at))
+            except Exception as error:
+                failures.append(f"{trade_date}:{_safe_error(error)}")
+                self._data_pull_failure("discovery_backfill", error, observed_at)
+        candidate_ids = list(dict.fromkeys(candidate_ids))
+        if candidate_ids and self.explainer.enabled:
+            self._assess_and_admit_candidates(candidate_ids)
+        status = "success" if not failures else "degraded"
+        detail = (
+            f"source={source},dates={','.join(trade_dates)},candidates={len(candidate_ids)}"
+            + (f",failures={' | '.join(failures)}" if failures else "")
+        )
+        self.database.finish_run(run_id, status, len(candidate_ids), detail)
+        self.database.set_metadata(
+            "last_discovery_backfill",
+            f"{observed_at.isoformat(timespec='seconds')}|{detail}",
+        )
+        return {
+            "status": status,
+            "trade_dates": trade_dates,
+            "candidate_ids": candidate_ids,
+            "failures": failures,
+        }
+
+    def _discover_and_assess_date(self, trade_date: str, now: datetime) -> None:
+        try:
+            candidate_ids = self.discover_trade_date(trade_date, now)
+            if candidate_ids and self.explainer.enabled:
+                self._assess_and_admit_candidates(candidate_ids)
+        finally:
+            self._discovery_inflight.discard(trade_date)
+
+    def _startup_backfill(self, now: datetime) -> None:
+        try:
+            self.backfill_recent_trade_days(now, refresh_sources=True, source="startup")
+        finally:
+            self._discovery_inflight.discard("startup_backfill")
 
     def collect_once(self, now: datetime | None = None) -> dict[str, Any]:
         with self._collector_lock:
@@ -296,10 +459,11 @@ class StockTopicService:
                 )
 
                 candidate_ids: list[int] = []
+                discovery_trade_date: str | None = None
                 if started.minute % self.settings.cluster_interval_minutes == 0:
                     kpl_count = self.sync_kpl_events(compact)
                     if kpl_count >= 0:
-                        candidate_ids = self.discovery.discover(started)
+                        discovery_trade_date = compact
                 scored_ids = self.scorer.score_confirmed(started)
                 self._evaluate_theme_alerts(started, scored_ids, stale=False)
                 self.database.finish_run(
@@ -316,6 +480,7 @@ class StockTopicService:
                     "internal_events": len(anomalies),
                     "invalid_quotes": len(invalid_quotes),
                     "candidate_ids": candidate_ids,
+                    "discovery_trade_date": discovery_trade_date,
                     "scored_ids": scored_ids,
                 }
             except Exception as error:
@@ -338,7 +503,7 @@ class StockTopicService:
         try:
             for theme_id in selected:
                 theme = themes.get(theme_id)
-                if not theme or theme.get("status") != "pending":
+                if not theme or theme.get("status") not in {"pending", "watching"}:
                     continue
                 try:
                     self.database.set_admission_status(
@@ -364,7 +529,9 @@ class StockTopicService:
                         member_codes=trigger_codes,
                         since_date=cutoff,
                     )
-                    stock_pool = self.database.eligible_members_for_tag(str(theme["shared_tag"]))
+                    aliases = list(theme.get("cluster_aliases") or [])
+                    aliases.append(str(theme["shared_tag"]))
+                    stock_pool = self.database.eligible_members_for_tags(aliases)
                     item = self.explainer.assess_for_admission(theme, history, stock_pool)
                     pool_by_code = {str(member["code"]): member for member in stock_pool}
                     validated_members = []
@@ -380,6 +547,7 @@ class StockTopicService:
                                 "role": proposal.get("role"),
                                 "evidence": {
                                     "shared_tag": theme["shared_tag"],
+                                    "matched_tags": deterministic.get("matched_tags", []),
                                     "tag_source": deterministic.get("source"),
                                     "tag_confidence": deterministic.get("confidence"),
                                     "ai_reason": proposal.get("reason"),
@@ -397,12 +565,6 @@ class StockTopicService:
                             if source.get("url")
                         }
                     )
-                    evidenced_catalysts = [
-                        catalyst
-                        for catalyst in item.get("catalysts", [])
-                        if catalyst.get("url")
-                        and str(catalyst.get("evidence_level") or "") == "明确证据"
-                    ]
                     duration_gate = (
                         int(item.get("expected_duration_days") or 0)
                         >= self.settings.minimum_expected_duration_days
@@ -411,29 +573,56 @@ class StockTopicService:
                         float(item.get("leader_upside_scenario_pct") or 0)
                         >= self.settings.leader_upside_threshold_pct
                     )
-                    checks = {
+                    core_checks = {
                         "new_theme": bool(item.get("is_new_theme")),
                         "novelty_confidence": float(item.get("novelty_confidence") or 0)
                         >= self.settings.novelty_confidence_threshold,
                         "catalyst_confidence": float(item.get("catalyst_confidence") or 0)
                         >= self.settings.catalyst_confidence_threshold,
-                        "reliable_source": source_count >= 1 and bool(evidenced_catalysts),
+                        "source_available": source_count >= 1,
                         "duration_or_upside": duration_gate or upside_gate,
                         "valid_leader": str(item.get("leader_candidate_code") or "") in valid_codes,
                     }
-                    admitted = all(checks.values())
-                    failed_checks = [key for key, passed in checks.items() if not passed]
-                    decision_reason = (
-                        "通过：新颖性、可靠催化及持续性/龙头空间门槛均满足"
-                        if admitted
-                        else "未通过：" + "、".join(failed_checks)
-                    )
+                    evidence_grade = _admission_evidence_grade(item.get("catalysts", []))
+                    core_passed = all(core_checks.values())
+                    formal_evidence = evidence_grade in {"official", "multi_source"}
+                    previous_watching = theme.get("status") == "watching"
+                    if core_passed and formal_evidence:
+                        decision_level = "formal"
+                        evidence_reason = (
+                            "官方/公司披露证据"
+                            if evidence_grade == "official"
+                            else "多源产业证据交叉验证"
+                        )
+                        decision_reason = (
+                            "正式题材：市场共识、持续性与新颖性通过，且已有"
+                            + evidence_reason
+                        )
+                    elif core_passed:
+                        decision_level = "early_watch"
+                        decision_reason = (
+                            "早期观察：市场共识、新颖性和持续性通过；当前仅有供应链、"
+                            "研报或单一来源信息，等待官方确认或多源交叉验证"
+                        )
+                    elif previous_watching:
+                        decision_level = "early_watch"
+                        failed = _failed_check_labels(core_checks)
+                        decision_reason = (
+                            "继续早期观察：本轮复核仍未满足正式升级条件；"
+                            + "、".join(failed)
+                        )
+                    else:
+                        decision_level = "rejected"
+                        failed = _failed_check_labels(core_checks)
+                        decision_reason = "未纳入：" + "、".join(failed)
+                    admitted = decision_level == "formal"
                     self.database.save_admission_review(
                         theme_id,
                         item,
                         history,
                         validated_members,
                         admitted,
+                        decision_level,
                         decision_reason,
                     )
                     explanation = {
@@ -453,28 +642,44 @@ class StockTopicService:
                     self.database.save_ai_explanation(theme_id, explanation)
                     self.database.save_theme_catalysts(theme_id, item.get("catalysts", []))
                     self.database.set_suggested_name(theme_id, item["suggested_name"])
-                    if admitted:
+                    if decision_level in {"formal", "early_watch"}:
                         self.database.add_validated_members(
                             theme_id,
                             validated_members,
                             self.clock.china_now().isoformat(timespec="seconds"),
                         )
-                        self.discovery.confirm(
-                            theme_id,
-                            item["suggested_name"],
-                            float(item.get("catalyst_confidence") or 0),
-                            f"预估{item['expected_duration_days']}个交易日",
-                        )
-                        self.database.set_admission_status(theme_id, "admitted", decision_reason)
-                        confirmed = self.database.get_theme(theme_id) or {}
-                        score = self.scorer.calculate(confirmed, self.clock.china_now())
-                        if score:
-                            self.database.save_score(theme_id, score)
-                        self._send_new_theme_alert(theme_id, item, confirmed)
+                        if decision_level == "formal":
+                            self.discovery.confirm(
+                                theme_id,
+                                item["suggested_name"],
+                                float(item.get("catalyst_confidence") or 0),
+                                f"预估{item['expected_duration_days']}个交易日",
+                            )
+                            self.database.set_admission_status(
+                                theme_id, "admitted", decision_reason, evidence_grade
+                            )
+                            confirmed = self.database.get_theme(theme_id) or {}
+                            score = self.scorer.calculate(confirmed, self.clock.china_now())
+                            if score:
+                                self.database.save_score(theme_id, score)
+                            self._send_new_theme_alert(theme_id, item, confirmed, "formal")
+                        else:
+                            self.database.set_theme_status(
+                                theme_id,
+                                "watching",
+                                item["suggested_name"],
+                                float(item.get("catalyst_confidence") or 0),
+                                f"预估{item['expected_duration_days']}个交易日",
+                            )
+                            self.database.set_admission_status(
+                                theme_id, "early_watch", decision_reason, evidence_grade
+                            )
+                            watching = self.database.get_theme(theme_id) or {}
+                            self._send_new_theme_alert(theme_id, item, watching, "early_watch")
                     else:
                         self.discovery.reject(theme_id)
                         self.database.set_admission_status(
-                            theme_id, "not_admitted", decision_reason
+                            theme_id, "not_admitted", decision_reason, evidence_grade
                         )
                 except Exception as error:
                     self.database.set_admission_status(
@@ -492,11 +697,12 @@ class StockTopicService:
         themes = [
             item
             for item in self.database.list_themes()
-            if item.get("status") in {"confirmed", "pending"}
+            if item.get("status") in {"confirmed", "watching", "pending"}
         ]
         themes.sort(
             key=lambda item: (
-                item.get("status") == "confirmed",
+                item.get("status") in {"watching", "confirmed"},
+                item.get("status") == "watching",
                 sum(bool(member.get("signal_active")) for member in item.get("members", [])),
                 float((item.get("score") or {}).get("heat") or 0),
                 float((item.get("market_summary") or {}).get("current_average_pct") or 0),
@@ -551,6 +757,11 @@ class StockTopicService:
         finally:
             with self._ai_lock:
                 self._ai_inflight.difference_update(int(theme["id"]) for theme in selected)
+        watching_ids = [
+            int(theme["id"]) for theme in selected if theme.get("status") == "watching"
+        ]
+        if watching_ids:
+            self._assess_and_admit_candidates(watching_ids)
         completed_at = self.clock.china_now().isoformat()
         self.database.set_metadata("last_catalyst_refresh_at", completed_at)
         self.database.set_metadata(
@@ -575,7 +786,11 @@ class StockTopicService:
         return due[-1] if due else None
 
     def _send_new_theme_alert(
-        self, theme_id: int, review: dict[str, Any], theme: dict[str, Any]
+        self,
+        theme_id: int,
+        review: dict[str, Any],
+        theme: dict[str, Any],
+        level: str = "formal",
     ) -> None:
         name = str(
             theme.get("final_name")
@@ -599,7 +814,8 @@ class StockTopicService:
         )
         leader_text = f"{leader.get('name', '')}({leader_code})" if leader_code else "未确认"
         body = (
-            f"触发：同题材至少{self.settings.minimum_limit_touches}只股票当日曾触及涨停\n"
+            f"级别：{'正式题材' if level == 'formal' else '早期观察（证据待确认）'}\n"
+            f"触发：共同事件至少{self.settings.minimum_limit_touches}只股票当日曾触及涨停\n"
             f"核心股票：{stock_text or '等待行情补全'}\n"
             f"催化：{review.get('catalyst_summary') or '未提供'}\n"
             f"预估持续：{int(review.get('expected_duration_days') or 0)}个交易日\n"
@@ -608,10 +824,10 @@ class StockTopicService:
             f"查看：{self.settings.public_base_url}"
         )
         self._send_alert(
-            dedupe_key=f"new_key_theme:{theme_id}",
-            category="new_key_theme",
-            severity="critical",
-            title=f"新重点题材：{name}",
+            dedupe_key=f"theme_level:{level}:{theme_id}",
+            category="formal_theme" if level == "formal" else "early_watch_theme",
+            severity="critical" if level == "formal" else "high",
+            title=(f"正式题材：{name}" if level == "formal" else f"早期观察：{name}"),
             body=body,
             theme_id=theme_id,
         )
@@ -718,6 +934,9 @@ class StockTopicService:
             self.sync_kpl_events(compact)
             self.sync_kpl_concepts(compact)
             self.sync_daily_metrics(compact)
+            backfill = self.backfill_recent_trade_days(
+                now, refresh_sources=False, source="end_of_day"
+            )
             cohort_count = self._record_daily_cohorts(now)
             backup = self.database.backup()
             self.database.prune_backups()
@@ -727,13 +946,15 @@ class StockTopicService:
                 run_id,
                 "success",
                 len(archived),
-                f"backup={backup.name}, cohorts={cohort_count}",
+                f"backup={backup.name}, cohorts={cohort_count}, "
+                f"backfill_candidates={len(backfill['candidate_ids'])}",
             )
             return {
                 "status": "success",
                 "backup": backup.name,
                 "archived": len(archived),
                 "cohorts": cohort_count,
+                "backfill": backfill,
             }
         except Exception as error:
             self.database.finish_run(run_id, "failed", detail=str(error))
@@ -788,9 +1009,23 @@ class StockTopicService:
                     logger.exception("Calendar unavailable; collector remains fail-closed")
             state = self.clock.state(now, calendar)
             candidate_ids: list[int] = []
+            if self._startup_backfill_pending and calendar is not None:
+                self._startup_backfill_pending = False
+                self._discovery_inflight.add("startup_backfill")
+                asyncio.create_task(
+                    asyncio.to_thread(self._startup_backfill, now),
+                    name="startup-discovery-backfill",
+                )
             if state.in_realtime_window and state.slot and now.second < 25:
                 result = await asyncio.to_thread(self.collect_once, now)
                 candidate_ids.extend(result.get("candidate_ids", []))
+                discovery_date = result.get("discovery_trade_date")
+                if discovery_date and discovery_date not in self._discovery_inflight:
+                    self._discovery_inflight.add(discovery_date)
+                    asyncio.create_task(
+                        asyncio.to_thread(self._discover_and_assess_date, discovery_date, now),
+                        name=f"semantic-discovery-{discovery_date}",
+                    )
             elif calendar and time(15, 5) <= now.time() <= time(15, 20):
                 await asyncio.to_thread(self.end_of_day, now)
             if now.second < 25:
@@ -831,6 +1066,7 @@ class StockTopicService:
         latest = self.database.latest_run("collect_quotes")
         return {
             "status": "ok" if self.database.integrity_check() == "ok" else "degraded",
+            "version": __version__,
             "china_time": now.isoformat(timespec="seconds"),
             "market": {
                 "is_open_day": state.is_open_day,
@@ -855,9 +1091,15 @@ class StockTopicService:
             ),
             "daily_metrics_trade_date": self.database.get_metadata("daily_metrics_synced_date"),
             "latest_wecom_error": self.database.get_metadata("last_wecom_error"),
+            "latest_discovery_backfill": self.database.get_metadata(
+                "last_discovery_backfill"
+            ),
             "admission_policy": {
                 "minimum_limit_touches": self.settings.minimum_limit_touches,
                 "failed_boards_count": True,
+                "semantic_event_clustering": True,
+                "backfill_trade_days": 2,
+                "levels": ["early_watch", "formal"],
                 "novelty_lookback_trade_days": self.settings.novelty_lookback_trade_days,
                 "minimum_expected_duration_days": (self.settings.minimum_expected_duration_days),
                 "leader_upside_threshold_pct": self.settings.leader_upside_threshold_pct,
@@ -880,3 +1122,58 @@ def _safe_error(error: Exception) -> str:
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+", r"\1***", message)
     return (message or type(error).__name__)[:500]
+
+
+def _within_retry_cooldown(value: Any, now: datetime, *, minutes: int) -> bool:
+    try:
+        created_at = datetime.fromisoformat(str(value))
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=now.tzinfo)
+        return now - created_at.astimezone(now.tzinfo) < timedelta(minutes=minutes)
+    except (TypeError, ValueError):
+        return False
+
+
+def _admission_evidence_grade(catalysts: list[dict[str, Any]]) -> str:
+    evidenced = [item for item in catalysts if item.get("url")]
+    if any(
+        str(item.get("evidence_level") or "") == "官方确认"
+        or str(item.get("source_kind") or "")
+        in {"official", "company_disclosure", "regulator"}
+        for item in evidenced
+    ):
+        return "official"
+    cross_sources = [
+        item
+        for item in evidenced
+        if str(item.get("evidence_level") or "") == "多源交叉验证"
+        or str(item.get("source_kind") or "")
+        in {
+            "industry_primary",
+            "authoritative_media",
+            "brokerage_research",
+            "supply_chain_report",
+        }
+    ]
+    domains = {
+        urlsplit(str(item.get("url") or "")).netloc.lower().removeprefix("www.")
+        for item in cross_sources
+        if urlsplit(str(item.get("url") or "")).netloc
+    }
+    if len(domains) >= 2:
+        return "multi_source"
+    if evidenced:
+        return "supply_chain_unconfirmed"
+    return "weak"
+
+
+def _failed_check_labels(checks: dict[str, bool]) -> list[str]:
+    labels = {
+        "new_theme": "不属于首次广泛发酵",
+        "novelty_confidence": "新颖性置信度不足",
+        "catalyst_confidence": "催化可信度不足",
+        "source_available": "没有可核验新闻来源",
+        "duration_or_upside": "未满足持续3日或龙头30%情景空间",
+        "valid_leader": "龙头候选缺少确定性股票证据",
+    }
+    return [labels.get(key, key) for key, passed in checks.items() if not passed]

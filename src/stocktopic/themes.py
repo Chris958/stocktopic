@@ -15,47 +15,46 @@ class ThemeDiscovery:
         self,
         database: Database,
         minimum_limit_touches: int = 4,
-        maximum_candidates: int = 4,
     ):
         self.database = database
         self.minimum_limit_touches = minimum_limit_touches
-        self.maximum_candidates = maximum_candidates
 
     def discover(self, now: datetime) -> list[int]:
-        compact = now.strftime("%Y%m%d")
+        return self.discover_for_date(now.strftime("%Y%m%d"), now)
+
+    def discover_for_date(
+        self,
+        trade_date: str,
+        now: datetime,
+        semantic_clusters: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        eligible = semantic_clusters
+        if eligible is None:
+            eligible = self.database.kpl_theme_clusters(trade_date)
         eligible = [
             item
-            for item in self.database.kpl_theme_clusters(compact)
-            if int(item["touch_count"]) >= self.minimum_limit_touches
+            for item in eligible
+            if int(item.get("touch_count") or 0) >= self.minimum_limit_touches
         ]
         eligible.sort(
             key=lambda item: (
-                int(item["touch_count"]),
-                int(item["sealed_count"]),
-                -int(item["failed_count"]),
+                float(item.get("cluster_confidence") or 0),
+                int(item.get("touch_count") or 0),
+                int(item.get("sealed_count") or 0),
+                -int(item.get("failed_count") or 0),
             ),
             reverse=True,
         )
 
-        selected: list[dict[str, Any]] = []
-        for item in eligible:
-            codes = {str(member["code"]) for member in item["members"]}
-            if any(
-                len(codes & previous["codes"]) / max(1, min(len(codes), len(previous["codes"])))
-                >= 0.75
-                for previous in selected
-            ):
-                continue
-            item["codes"] = codes
-            selected.append(item)
-            if len(selected) >= self.maximum_candidates:
-                break
-
         candidate_ids: list[int] = []
-        for item in selected:
+        for item in eligible:
+            item["codes"] = {str(member["code"]) for member in item["members"]}
             tag = str(item["tag"])
             fingerprint = hashlib.sha256(
-                f"limit-touch-v2|{now.date().isoformat()}|{tag}".encode()
+                (
+                    f"event-cluster-v3|{trade_date}|{tag}|"
+                    + ",".join(sorted(item["codes"]))
+                ).encode()
             ).hexdigest()
             ordered = sorted(
                 item["members"],
@@ -71,33 +70,61 @@ class ThemeDiscovery:
                     "membership_source": "same_day_limit_touch",
                     "evidence": {
                         "shared_tag": tag,
+                        "source_themes": member.get("themes", []),
+                        "concept_tags": member.get("concept_tags", []),
                         "board_tag": member.get("board_tag"),
                         "board_status": member.get("status"),
                         "limit_reason": member.get("limit_reason"),
                         "first_limit_time": member.get("limit_up_time"),
                         "last_limit_time": member.get("last_limit_time"),
                         "failed_open_time": member.get("open_time"),
-                        "trade_date": compact,
+                        "trade_date": trade_date,
+                        "cluster_method": item.get("cluster_method", "exact_tag"),
+                        "common_logic": item.get("common_logic"),
                     },
                 }
                 for member in ordered
             ]
-            reason = (
-                f"当日同属“{tag}”的股票中有{item['touch_count']}只曾触及涨停；"
-                f"当前封板{item['sealed_count']}只、炸板{item['failed_count']}只。"
-                "已达到AI新颖性与持续性分析门槛。"
+            common_logic = str(item.get("common_logic") or "").strip()
+            method = str(item.get("cluster_method") or "exact_tag")
+            grouping_reason = (
+                "由涨停原因、题材标签、题材成分与新闻催化语义归并。"
+                if method == "semantic_event"
+                else "由开盘啦共同标签归并。"
             )
+            reason = (
+                f"{trade_date}共同事件“{tag}”有{item['touch_count']}只股票曾触及涨停；"
+                f"封板{item['sealed_count']}只、炸板{item['failed_count']}只。"
+                + (f"共同逻辑：{common_logic}。" if common_logic else "")
+                + grouping_reason
+            )
+            day1 = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+            discovered = now
+            if trade_date != now.strftime("%Y%m%d"):
+                discovered = now.replace(
+                    year=int(trade_date[:4]),
+                    month=int(trade_date[4:6]),
+                    day=int(trade_date[6:8]),
+                    hour=15,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
             theme_id = self.database.upsert_candidate(
                 fingerprint=fingerprint,
                 provisional_name=f"{tag}待审",
                 shared_tag=tag,
                 direction="positive",
-                discovered_at=now.isoformat(timespec="seconds"),
-                day1_date=now.date().isoformat(),
+                discovered_at=discovered.isoformat(timespec="seconds"),
+                day1_date=day1,
                 discovery_reason=reason,
                 members=members,
                 admission_status="awaiting_ai",
+                cluster_method=method,
+                cluster_confidence=float(item.get("cluster_confidence") or 0),
+                cluster_aliases=item.get("aliases") or [tag],
             )
+            self.database.save_theme_catalysts(theme_id, item.get("catalysts") or [])
             theme = self.database.get_theme(theme_id)
             if (
                 theme

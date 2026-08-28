@@ -16,7 +16,8 @@ curl http://127.0.0.1:8765/health
 - `coverage abnormal`：Tushare返回的有效主板股票不足2000只，本周期不参与计算。
 - `data_stale`：全市场累计成交量和成交额没有变化，本周期信号熔断。
 - `latest_wecom_error`：最近一次企业微信失败的阶段、errcode和处理建议；空字符串表示最近一次发送成功。
-- `admission_policy`：当前生效的4只触板、60交易日、3日/30%准入口径。
+- `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
+- `admission_policy`：当前生效的共同事件4只触板、两交易日回补、早期观察/正式题材、60交易日和3日/30%准入口径。
 
 ## 更新
 
@@ -26,6 +27,20 @@ curl http://127.0.0.1:8765/health
 git pull --ff-only
 ./scripts/install_macos.sh
 ```
+
+升级到V4时，安装脚本会把旧版 `MAXIMUM_CANDIDATES_PER_RUN=4` 迁移为 `0`。这不是放宽四票门槛，而是取消候选审查记录的数量截断。
+
+服务重启后会在后台自动回补最近2个交易日。也可以从已登录页面/API手工触发一次：
+
+```bash
+curl -u '你的管理用户名' \
+  -H 'X-StockTopic-Request: 1' \
+  -X POST http://127.0.0.1:8765/api/v1/admin/backfill-discovery
+```
+
+`curl` 会交互询问管理密码，不要把密码直接写进命令历史。
+
+该任务只调用日度开盘啦接口，不调用实时 `rt_k`。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。
 
 ## 备份与归档
 

@@ -13,7 +13,7 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=0.3.0">
+  <link rel="stylesheet" href="/static/style.css?v=0.4.0">
 </head>
 <body>
   <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -23,7 +23,7 @@
     <div class="header-inner">
       <button class="brand pressable" data-view="candidates" aria-label="返回候选题材">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span><strong>StockTopic</strong><small>新重点题材 · 自动准入</small></span>
+        <span><strong>StockTopic</strong><small>V4 · 早期观察 · 正式题材</small></span>
       </button>
       <nav class="desktop-nav" aria-label="主要页面">
         <button class="nav-item active pressable" data-view="candidates" aria-current="page">发现</button>
@@ -44,8 +44,8 @@
     <section class="market-hero" aria-labelledby="pageTitle">
       <div class="hero-copy">
         <p class="eyebrow">LIMIT-UP CONSENSUS · NOVELTY FIRST</p>
-        <h1 id="pageTitle">只发现正在发酵的新重点题材</h1>
-        <p id="pageSummary" class="hero-summary">四只股票触及涨停后才启动分析，再通过60交易日历史与新闻催化判断持续性。</p>
+        <h1 id="pageTitle">在广泛共识形成初期发现重点题材</h1>
+        <p id="pageSummary" class="hero-summary">四只股票触板后按共同事件归并；证据未完全确认先观察，多源验证后升级正式题材。</p>
       </div>
       <div id="marketState" class="market-state loading" role="status">
         <span class="state-dot"></span>
@@ -62,9 +62,9 @@
       </article>
       <article class="glance-card">
         <div class="glance-icon red" aria-hidden="true">候</div>
-        <span>AI审查中</span>
+        <span>观察与审查</span>
         <strong id="candidateMetric">—</strong>
-        <small>已通过四只触板门槛</small>
+        <small>包含早期观察与AI审查</small>
       </article>
       <article class="glance-card">
         <div class="glance-icon green" aria-hidden="true">题</div>
@@ -83,14 +83,20 @@
     <section class="content-shell">
       <div class="section-toolbar">
         <div>
-          <p class="section-kicker" id="sectionKicker">准入审查</p>
-          <h2 id="sectionTitle">只显示达到硬门槛的题材</h2>
-          <p id="sectionDescription">普通异动不再展示；系统自动完成新颖性、催化和持续性审查。</p>
+          <p class="section-kicker" id="sectionKicker">早期观察</p>
+          <h2 id="sectionTitle">已经形成市场共识，等待证据确认</h2>
+          <p id="sectionDescription">所有达到四票门槛的候选均有审查结论；未入池原因不会静默消失。</p>
         </div>
         <div class="count-badge" id="sectionCount">0</div>
       </div>
 
       <section id="candidates" class="view-panel active" aria-label="候选题材">
+        <div class="filter-row" role="group" aria-label="候选审查状态筛选">
+          <button class="filter-chip active pressable" data-candidate-filter="watching">早期观察</button>
+          <button class="filter-chip pressable" data-candidate-filter="reviewing">审查中</button>
+          <button class="filter-chip pressable" data-candidate-filter="rejected">未入池</button>
+          <button class="filter-chip pressable" data-candidate-filter="all">全部记录</button>
+        </div>
         <div id="candidateList" class="theme-list skeleton-list" aria-live="polite">
           <div class="skeleton-card"></div><div class="skeleton-card"></div>
         </div>
@@ -152,6 +158,6 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
-  <script src="/static/app.js?v=0.3.0" defer></script>
+  <script src="/static/app.js?v=0.4.0" defer></script>
 </body>
 </html>

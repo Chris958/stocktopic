@@ -71,6 +71,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     printf 'STOCKTOPIC_PORT=8765\n'
     printf 'PUBLIC_BASE_URL=https://stock.bnken.com\n'
     printf 'MINIMUM_LIMIT_TOUCHES=4\n'
+    printf 'MAXIMUM_CANDIDATES_PER_RUN=0\n'
     printf 'NOVELTY_LOOKBACK_TRADE_DAYS=60\n'
     printf 'NOVELTY_CONFIDENCE_THRESHOLD=70\n'
     printf 'CATALYST_CONFIDENCE_THRESHOLD=65\n'
@@ -91,11 +92,17 @@ append_default() {
 
 append_default "PUBLIC_BASE_URL" "https://stock.bnken.com"
 append_default "MINIMUM_LIMIT_TOUCHES" "4"
+append_default "MAXIMUM_CANDIDATES_PER_RUN" "0"
 append_default "NOVELTY_LOOKBACK_TRADE_DAYS" "60"
 append_default "NOVELTY_CONFIDENCE_THRESHOLD" "70"
 append_default "CATALYST_CONFIDENCE_THRESHOLD" "65"
 append_default "MINIMUM_EXPECTED_DURATION_DAYS" "3"
 append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
+
+if grep -q '^MAXIMUM_CANDIDATES_PER_RUN=4$' "$APP_DIR/.env"; then
+  sed -i '' 's/^MAXIMUM_CANDIDATES_PER_RUN=4$/MAXIMUM_CANDIDATES_PER_RUN=0/' "$APP_DIR/.env"
+  echo "已取消旧版每轮4个候选上限；所有达到硬门槛的候选都会保留审查记录。"
+fi
 chmod 600 "$APP_DIR/.env"
 
 if ! grep -q '^OPENAI_BASE_URL=' "$APP_DIR/.env"; then

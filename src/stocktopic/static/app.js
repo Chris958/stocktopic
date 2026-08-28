@@ -5,6 +5,7 @@ const state = {
   data: null,
   auth: sessionStorage.getItem('stocktopicAuth') || '',
   view: 'candidates',
+  candidateFilter: 'watching',
   themeFilter: 'active',
   sheet: null,
   lastFocus: null,
@@ -13,14 +14,14 @@ const state = {
 
 const views = {
   candidates: {
-    kicker: '准入审查',
-    title: '只显示达到硬门槛的题材',
-    description: '普通异动不再展示；四只股票触板后才进行新颖性、催化和持续性分析。'
+    kicker: '早期观察',
+    title: '已经形成市场共识，等待证据确认',
+    description: '四只股票按共同事件触板后才出现；未入池候选保留完整审查原因。'
   },
   confirmed: {
     kicker: '重点题材库',
-    title: '已经通过自动准入审查',
-    description: '置顶题材优先显示；股票行情与新闻催化可分别展开。'
+    title: '已经通过多源证据验证',
+    description: '正式题材通过持续性审查与官方信息或多源产业证据交叉验证。'
   },
   alerts: {
     kicker: '系统预警',
@@ -132,6 +133,13 @@ $$('[data-theme-filter]').forEach(button => button.addEventListener('click', () 
   updateSectionCount();
 }));
 
+$$('[data-candidate-filter]').forEach(button => button.addEventListener('click', () => {
+  state.candidateFilter = button.dataset.candidateFilter;
+  $$('[data-candidate-filter]').forEach(item => item.classList.toggle('active', item === button));
+  renderCandidates();
+  updateSectionCount();
+}));
+
 $('#refresh').addEventListener('click', () => load(true));
 $('#accountButton').addEventListener('click', event => openSheet('logout', {}, event.currentTarget));
 $('#wecomTest').addEventListener('click', event => openSheet('wecom', {}, event.currentTarget));
@@ -171,6 +179,7 @@ function render() {
   if (!state.data) return;
   const { health, themes, alerts } = state.data;
   const pending = themes.filter(theme => theme.status === 'pending');
+  const watching = themes.filter(theme => theme.status === 'watching');
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
   const market = health.market;
   const marketNode = $('#marketState');
@@ -184,17 +193,34 @@ function render() {
       ? `最近采集 ${formatDataTime(health.latest_quote_run.started_at)}`
       : marketReason(market.reason);
   $('#universeCount').textContent = health.universe_count?.toLocaleString() || '—';
-  $('#candidateMetric').textContent = pending.length.toLocaleString();
+  $('#candidateMetric').textContent = watching.length.toLocaleString();
   $('#confirmedMetric').textContent = confirmed.length.toLocaleString();
   $('#lastRun').textContent = formatTime(health.latest_quote_run?.started_at);
   $('#lastRunDetail').textContent = runStatus(health.latest_quote_run?.status);
-  $('#candidateCount').textContent = pending.length;
+  $('#candidateCount').textContent = pending.length + watching.length;
   $('#confirmedCount').textContent = confirmed.length;
   $('#alertCount').textContent = alerts.length;
-  renderThemes('#candidateList', pending, 'pending');
+  renderCandidates();
   renderConfirmed();
   renderAlerts(alerts);
   updateSectionCount();
+}
+
+function renderCandidates() {
+  if (!state.data) return;
+  let items = state.data.themes.filter(theme =>
+    ['pending', 'watching', 'rejected'].includes(theme.status)
+  );
+  if (state.candidateFilter === 'watching') {
+    items = items.filter(theme => theme.status === 'watching');
+  } else if (state.candidateFilter === 'reviewing') {
+    items = items.filter(theme => theme.status === 'pending');
+  } else if (state.candidateFilter === 'rejected') {
+    items = items.filter(theme => theme.status === 'rejected');
+  }
+  const priority = { watching: 0, pending: 1, rejected: 2 };
+  items.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
+  renderThemes('#candidateList', items, 'audit');
 }
 
 function renderConfirmed() {
@@ -213,13 +239,13 @@ function renderConfirmed() {
 function renderThemes(selector, items, mode) {
   const root = $(selector);
   root.classList.remove('skeleton-list');
-  const pending = mode === 'pending';
+  const audit = mode === 'audit';
   root.innerHTML = items.length
     ? items.map(theme => themeCard(theme, mode)).join('')
     : emptyState(
-      pending ? '没有正在审查的题材' : mode === 'archived' ? '没有已归档题材' : '暂无重点题材',
-      pending
-        ? '只有同题材至少4只股票当日曾触及涨停，才会出现在这里。'
+      audit ? '当前筛选下没有记录' : mode === 'archived' ? '没有已归档题材' : '暂无重点题材',
+      audit
+        ? '所有达到4票共同事件门槛的候选都会保留审查状态和未入池原因。'
         : '通过新颖性、催化和持续性审查后才会自动入库。'
     );
   root.querySelectorAll('[data-action]').forEach(button => {
@@ -242,15 +268,21 @@ function renderThemes(selector, items, mode) {
 }
 
 function themeCard(theme, mode) {
-  const pending = mode === 'pending';
+  const pending = theme.status === 'pending';
+  const watching = theme.status === 'watching';
+  const rejected = theme.status === 'rejected';
   const archived = mode === 'archived';
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
   const activeMembers = theme.members.filter(member => member.active);
-  const returnLabel = pending ? '发现后' : '入库后';
+  const returnLabel = pending || watching || rejected ? '触发后' : '入库后';
   const members = activeMembers.map((member, index) => memberRow(member, index + 1, returnLabel)).join('');
   const score = theme.score;
   const summary = theme.market_summary || {};
   const review = theme.admission_review;
+  const statusHtml = `<div class="theme-stage ${escapeHtml(theme.theme_level || theme.status)}">
+    <span>${escapeHtml(themeStageLabel(theme))}</span>
+    <small>${escapeHtml(stageDetail(theme))}</small>
+  </div>`;
   const scoreHtml = score ? `<div class="score-grid">
     ${scoreCell('热度', score.heat, 'heat')}
     ${scoreCell('持续性', score.persistence, 'persistence')}
@@ -264,6 +296,10 @@ function themeCard(theme, mode) {
     ${summaryMetric('催化可信度', `${Number(review.catalyst_confidence).toFixed(0)}`)}
     ${summaryMetric('预估持续', `${review.expected_duration_days}日`)}
     ${summaryMetric('龙头情景空间', formatPct(review.leader_upside_scenario_pct))}
+  </div>` : '';
+  const decisionHtml = theme.admission_reason ? `<div class="decision-note ${rejected ? 'rejected' : watching ? 'watching' : ''}">
+    <strong>${rejected ? '未入池原因' : watching ? '当前证据状态' : '审查进度'}</strong>
+    <p>${escapeHtml(theme.admission_reason)}</p>
   </div>` : '';
   const summaryHtml = `<div class="market-summary">
     ${summaryMetric('当前平均', formatPct(summary.current_average_pct))}
@@ -287,7 +323,7 @@ function themeCard(theme, mode) {
     ${catalystContent(catalysts, explanation)}
   </details>` : '';
   let actions = '';
-  if (!pending && !archived) {
+  if ((watching || theme.status === 'confirmed') && !archived) {
     actions = `<div class="card-actions">
       <button class="secondary-button pressable" data-action="toggle-pin" data-id="${theme.id}">${theme.pinned ? '取消置顶' : '置顶'}</button>
       <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">更新新闻催化</button>
@@ -296,9 +332,9 @@ function themeCard(theme, mode) {
   } else if (archived) {
     actions = `<div class="card-actions"><button class="secondary-button pressable" data-action="restore" data-id="${theme.id}">恢复到题材库</button></div>`;
   }
-  return `<article class="theme-card ${theme.pinned ? 'pinned-theme' : ''}">
+  return `<article class="theme-card ${theme.pinned ? 'pinned-theme' : ''} stage-${escapeHtml(theme.theme_level || theme.status)}">
     <div class="theme-head"><div><div class="theme-title">${theme.pinned ? '<span class="pin-mark">置顶</span>' : ''}${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
-    ${scoreHtml}${reviewHtml}${summaryHtml}${stockDetails}
+    ${statusHtml}${scoreHtml}${reviewHtml}${decisionHtml}${summaryHtml}${stockDetails}
     <p class="theme-footnote">Day 1 ${escapeHtml(theme.day1_date)} · 行情 ${escapeHtml(formatDataTime(summary.market_data_at))} · 市值 ${escapeHtml(formatDate(summary.metric_trade_date))}</p>
     ${newsDetails}${actions}
   </article>`;
@@ -454,7 +490,13 @@ function updateSectionCount() {
   if (!state.data) return;
   const { themes, alerts } = state.data;
   let count = 0;
-  if (state.view === 'candidates') count = themes.filter(theme => theme.status === 'pending').length;
+  if (state.view === 'candidates') {
+    const map = {
+      watching: ['watching'], reviewing: ['pending'], rejected: ['rejected'],
+      all: ['watching', 'pending', 'rejected']
+    };
+    count = themes.filter(theme => (map[state.candidateFilter] || map.all).includes(theme.status)).length;
+  }
   if (state.view === 'confirmed') {
     count = state.themeFilter === 'archived'
       ? themes.filter(theme => theme.status === 'archived').length
@@ -467,8 +509,26 @@ function updateSectionCount() {
 function admissionLabel(status) {
   return ({
     awaiting_ai: '等待AI准入审查', analyzing: '正在分析新颖性、催化与持续性',
-    analysis_failed: 'AI分析失败，下一轮涨停池更新后重试'
+    analysis_failed: 'AI分析失败，已保留记录并等待重试',
+    early_watch: '早期观察 · 证据待确认',
+    admitted: '正式题材 · 已通过证据验证',
+    not_admitted: '未达到题材准入条件'
   })[status] || '等待准入证据';
+}
+
+function themeStageLabel(theme) {
+  return ({
+    early_watch: '早期观察', formal: '正式题材', rejected: '未入池',
+    candidate: 'AI审查中'
+  })[theme.theme_level] || admissionLabel(theme.admission_status);
+}
+
+function stageDetail(theme) {
+  if (theme.theme_level === 'early_watch') return '市场共识成立 · 官方或多源证据待确认';
+  if (theme.theme_level === 'formal') return '持续性通过 · 证据已交叉验证';
+  if (theme.theme_level === 'rejected') return '达到4票门槛，但未通过后续审查';
+  if (theme.cluster_method === 'semantic_event') return '共同事件语义归并 · 正在分析';
+  return '共同标签回退归并 · 正在分析';
 }
 
 function marketLabel(session) {

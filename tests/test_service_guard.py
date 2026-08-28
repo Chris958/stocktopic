@@ -55,6 +55,40 @@ class ServiceGuardTests(TestCase):
         self.assertEqual(result["status"], "idle")
         self.assertEqual(result["session"], "lunch_break")
 
+    def test_two_day_discovery_backfill_never_calls_realtime_api(self):
+        self.service.database.replace_calendar(
+            [
+                {"cal_date": "20260825", "is_open": "1", "pretrade_date": "20260824"},
+                {"cal_date": "20260826", "is_open": "1", "pretrade_date": "20260825"},
+            ]
+        )
+        self.service.database.upsert_stocks(
+            [
+                {"ts_code": f"60000{i}.SH", "name": f"股票{i}", "market": "主板"}
+                for i in range(4)
+            ]
+        )
+        self.service.database.upsert_kpl_events(
+            [
+                {
+                    "trade_date": "20260825",
+                    "ts_code": f"60000{i}.SH",
+                    "name": f"股票{i}",
+                    "tag": "涨停",
+                    "theme": "停机期间题材",
+                    "status": "首板",
+                }
+                for i in range(4)
+            ]
+        )
+        result = self.service.backfill_recent_trade_days(
+            datetime(2026, 8, 26, 18, 0, tzinfo=CN),
+            refresh_sources=False,
+            source="test",
+        )
+        self.assertEqual(result["trade_dates"], ["20260826", "20260825"])
+        self.assertEqual(len(result["candidate_ids"]), 1)
+
     def test_catalyst_schedule_catches_up_to_latest_due_slot(self):
         self.assertEqual(
             self.service._catalyst_refresh_slot(datetime(2026, 8, 26, 9, 5, tzinfo=CN)),

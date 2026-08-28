@@ -33,6 +33,12 @@ struct ThemesView: View {
             }
             let confirmed = store.dashboard?.themes.filter { $0.status == "confirmed" } ?? []
             let pending = store.dashboard?.themes.filter { $0.status == "pending" } ?? []
+            let watching = store.dashboard?.themes.filter { $0.status == "watching" } ?? []
+            let rejected = store.dashboard?.themes.filter { $0.status == "rejected" } ?? []
+            Section("早期观察") {
+                if watching.isEmpty { Text("暂无证据待确认题材").foregroundStyle(.secondary) }
+                ForEach(watching) { theme in ThemeRow(theme: theme) }
+            }
             Section("正式题材") {
                 if confirmed.isEmpty { ContentUnavailableView("暂无正式题材", systemImage: "chart.xyaxis.line") }
                 ForEach(confirmed) { theme in ThemeRow(theme: theme) }
@@ -40,6 +46,10 @@ struct ThemesView: View {
             Section("AI准入审查中") {
                 if pending.isEmpty { Text("暂无达到四只触板门槛的候选").foregroundStyle(.secondary) }
                 ForEach(pending) { theme in ThemeRow(theme: theme) }
+            }
+            Section("未入池记录") {
+                if rejected.isEmpty { Text("暂无未通过记录").foregroundStyle(.secondary) }
+                ForEach(rejected) { theme in ThemeRow(theme: theme) }
             }
         }
         .navigationTitle("题材情绪")
@@ -65,7 +75,8 @@ struct ThemeRow: View {
                 Text("\(score.lifecycle) · Day \(score.details.dayNumber)\(score.leaderThemeDivergence == 1 ? " · 龙头—板块背离" : "")")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("等待新颖性、催化和持续性审查").font(.caption).foregroundStyle(.secondary)
+                Text(theme.admissionReason ?? "等待新颖性、催化和持续性审查")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Text(theme.members.filter { $0.active == 1 }.map(\.name).joined(separator: " · "))
                 .font(.caption).foregroundStyle(.secondary).lineLimit(2)

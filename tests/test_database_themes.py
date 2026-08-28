@@ -318,21 +318,132 @@ class ThemeDatabaseTests(TestCase):
         self.db.restore_theme(theme_id)
         self.assertEqual(self.db.get_theme(theme_id)["status"], "confirmed")
 
+    def test_early_watch_restore_preserves_its_evidence_level(self):
+        theme_id = self.create_candidate()
+        self.db.set_theme_status(theme_id, "watching", "供应链待确认题材")
+        self.db.archive_theme(theme_id)
+        self.db.restore_theme(theme_id)
+        theme = self.db.get_theme(theme_id)
+        self.assertEqual(theme["status"], "watching")
+        self.assertEqual(theme["theme_level"], "early_watch")
+
     def test_kpl_concept_member_maps_stock_code_and_concept_name(self):
         self.db.upsert_stocks([{"ts_code": "600000.SH", "name": "测试股份", "market": "主板"}])
         count = self.db.upsert_kpl_concept_members(
             [
                 {
-                    "ts_code": "600000.SH",
-                    "name": "测试股份",
-                    "con_name": "液冷服务器",
-                    "con_code": "885999",
+                    "ts_code": "000229.KP",
+                    "name": "液冷服务器",
+                    "con_name": "测试股份",
+                    "con_code": "600000.SH",
+                    "trade_date": "20260826",
                 }
             ]
         )
         self.assertEqual(count, 1)
         pool = self.db.eligible_members_for_tag("液冷服务器")
         self.assertEqual(pool[0]["code"], "600000.SH")
+        self.assertEqual(pool[0]["matched_tags"], ["液冷服务器"])
+
+    def test_semantic_event_cluster_combines_different_source_labels(self):
+        self.db.upsert_stocks(
+            [{"ts_code": f"60000{i}.SH", "name": f"股票{i}", "market": "主板"} for i in range(4)]
+        )
+        self.db.upsert_kpl_events(
+            [
+                {
+                    "trade_date": "20260827",
+                    "ts_code": f"60000{i}.SH",
+                    "name": f"股票{i}",
+                    "tag": "涨停" if i < 3 else "炸板",
+                    "theme": "PTFE" if i == 0 else "氟化工" if i == 1 else "PCB材料",
+                    "status": "首板",
+                    "lu_time": f"13{i}000",
+                    "lu_desc": "Rubin Ultra正交背板材料升级",
+                }
+                for i in range(4)
+            ]
+        )
+        events = self.db.limit_touch_events("20260827")
+        semantic = [
+            {
+                "tag": "英伟达PTFE正交背板",
+                "common_logic": "Rubin Ultra背板材料升级",
+                "members": events,
+                "touch_count": 4,
+                "sealed_count": 3,
+                "failed_count": 1,
+                "aliases": ["PTFE", "氟化工", "PCB材料"],
+                "cluster_confidence": 91,
+                "cluster_method": "semantic_event",
+                "catalysts": [],
+            }
+        ]
+        discovery = ThemeDiscovery(self.db, minimum_limit_touches=4)
+        ids = discovery.discover_for_date(
+            "20260827",
+            datetime(2026, 8, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            semantic,
+        )
+        theme = self.db.get_theme(ids[0])
+        self.assertEqual(theme["shared_tag"], "英伟达PTFE正交背板")
+        self.assertEqual(theme["day1_date"], "2026-08-27")
+        self.assertEqual(theme["cluster_method"], "semantic_event")
+        self.assertEqual(set(theme["cluster_aliases"]), {"PTFE", "氟化工", "PCB材料"})
+
+    def test_every_qualifying_semantic_cluster_is_persisted_without_a_run_cap(self):
+        self.db.upsert_stocks(
+            [
+                {"ts_code": f"60000{i}.SH", "name": f"股票{i}", "market": "主板"}
+                for i in range(8)
+            ]
+        )
+        self.db.upsert_kpl_events(
+            [
+                {
+                    "trade_date": "20260827",
+                    "ts_code": f"60000{i}.SH",
+                    "name": f"股票{i}",
+                    "tag": "涨停",
+                    "theme": "事件甲" if i < 4 else "事件乙",
+                    "status": "首板",
+                    "lu_time": f"10{i}000",
+                }
+                for i in range(8)
+            ]
+        )
+        by_code = {
+            item["code"]: item for item in self.db.limit_touch_events("20260827")
+        }
+        semantic = []
+        for name, codes in (
+            ("事件甲", [f"60000{i}.SH" for i in range(4)]),
+            ("事件乙", [f"60000{i}.SH" for i in range(4, 8)]),
+        ):
+            semantic.append(
+                {
+                    "tag": name,
+                    "common_logic": f"{name}的共同催化",
+                    "members": [by_code[code] for code in codes],
+                    "touch_count": 4,
+                    "sealed_count": 4,
+                    "failed_count": 0,
+                    "aliases": [name],
+                    "cluster_confidence": 90,
+                    "cluster_method": "semantic_event",
+                    "catalysts": [],
+                }
+            )
+        ids = ThemeDiscovery(self.db, minimum_limit_touches=4).discover_for_date(
+            "20260827",
+            datetime(2026, 8, 28, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            semantic,
+        )
+        self.assertEqual(len(ids), 2)
+        self.assertEqual(
+            {theme["shared_tag"] for theme in self.db.list_themes()},
+            {"事件甲", "事件乙"},
+        )
 
     def test_existing_v2_database_is_migrated_without_losing_theme(self):
         legacy_path = Path(self.temp.name) / "legacy.sqlite3"
@@ -374,3 +485,5 @@ class ThemeDatabaseTests(TestCase):
         self.assertEqual(theme["provisional_name"], "旧候选")
         self.assertEqual(theme["admission_status"], "legacy")
         self.assertEqual(theme["pinned"], 0)
+        self.assertEqual(theme["theme_level"], "candidate")
+        self.assertEqual(theme["cluster_aliases"], [])

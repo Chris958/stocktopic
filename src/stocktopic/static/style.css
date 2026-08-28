@@ -263,6 +263,8 @@ h1 {
   box-shadow: var(--shadow-card);
 }
 .theme-card.pinned-theme { border-color: color-mix(in srgb, var(--blue), transparent 62%); box-shadow: 0 16px 44px rgba(0, 122, 255, 0.1); }
+.theme-card.stage-early_watch { border-color: color-mix(in srgb, var(--amber), transparent 58%); }
+.theme-card.stage-rejected { box-shadow: none; }
 .pin-mark { display: inline-block; margin-right: 8px; padding: 3px 6px; border-radius: 6px; background: var(--blue); color: #fff; font-size: 8px; font-weight: 650; vertical-align: 3px; }
 .theme-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
 .theme-title { margin-bottom: 5px; font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; font-weight: 620; }
@@ -280,6 +282,22 @@ h1 {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.theme-stage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  padding: 9px 11px;
+  border-radius: 11px;
+  color: var(--blue);
+  background: var(--blue-soft);
+}
+.theme-stage span { font-size: 11px; font-weight: 650; }
+.theme-stage small { color: var(--secondary); font-size: 9px; text-align: right; }
+.theme-stage.early_watch { color: var(--amber); background: var(--amber-soft); }
+.theme-stage.formal { color: var(--fall); background: var(--fall-soft); }
+.theme-stage.rejected { color: var(--rise); background: var(--rise-soft); }
 .score-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 19px; }
 .score-cell { min-width: 0; padding: 12px; border-radius: 13px; background: var(--surface-soft); }
 .score-cell span { display: block; color: var(--secondary); font-size: 9px; letter-spacing: 0.04em; }
@@ -303,6 +321,11 @@ h1 {
 .admission-strip span, .admission-strip strong { display: block; }
 .admission-strip span { color: var(--secondary); font-size: 9px; }
 .admission-strip strong { margin-top: 3px; overflow: hidden; color: var(--blue); font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.decision-note { margin-top: 12px; padding: 11px 12px; border-left: 3px solid var(--blue); border-radius: 0 11px 11px 0; background: var(--blue-soft); }
+.decision-note.watching { border-left-color: var(--amber); background: var(--amber-soft); }
+.decision-note.rejected { border-left-color: var(--rise); background: var(--rise-soft); }
+.decision-note strong { font-size: 10px; font-weight: 650; }
+.decision-note p { margin: 4px 0 0; color: var(--secondary); font-size: 10px; line-height: 1.5; }
 .market-summary > div { min-width: 0; padding: 12px 13px; border-radius: 13px; background: var(--surface-soft); }
 .market-summary span, .market-summary strong { display: block; }
 .market-summary span { color: var(--secondary); font-size: 9px; }

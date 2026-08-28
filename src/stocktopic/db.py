@@ -60,10 +60,34 @@ class Database:
             "admission_status": "TEXT NOT NULL DEFAULT 'legacy'",
             "admission_reason": "TEXT",
             "admission_reviewed_at": "TEXT",
+            "theme_level": "TEXT NOT NULL DEFAULT 'candidate'",
+            "observation_at": "TEXT",
+            "cluster_method": "TEXT NOT NULL DEFAULT 'exact_tag'",
+            "cluster_confidence": "REAL NOT NULL DEFAULT 0",
+            "cluster_aliases_json": "TEXT NOT NULL DEFAULT '[]'",
+            "evidence_grade": "TEXT NOT NULL DEFAULT 'unreviewed'",
         }
         for name, definition in additions.items():
             if name not in columns:
                 connection.execute(f"ALTER TABLE candidate_themes ADD COLUMN {name} {definition}")
+        review_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(theme_admission_reviews)").fetchall()
+        }
+        if "decision_level" not in review_columns:
+            connection.execute(
+                "ALTER TABLE theme_admission_reviews ADD COLUMN "
+                "decision_level TEXT NOT NULL DEFAULT 'rejected'"
+            )
+        catalyst_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(theme_catalysts)").fetchall()
+        }
+        if "source_kind" not in catalyst_columns:
+            connection.execute(
+                "ALTER TABLE theme_catalysts ADD COLUMN "
+                "source_kind TEXT NOT NULL DEFAULT 'unknown'"
+            )
 
     def set_metadata(self, key: str, value: str) -> None:
         with self.connect() as connection:
@@ -518,12 +542,27 @@ class Database:
     def upsert_kpl_concept_members(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
         active = self.active_stock_map()
-        values = []
+        tag_values = []
+        membership_values = []
         for row in rows:
-            code = str(row.get("ts_code") or "")
-            tag = str(row.get("con_name") or "").strip()
+            # Tushare kpl_concept_cons: ts_code/name identify the concept;
+            # con_code/con_name identify the constituent stock.
+            code = str(row.get("con_code") or "")
+            tag = str(row.get("name") or "").strip()
             if code in active and tag:
-                values.append((code, tag, "theme", "tushare_kpl_concept_cons", 0.9, now))
+                tag_values.append((code, tag, "theme", "tushare_kpl_concept_cons", 0.9, now))
+                membership_values.append(
+                    (
+                        str(row.get("trade_date") or ""),
+                        str(row.get("ts_code") or ""),
+                        tag,
+                        code,
+                        str(row.get("con_name") or active[code]["name"]),
+                        row.get("desc"),
+                        int(_number(row.get("hot_num"))),
+                        now,
+                    )
+                )
         with self.connect() as connection:
             connection.executemany(
                 """
@@ -532,9 +571,74 @@ class Database:
                 ON CONFLICT(code, tag, source) DO UPDATE SET
                     confidence=excluded.confidence, updated_at=excluded.updated_at
                 """,
-                values,
+                tag_values,
             )
-        return len(values)
+            connection.executemany(
+                """
+                INSERT INTO kpl_concept_memberships(
+                    trade_date, concept_id, concept_name, code, name,
+                    description, hot_num, synced_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, concept_id, code) DO UPDATE SET
+                    concept_name=excluded.concept_name,
+                    name=excluded.name,
+                    description=excluded.description,
+                    hot_num=excluded.hot_num,
+                    synced_at=excluded.synced_at
+                """,
+                membership_values,
+            )
+        return len(membership_values)
+
+    def limit_touch_events(self, trade_date: str) -> list[dict[str, Any]]:
+        """Return one deterministic limit-touch record per stock for semantic clustering."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER(
+                        PARTITION BY code
+                        ORDER BY CASE board_tag WHEN '涨停' THEN 0 ELSE 1 END,
+                                 synced_at DESC
+                    ) AS rn
+                    FROM kpl_events
+                    WHERE trade_date=? AND board_tag IN ('涨停','炸板')
+                )
+                SELECT trade_date, code, name, board_tag, themes_json, status,
+                       limit_up_time, open_time, last_limit_time, limit_reason,
+                       pct_change, realtime_pct_change, synced_at
+                FROM ranked WHERE rn=1
+                ORDER BY limit_up_time, code
+                """,
+                (trade_date,),
+            ).fetchall()
+            codes = [str(row["code"]) for row in rows]
+            tag_rows: list[sqlite3.Row] = []
+            if codes:
+                placeholders = ",".join("?" for _ in codes)
+                tag_rows = connection.execute(
+                    f"""
+                    SELECT code, concept_name AS tag,
+                           'tushare_kpl_concept_cons' AS source,
+                           0.9 AS confidence
+                    FROM kpl_concept_memberships
+                    WHERE trade_date=? AND code IN ({placeholders})
+                    ORDER BY hot_num DESC, concept_name
+                    """,
+                    [trade_date, *codes],
+                ).fetchall()
+        tags: dict[str, list[dict[str, Any]]] = {}
+        for row in tag_rows:
+            bucket = tags.setdefault(str(row["code"]), [])
+            if len(bucket) < 12 and str(row["tag"]) not in {str(item["tag"]) for item in bucket}:
+                bucket.append(dict(row))
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["themes"] = json.loads(item.pop("themes_json") or "[]")
+            item["concept_tags"] = tags.get(str(item["code"]), [])
+            result.append(item)
+        return result
 
     def kpl_events_for_codes(self, trade_date: str, codes: Sequence[str]) -> list[dict[str, Any]]:
         if not codes:
@@ -602,21 +706,88 @@ class Database:
         ]
 
     def eligible_members_for_tag(self, tag: str, limit: int = 160) -> list[dict[str, Any]]:
+        return self.eligible_members_for_tags([tag], limit)
+
+    def eligible_members_for_tags(
+        self, tags: Sequence[str], limit: int = 160
+    ) -> list[dict[str, Any]]:
+        normalized = list(dict.fromkeys(str(tag).strip() for tag in tags if str(tag).strip()))
+        if not normalized:
+            return []
+        placeholders = ",".join("?" for _ in normalized)
         with self.connect() as connection:
             rows = connection.execute(
-                """
-                SELECT s.code, s.name, s.industry, st.source, st.confidence,
-                       st.updated_at
+                f"""
+                SELECT s.code, s.name, s.industry,
+                       GROUP_CONCAT(DISTINCT st.tag) AS matched_tags,
+                       MAX(st.confidence) AS confidence,
+                       MAX(st.updated_at) AS updated_at,
+                       'tushare_theme_evidence' AS source
                 FROM stock_tags st
                 JOIN stocks s ON s.code=st.code
-                WHERE st.tag=? AND st.tag_type='theme' AND st.confidence>=0.9
+                WHERE st.tag IN ({placeholders}) AND st.tag_type='theme' AND st.confidence>=0.9
                   AND s.active=1
-                ORDER BY st.confidence DESC, st.updated_at DESC
+                GROUP BY s.code, s.name, s.industry
+                ORDER BY MAX(st.confidence) DESC, MAX(st.updated_at) DESC
                 LIMIT ?
                 """,
-                (tag, limit),
+                (*normalized, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["matched_tags"] = _split_tags(str(item.get("matched_tags") or ""))
+            result.append(item)
+        return result
+
+    def semantic_cluster_run(self, trade_date: str, input_signature: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM semantic_cluster_runs
+                WHERE trade_date=? AND input_signature=?
+                """,
+                (trade_date, input_signature),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["clusters"] = json.loads(item.pop("clusters_json") or "[]")
+        return item
+
+    def save_semantic_cluster_run(
+        self,
+        trade_date: str,
+        input_signature: str,
+        model: str,
+        status: str,
+        clusters: Sequence[dict[str, Any]],
+        error: str | None = None,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO semantic_cluster_runs(
+                    trade_date, input_signature, created_at, model,
+                    status, clusters_json, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, input_signature) DO UPDATE SET
+                    created_at=excluded.created_at,
+                    model=excluded.model,
+                    status=excluded.status,
+                    clusters_json=excluded.clusters_json,
+                    error=excluded.error
+                """,
+                (
+                    trade_date,
+                    input_signature,
+                    utc_now_iso(),
+                    model,
+                    status,
+                    json.dumps(list(clusters), ensure_ascii=False),
+                    error[:1000] if error else None,
+                ),
+            )
 
     def historical_theme_matches(
         self,
@@ -677,7 +848,7 @@ class Database:
             row = connection.execute(
                 """
                 SELECT fingerprint FROM candidate_themes
-                WHERE shared_tag=? AND direction=? AND status IN ('pending','confirmed')
+                WHERE shared_tag=? AND direction=? AND status IN ('pending','watching','confirmed')
                   AND updated_at>=?
                 ORDER BY updated_at DESC LIMIT 1
                 """,
@@ -715,6 +886,9 @@ class Database:
         discovery_reason: str,
         members: Sequence[dict[str, Any]],
         admission_status: str = "awaiting_ai",
+        cluster_method: str = "exact_tag",
+        cluster_confidence: float = 0.0,
+        cluster_aliases: Sequence[str] = (),
     ) -> int:
         now = utc_now_iso()
         with self.connect() as connection:
@@ -722,10 +896,14 @@ class Database:
                 """
                 INSERT INTO candidate_themes(
                     fingerprint, provisional_name, shared_tag, direction,
-                    discovered_at, day1_date, discovery_reason, admission_status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    discovered_at, day1_date, discovery_reason, admission_status,
+                    cluster_method, cluster_confidence, cluster_aliases_json, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint) DO UPDATE SET
                     discovery_reason=excluded.discovery_reason,
+                    cluster_method=excluded.cluster_method,
+                    cluster_confidence=excluded.cluster_confidence,
+                    cluster_aliases_json=excluded.cluster_aliases_json,
                     admission_status=CASE
                         WHEN candidate_themes.status='pending' THEN excluded.admission_status
                         ELSE candidate_themes.admission_status
@@ -741,6 +919,9 @@ class Database:
                     day1_date,
                     discovery_reason,
                     admission_status,
+                    cluster_method,
+                    max(0.0, min(100.0, float(cluster_confidence))),
+                    json.dumps(list(dict.fromkeys(cluster_aliases)), ensure_ascii=False),
                     now,
                 ),
             )
@@ -783,6 +964,7 @@ class Database:
         with self.connect() as connection:
             themes = [dict(row) for row in connection.execute(sql, params).fetchall()]
             for theme in themes:
+                theme["cluster_aliases"] = json.loads(theme.pop("cluster_aliases_json") or "[]")
                 baseline_at = str(theme.get("confirmed_at") or theme["discovered_at"])
                 member_rows = connection.execute(
                     """
@@ -870,7 +1052,7 @@ class Database:
                 catalyst_rows = connection.execute(
                     """
                     SELECT title, summary, source_name, source_url, published_at,
-                           catalyst_type, evidence_level, captured_at
+                           catalyst_type, evidence_level, source_kind, captured_at
                     FROM theme_catalysts WHERE theme_id=?
                     ORDER BY COALESCE(published_at, captured_at) DESC, id DESC LIMIT 12
                     """,
@@ -882,7 +1064,7 @@ class Database:
                     SELECT created_at, model, is_new_theme, novelty_confidence,
                            catalyst_confidence, expected_duration_days,
                            leader_candidate_code, leader_upside_scenario_pct,
-                           admitted, decision_reason, historical_matches_json,
+                           admitted, decision_level, decision_reason, historical_matches_json,
                            proposed_members_json, validated_members_json
                     FROM theme_admission_reviews WHERE theme_id=?
                     ORDER BY created_at DESC LIMIT 1
@@ -931,7 +1113,13 @@ class Database:
         with self.connect() as connection:
             cursor = connection.execute(
                 """
-                UPDATE candidate_themes SET status='confirmed', archived_at=NULL,
+                UPDATE candidate_themes SET status=CASE theme_level
+                        WHEN 'early_watch' THEN 'watching'
+                        WHEN 'formal' THEN 'confirmed'
+                        WHEN 'rejected' THEN 'rejected'
+                        ELSE 'pending'
+                    END,
+                    archived_at=NULL,
                     updated_at=? WHERE id=? AND status='archived'
                 """,
                 (now, theme_id),
@@ -939,14 +1127,24 @@ class Database:
             if not cursor.rowcount:
                 raise KeyError(f"Archived theme {theme_id} not found")
 
-    def set_admission_status(self, theme_id: int, status: str, reason: str) -> None:
+    def set_admission_status(
+        self, theme_id: int, status: str, reason: str, evidence_grade: str | None = None
+    ) -> None:
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE candidate_themes SET admission_status=?, admission_reason=?,
+                    evidence_grade=COALESCE(?, evidence_grade),
                     admission_reviewed_at=?, updated_at=? WHERE id=?
                 """,
-                (status, reason[:2000], utc_now_iso(), utc_now_iso(), theme_id),
+                (
+                    status,
+                    reason[:2000],
+                    evidence_grade,
+                    utc_now_iso(),
+                    utc_now_iso(),
+                    theme_id,
+                ),
             )
             if not cursor.rowcount:
                 raise KeyError(f"Theme {theme_id} not found")
@@ -988,6 +1186,7 @@ class Database:
         historical_matches: Sequence[dict[str, Any]],
         validated_members: Sequence[dict[str, Any]],
         admitted: bool,
+        decision_level: str,
         decision_reason: str,
     ) -> None:
         with self.connect() as connection:
@@ -997,9 +1196,10 @@ class Database:
                     theme_id, created_at, model, is_new_theme, novelty_confidence,
                     catalyst_confidence, expected_duration_days, leader_candidate_code,
                     leader_upside_scenario_pct, admitted, decision_reason,
+                    decision_level,
                     historical_matches_json, proposed_members_json,
                     validated_members_json, raw_response_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     theme_id,
@@ -1013,6 +1213,7 @@ class Database:
                     float(item.get("leader_upside_scenario_pct") or 0),
                     int(admitted),
                     decision_reason,
+                    decision_level,
                     json.dumps(list(historical_matches), ensure_ascii=False),
                     json.dumps(item.get("proposed_members", []), ensure_ascii=False),
                     json.dumps(list(validated_members), ensure_ascii=False),
@@ -1259,6 +1460,13 @@ class Database:
     ) -> None:
         now = utc_now_iso()
         confirmed_at = now if status == "confirmed" else None
+        observation_at = now if status == "watching" else None
+        theme_level = {
+            "pending": "candidate",
+            "watching": "early_watch",
+            "confirmed": "formal",
+            "rejected": "rejected",
+        }.get(status)
         with self.connect() as connection:
             existing = connection.execute(
                 "SELECT status FROM candidate_themes WHERE id=?", (theme_id,)
@@ -1269,8 +1477,10 @@ class Database:
                 """
                 UPDATE candidate_themes SET
                     status=?,
+                    theme_level=COALESCE(?, theme_level),
                     final_name=COALESCE(?, final_name, suggested_name, provisional_name),
                     confirmed_at=COALESCE(?, confirmed_at),
+                    observation_at=COALESCE(?, observation_at),
                     catalyst_strength=COALESCE(?, catalyst_strength),
                     catalyst_duration=COALESCE(?, catalyst_duration),
                     updated_at=?
@@ -1278,8 +1488,10 @@ class Database:
                 """,
                 (
                     status,
+                    theme_level,
                     final_name,
                     confirmed_at,
+                    observation_at,
                     catalyst_strength,
                     catalyst_duration,
                     now,
@@ -1529,8 +1741,9 @@ class Database:
                     """
                     INSERT OR IGNORE INTO theme_catalysts(
                         theme_id, fingerprint, title, summary, source_name,
-                        source_url, published_at, catalyst_type, evidence_level, captured_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        source_url, published_at, catalyst_type, evidence_level,
+                        source_kind, captured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         theme_id,
@@ -1542,6 +1755,7 @@ class Database:
                         item.get("published_at"),
                         str(item.get("catalyst_type") or "update"),
                         str(item.get("evidence_level") or "inference"),
+                        str(item.get("source_kind") or "unknown"),
                         captured_at,
                     ),
                 )
