@@ -79,3 +79,14 @@ class AnomalyDetectorTests(TestCase):
         events = self.detector.detect(current, self.context, [previous])
         for event in events:
             self.assertEqual(event.change_5m, 0)
+
+    def test_zero_auction_price_is_unavailable_not_minus_one_hundred_percent(self):
+        current = quote(
+            captured_at=datetime(2026, 8, 26, 9, 20, tzinfo=CN),
+            close=0,
+            high=0,
+            low=0,
+            open=0,
+        )
+        self.assertEqual(current.pct_change, 0)
+        self.assertEqual(self.detector.detect(current, self.context, []), [])

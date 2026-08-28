@@ -147,6 +147,11 @@ CREATE TABLE IF NOT EXISTS candidate_themes (
     discovery_reason TEXT NOT NULL,
     catalyst_strength REAL NOT NULL DEFAULT 0,
     catalyst_duration TEXT,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    archived_at TEXT,
+    admission_status TEXT NOT NULL DEFAULT 'legacy',
+    admission_reason TEXT,
+    admission_reviewed_at TEXT,
     updated_at TEXT NOT NULL
 );
 
@@ -224,6 +229,28 @@ CREATE TABLE IF NOT EXISTS theme_catalysts (
 
 CREATE INDEX IF NOT EXISTS idx_theme_catalysts_time
 ON theme_catalysts(theme_id, captured_at DESC);
+
+CREATE TABLE IF NOT EXISTS theme_admission_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    theme_id INTEGER NOT NULL REFERENCES candidate_themes(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    model TEXT NOT NULL,
+    is_new_theme INTEGER NOT NULL,
+    novelty_confidence REAL NOT NULL,
+    catalyst_confidence REAL NOT NULL,
+    expected_duration_days INTEGER NOT NULL,
+    leader_candidate_code TEXT,
+    leader_upside_scenario_pct REAL NOT NULL,
+    admitted INTEGER NOT NULL,
+    decision_reason TEXT NOT NULL,
+    historical_matches_json TEXT NOT NULL,
+    proposed_members_json TEXT NOT NULL,
+    validated_members_json TEXT NOT NULL,
+    raw_response_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admission_reviews_theme
+ON theme_admission_reviews(theme_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

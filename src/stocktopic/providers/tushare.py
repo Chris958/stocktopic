@@ -115,10 +115,7 @@ class TushareClient:
         return self.call(
             "daily_basic",
             {"trade_date": trade_date},
-            (
-                "ts_code,trade_date,close,turnover_rate,volume_ratio,float_share,"
-                "total_mv,circ_mv"
-            ),
+            ("ts_code,trade_date,close,turnover_rate,volume_ratio,float_share,total_mv,circ_mv"),
         )
 
     def kpl_list(self, trade_date: str, tag: str) -> list[dict[str, Any]]:

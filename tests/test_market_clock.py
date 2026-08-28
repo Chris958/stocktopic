@@ -36,4 +36,3 @@ class MarketClockTests(TestCase):
         state = MarketClock.state(datetime(2026, 8, 29, 10, 0, tzinfo=CN), False)
         self.assertFalse(state.in_realtime_window)
         self.assertEqual(state.reason, "exchange_closed")
-

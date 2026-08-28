@@ -34,6 +34,10 @@ class SplitRequest(BaseModel):
     new_name: str = Field(min_length=1, max_length=40)
 
 
+class PinRequest(BaseModel):
+    pinned: bool
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     service = StockTopicService(settings)
@@ -50,7 +54,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.2.0",
+        version="0.3.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -59,10 +63,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.middleware("http")
     async def authentication(request: Request, call_next):
-        public_path = (
-            request.url.path in {"/", "/health", "/favicon.ico"}
-            or request.url.path.startswith("/static/")
-        )
+        public_path = request.url.path in {
+            "/",
+            "/health",
+            "/favicon.ico",
+        } or request.url.path.startswith("/static/")
         if not public_path and not _authorized(request, settings):
             response = JSONResponse(
                 {"detail": "Unauthorized"},
@@ -108,31 +113,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/dashboard")
     async def dashboard():
-        latest_anomaly_date = service.database.latest_anomaly_trade_date()
-        anomalies = (
-            service.database.high_signal_anomalies_for_trade_date(
-                latest_anomaly_date,
-                settings.anomaly_display_min_severity,
-            )
-            if latest_anomaly_date
-            else []
-        )
         return {
             "health": await asyncio.to_thread(service.health),
             "themes": service.database.list_themes(),
-            "anomalies": anomalies,
             "alerts": service.database.recent_alerts(100),
-            "data_context": {
-                "anomaly_trade_date": latest_anomaly_date,
-                "has_intraday_data": bool(latest_anomaly_date),
-            },
         }
 
     @app.get("/api/v1/themes")
     async def themes(status: str | None = None):
-        if status not in {None, "pending", "confirmed", "rejected", "merged"}:
+        if status not in {None, "pending", "confirmed", "rejected", "merged", "archived"}:
             raise HTTPException(status_code=400, detail="Invalid theme status")
         return {"items": service.database.list_themes(status)}
+
+    @app.post("/api/v1/themes/{theme_id}/pin")
+    async def pin_theme(theme_id: int, request: PinRequest):
+        try:
+            service.database.set_theme_pin(theme_id, request.pinned)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"ok": True, "theme": service.database.get_theme(theme_id)}
+
+    @app.post("/api/v1/themes/{theme_id}/archive")
+    async def archive_theme(theme_id: int):
+        try:
+            service.database.archive_theme(theme_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"ok": True}
+
+    @app.post("/api/v1/themes/{theme_id}/restore")
+    async def restore_theme(theme_id: int):
+        try:
+            service.database.restore_theme(theme_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        return {"ok": True, "theme": service.database.get_theme(theme_id)}
 
     @app.post("/api/v1/themes/{theme_id}/confirm")
     async def confirm_theme(theme_id: int, request: ConfirmRequest):
@@ -215,11 +230,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "Mac mini题材情绪系统已成功连接企业微信。",
             )
         except Exception as error:
-            logger.warning("WeCom connection test failed: %s", _safe_integration_error(error))
+            safe = _safe_integration_error(error)
+            service.database.set_metadata("last_wecom_error", safe)
+            logger.warning("WeCom connection test failed: %s", safe)
             raise HTTPException(
                 status_code=502,
-                detail=f"企业微信发送失败：{_safe_integration_error(error)}",
+                detail=f"企业微信发送失败：{safe}",
             ) from error
+        service.database.set_metadata("last_wecom_error", "")
+        service.database.set_metadata(
+            "last_wecom_success_at",
+            service.clock.china_now().isoformat(timespec="seconds"),
+        )
         return {"ok": True}
 
     return app

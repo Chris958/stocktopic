@@ -59,24 +59,16 @@ def main() -> None:
             "OpenAI Base URL",
             values.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         ),
-        "OPENAI_MODEL": prompt_value(
-            "OpenAI模型", values.get("OPENAI_MODEL", "gpt-5.5")
-        ),
+        "OPENAI_MODEL": prompt_value("OpenAI模型", values.get("OPENAI_MODEL", "gpt-5.5")),
         "WECOM_CORP_ID": prompt_value("企业微信 CorpID", values.get("WECOM_CORP_ID", "")),
-        "WECOM_AGENT_ID": prompt_value(
-            "企业微信 AgentID", values.get("WECOM_AGENT_ID", "")
-        ),
+        "WECOM_AGENT_ID": prompt_value("企业微信 AgentID", values.get("WECOM_AGENT_ID", "")),
         "WECOM_SECRET": prompt_value(
             "企业微信 Secret", values.get("WECOM_SECRET", ""), secret=True
         ),
-        "WECOM_TO_USER": prompt_value(
-            "企业微信接收 UserID", values.get("WECOM_TO_USER", "@all")
-        ),
+        "WECOM_TO_USER": prompt_value("企业微信接收 UserID", values.get("WECOM_TO_USER", "@all")),
     }
     base = urlsplit(updates["OPENAI_BASE_URL"])
-    if updates["OPENAI_API_KEY"] and (
-        base.scheme not in {"http", "https"} or not base.netloc
-    ):
+    if updates["OPENAI_API_KEY"] and (base.scheme not in {"http", "https"} or not base.netloc):
         raise SystemExit("OpenAI Base URL必须是完整的http(s)地址。")
     if updates["WECOM_AGENT_ID"] and not updates["WECOM_AGENT_ID"].isdigit():
         raise SystemExit("企业微信AgentID必须为数字。")

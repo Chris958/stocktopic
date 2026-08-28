@@ -92,4 +92,3 @@ class MarketClock:
         if isinstance(value, datetime):
             value = value.date()
         return value.strftime("%Y%m%d")
-

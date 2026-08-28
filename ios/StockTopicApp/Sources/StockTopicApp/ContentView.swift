@@ -7,8 +7,6 @@ struct ContentView: View {
         TabView {
             NavigationStack { ThemesView() }
                 .tabItem { Label("题材", systemImage: "square.stack.3d.up") }
-            NavigationStack { AnomaliesView() }
-                .tabItem { Label("异动", systemImage: "bolt.fill") }
             NavigationStack { AlertsView() }
                 .tabItem { Label("预警", systemImage: "bell.badge") }
             NavigationStack { SettingsView() }
@@ -39,8 +37,8 @@ struct ThemesView: View {
                 if confirmed.isEmpty { ContentUnavailableView("暂无正式题材", systemImage: "chart.xyaxis.line") }
                 ForEach(confirmed) { theme in ThemeRow(theme: theme) }
             }
-            Section("待人工确认") {
-                if pending.isEmpty { Text("暂无候选").foregroundStyle(.secondary) }
+            Section("AI准入审查中") {
+                if pending.isEmpty { Text("暂无达到四只触板门槛的候选").foregroundStyle(.secondary) }
                 ForEach(pending) { theme in ThemeRow(theme: theme) }
             }
         }
@@ -67,7 +65,7 @@ struct ThemeRow: View {
                 Text("\(score.lifecycle) · Day \(score.details.dayNumber)\(score.leaderThemeDivergence == 1 ? " · 龙头—板块背离" : "")")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("确认前不计算评分").font(.caption).foregroundStyle(.secondary)
+                Text("等待新颖性、催化和持续性审查").font(.caption).foregroundStyle(.secondary)
             }
             Text(theme.members.filter { $0.active == 1 }.map(\.name).joined(separator: " · "))
                 .font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -80,19 +78,6 @@ struct ScoreCell: View {
     let value: Double
     let color: Color
     var body: some View { VStack(alignment: .leading) { Text(name).font(.caption2).foregroundStyle(.secondary); Text(value, format: .number.precision(.fractionLength(0))).font(.title3).foregroundStyle(color) } }
-}
-
-struct AnomaliesView: View {
-    @Environment(DashboardStore.self) private var store
-    var body: some View {
-        List(store.dashboard?.anomalies ?? []) { item in
-            HStack {
-                VStack(alignment: .leading) { Text("\(item.name) · \(item.code)"); Text(item.reasons.joined(separator: "；")).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
-                Spacer()
-                Text(item.pctChange, format: .number.sign(strategy: .always()).precision(.fractionLength(2))).foregroundStyle(item.direction == "negative" ? .green : .red)
-            }
-        }.navigationTitle("全市场异动").refreshable { await store.refresh() }
-    }
 }
 
 struct AlertsView: View {
@@ -119,4 +104,3 @@ struct SettingsView: View {
         }.navigationTitle("设置").onAppear { url = store.baseURL; token = store.token }
     }
 }
-

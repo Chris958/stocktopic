@@ -77,32 +77,7 @@ class OpenAIThemeExplainer:
   ]
 }}
 """.strip()
-        payload = {
-            "model": self.model,
-            "reasoning": {"effort": "low"},
-            "tools": [{"type": "web_search", "search_context_size": "low"}],
-            "tool_choice": "required",
-            "include": ["web_search_call.action.sources"],
-            "input": prompt,
-        }
-        request = urllib.request.Request(
-            self.endpoint,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            method="POST",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        try:
-            with open_url(request, timeout=self.timeout) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            body = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenAI HTTP {error.code}: {body[:500]}") from error
-        text = _output_text(raw)
-        parsed = _parse_json_object(text)
-        sources = _sources(raw)
+        raw, parsed, sources = self._call_prompt(prompt, reasoning_effort="low")
         catalysts = _normalize_catalysts(parsed.get("catalysts"), sources)
         if not catalysts and sources:
             summary = str(parsed.get("catalyst_summary") or "公开信息可能与题材异动相关")
@@ -129,6 +104,140 @@ class OpenAIThemeExplainer:
             "catalysts": catalysts,
             "raw": raw,
         }
+
+    def assess_for_admission(
+        self,
+        theme: dict[str, Any],
+        historical_matches: list[dict[str, Any]],
+        eligible_stock_pool: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not self.enabled:
+            raise RuntimeError("OpenAI API is not configured")
+        trigger_members = [
+            {
+                "code": member["code"],
+                "name": member["name"],
+                "evidence": member.get("evidence", {}),
+            }
+            for member in theme.get("members", [])
+            if member.get("active", 1)
+        ]
+        prompt = f"""
+你是A股“新重点题材准入审查器”。目标是排除小异动、旧题材复炒和缺乏持续性的噪声，
+不是为了尽可能多地产生题材。必须使用web_search核查最近催化及过去60个交易日的历史发酵。
+
+确定性触发证据（已经满足当日至少4只股票曾触及涨停，炸板计入）：
+{json.dumps(trigger_members, ensure_ascii=False)}
+
+候选最小共同逻辑：{json.dumps(theme.get("shared_tag"), ensure_ascii=False)}
+系统保存的60交易日历史相似题材：
+{json.dumps(historical_matches, ensure_ascii=False)}
+
+允许提议加入的股票白名单（只能从中选择，不能自行创造代码）：
+{json.dumps(eligible_stock_pool, ensure_ascii=False)}
+
+“新题材”指新的最小共同炒作逻辑或首次形成广泛资金共识；旧题材出现一条新新闻、换名、
+反复轮动，不算新题材。持续性与30%空间必须是有催化路径的情景判断，不得伪装成确定预测。
+优先政府、监管、交易所、上市公司公告、产业链原始信息和权威媒体；必须列出反证和风险。
+
+只返回一个JSON对象，不要Markdown：
+{{
+  "suggested_name": "最小共同逻辑名称",
+  "is_new_theme": true,
+  "novelty_confidence": 0,
+  "novelty_reason": "与60交易日历史的区别，或为何属于复炒",
+  "catalyst_summary": "当前催化链条",
+  "catalyst_confidence": 0,
+  "expected_duration_days": 0,
+  "duration_reason": "为何可能持续或为何不可持续",
+  "leader_candidate_code": "必须来自触发股票或白名单",
+  "leader_upside_scenario_pct": 0,
+  "upside_scenario_reason": "达到该空间需要满足的条件，不是目标价",
+  "counter_evidence": ["反证或证伪条件"],
+  "proposed_members": [
+    {{"code":"只能来自白名单", "role":"龙头/核心/弹性/跟随", "reason":"同逻辑依据"}}
+  ],
+  "catalysts": [
+    {{
+      "title":"标题", "summary":"与题材关系", "source":"来源", "url":"原始URL",
+      "published_at":"带时区ISO时间或空", "catalyst_type":"首次催化/强化催化/反证",
+      "evidence_level":"明确证据/合理推断"
+    }}
+  ]
+}}
+        """.strip()
+        raw, parsed, sources = self._call_prompt(prompt, reasoning_effort="medium")
+        required = {
+            "suggested_name",
+            "is_new_theme",
+            "novelty_confidence",
+            "catalyst_confidence",
+            "expected_duration_days",
+            "leader_candidate_code",
+            "leader_upside_scenario_pct",
+        }
+        missing = sorted(required - set(parsed))
+        if missing:
+            raise RuntimeError(
+                "AI admission response missing required fields: " + ", ".join(missing)
+            )
+        return {
+            "model": self.model,
+            "suggested_name": str(parsed.get("suggested_name") or theme["provisional_name"]),
+            "is_new_theme": _boolean(parsed.get("is_new_theme")),
+            "novelty_confidence": _bounded_number(parsed.get("novelty_confidence")),
+            "novelty_reason": str(parsed.get("novelty_reason") or "未提供新颖性依据"),
+            "catalyst_summary": str(parsed.get("catalyst_summary") or "未找到明确催化"),
+            "catalyst_confidence": _bounded_number(parsed.get("catalyst_confidence")),
+            "expected_duration_days": max(0, _integer(parsed.get("expected_duration_days"))),
+            "duration_reason": str(parsed.get("duration_reason") or "未提供持续性依据"),
+            "leader_candidate_code": str(parsed.get("leader_candidate_code") or "").strip(),
+            "leader_upside_scenario_pct": max(
+                0.0, _number(parsed.get("leader_upside_scenario_pct"))
+            ),
+            "upside_scenario_reason": str(
+                parsed.get("upside_scenario_reason") or "未提供空间推演依据"
+            ),
+            "counter_evidence": [
+                str(value) for value in (parsed.get("counter_evidence") or [])[:8]
+            ],
+            "proposed_members": _normalize_proposed_members(
+                parsed.get("proposed_members"), eligible_stock_pool
+            ),
+            "sources": sources,
+            "catalysts": _normalize_catalysts(parsed.get("catalysts"), sources),
+            "raw": raw,
+        }
+
+    def _call_prompt(
+        self, prompt: str, *, reasoning_effort: str
+    ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]:
+        payload = {
+            "model": self.model,
+            "reasoning": {"effort": reasoning_effort},
+            "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "tool_choice": "required",
+            "include": ["web_search_call.action.sources"],
+            "input": prompt,
+        }
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        try:
+            with open_url(request, timeout=self.timeout) as response:
+                raw = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"OpenAI HTTP {error.code}: {body[:500]}") from error
+        parsed = _parse_json_object(_output_text(raw))
+        sources = _sources(raw)
+        return raw, parsed, sources
 
 
 def _output_text(response: dict[str, Any]) -> str:
@@ -185,9 +294,7 @@ def _sources(response: dict[str, Any]) -> list[dict[str, str]]:
     return list(found.values())
 
 
-def _normalize_catalysts(
-    value: Any, sources: list[dict[str, str]]
-) -> list[dict[str, Any]]:
+def _normalize_catalysts(value: Any, sources: list[dict[str, str]]) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     known_urls = {source["url"] for source in sources}
@@ -211,9 +318,61 @@ def _normalize_catalysts(
                 "url": url,
                 "published_at": str(raw.get("published_at") or "").strip() or None,
                 "catalyst_type": str(raw.get("catalyst_type") or "背景").strip(),
-                "evidence_level": str(
-                    raw.get("evidence_level") or "合理推断"
-                ).strip(),
+                "evidence_level": str(raw.get("evidence_level") or "合理推断").strip(),
             }
         )
     return result
+
+
+def _normalize_proposed_members(
+    value: Any, eligible_stock_pool: list[dict[str, Any]]
+) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    allowed = {
+        str(item.get("code")): str(item.get("name") or "")
+        for item in eligible_stock_pool
+        if item.get("code")
+    }
+    result = []
+    seen: set[str] = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        code = str(raw.get("code") or "").strip()
+        if code not in allowed or code in seen:
+            continue
+        seen.add(code)
+        result.append(
+            {
+                "code": code,
+                "name": allowed[code],
+                "role": str(raw.get("role") or "同逻辑").strip(),
+                "reason": str(raw.get("reason") or "高置信题材标签匹配").strip(),
+            }
+        )
+    return result
+
+
+def _number(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _integer(value: Any) -> int:
+    try:
+        return int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _bounded_number(value: Any) -> float:
+    return max(0.0, min(100.0, _number(value)))
+
+
+def _boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes"}

@@ -1,32 +1,31 @@
+let savedSections = {};
+try { savedSections = JSON.parse(localStorage.getItem('stocktopicSections') || '{}'); }
+catch (_) { savedSections = {}; }
 const state = {
   data: null,
   auth: sessionStorage.getItem('stocktopicAuth') || '',
   view: 'candidates',
-  anomalyFilter: 'all',
+  themeFilter: 'active',
   sheet: null,
-  lastFocus: null
+  lastFocus: null,
+  expanded: savedSections
 };
 
 const views = {
   candidates: {
-    kicker: '候选题材',
-    title: '机器发现，人工确认',
-    description: '股票成员由确定性规则产生，AI只负责命名与解释。'
+    kicker: '准入审查',
+    title: '只显示达到硬门槛的题材',
+    description: '普通异动不再展示；四只股票触板后才进行新颖性、催化和持续性分析。'
   },
   confirmed: {
-    kicker: '正式题材',
-    title: '题材生命周期',
-    description: '热度、持续性和接盘风险独立呈现，避免用单一总分掩盖风险。'
-  },
-  anomalies: {
-    kicker: '全市场异动池',
-    title: '资金行为正在发生',
-    description: '硬事件直接进入；普通股票至少满足两项异动条件。'
+    kicker: '重点题材库',
+    title: '已经通过自动准入审查',
+    description: '置顶题材优先显示；股票行情与新闻催化可分别展开。'
   },
   alerts: {
     kicker: '系统预警',
-    title: '只打扰真正重要的时刻',
-    description: '聚焦高价值机会、接盘风险、龙头—板块背离和数据故障。'
+    title: '重要机会与数据故障',
+    description: '新题材、风险和数据拉取异常会记录企业微信送达状态。'
   }
 };
 
@@ -81,9 +80,9 @@ function hideLogin() {
 $('#loginForm').addEventListener('submit', async event => {
   event.preventDefault();
   const button = $('#loginSubmit');
-  const username = $('#loginUsername').value.trim();
-  const password = $('#loginPassword').value;
-  const authorization = basicAuthorization(username, password);
+  const authorization = basicAuthorization(
+    $('#loginUsername').value.trim(), $('#loginPassword').value
+  );
   button.disabled = true;
   button.textContent = '正在验证…';
   $('#loginError').textContent = '';
@@ -126,10 +125,10 @@ function setView(view) {
   }
 }
 
-$$('[data-filter]').forEach(button => button.addEventListener('click', () => {
-  state.anomalyFilter = button.dataset.filter;
-  $$('[data-filter]').forEach(item => item.classList.toggle('active', item === button));
-  renderAnomalies(state.data?.anomalies || []);
+$$('[data-theme-filter]').forEach(button => button.addEventListener('click', () => {
+  state.themeFilter = button.dataset.themeFilter;
+  $$('[data-theme-filter]').forEach(item => item.classList.toggle('active', item === button));
+  renderConfirmed();
   updateSectionCount();
 }));
 
@@ -145,13 +144,11 @@ document.addEventListener('keydown', event => {
   const focusable = [...sheet.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled])')];
   if (!focusable.length) return;
   const first = focusable[0];
-  const last = focusable[focusable.length - 1];
+  const last = focusable.at(-1);
   if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
+    event.preventDefault(); last.focus();
   } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
+    event.preventDefault(); first.focus();
   }
 });
 
@@ -172,7 +169,7 @@ async function load(manual = false) {
 
 function render() {
   if (!state.data) return;
-  const { health, themes, anomalies, alerts, data_context: dataContext = {} } = state.data;
+  const { health, themes, alerts } = state.data;
   const pending = themes.filter(theme => theme.status === 'pending');
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
   const market = health.market;
@@ -180,15 +177,12 @@ function render() {
   marketNode.classList.remove('loading', 'live', 'warning');
   marketNode.classList.add(market.realtime_collection_enabled ? 'live' : 'warning');
   marketNode.querySelector('strong').textContent = market.realtime_collection_enabled
-    ? '盘中采集中'
-    : marketLabel(market.session);
+    ? '盘中采集中' : marketLabel(market.session);
   marketNode.querySelector('small').textContent = market.realtime_collection_enabled
-    ? '5分钟实时行情'
-    : dataContext.has_intraday_data
-      ? `保留最近交易日 · ${formatDate(dataContext.anomaly_trade_date)}`
-      : market.reason === 'closed'
-        ? '等待下个交易窗口首次采集'
-        : marketReason(market.reason);
+    ? '5分钟行情 · 5分钟涨停池'
+    : health.latest_quote_run
+      ? `最近采集 ${formatDataTime(health.latest_quote_run.started_at)}`
+      : marketReason(market.reason);
   $('#universeCount').textContent = health.universe_count?.toLocaleString() || '—';
   $('#candidateMetric').textContent = pending.length.toLocaleString();
   $('#confirmedMetric').textContent = confirmed.length.toLocaleString();
@@ -196,125 +190,133 @@ function render() {
   $('#lastRunDetail').textContent = runStatus(health.latest_quote_run?.status);
   $('#candidateCount').textContent = pending.length;
   $('#confirmedCount').textContent = confirmed.length;
-  $('#anomalyCount').textContent = anomalies.length;
   $('#alertCount').textContent = alerts.length;
-  renderThemes('#candidateList', pending, true);
-  renderThemes('#confirmedList', confirmed, false);
-  renderAnomalies(anomalies);
+  renderThemes('#candidateList', pending, 'pending');
+  renderConfirmed();
   renderAlerts(alerts);
   updateSectionCount();
 }
 
-function marketLabel(session) {
-  return ({
-    opening_auction: '集合竞价', morning: '上午交易', afternoon: '下午交易',
-    lunch_break: '午间休市', auction_gap: '竞价间隙', pre_market: '盘前待机', closed: '已收市'
-  })[session] || '系统待机';
+function renderConfirmed() {
+  if (!state.data) return;
+  const themes = state.data.themes;
+  let items = themes.filter(theme => theme.status === 'confirmed');
+  let mode = 'confirmed';
+  if (state.themeFilter === 'pinned') items = items.filter(theme => theme.pinned);
+  if (state.themeFilter === 'archived') {
+    items = themes.filter(theme => theme.status === 'archived');
+    mode = 'archived';
+  }
+  renderThemes('#confirmedList', items, mode);
 }
 
-function marketReason(reason) {
-  return ({
-    exchange_closed: '交易所休市 · 不采集',
-    calendar_unknown_fail_closed: '日历未知 · 已停止采集',
-    lunch_break: '午休期间不采集',
-    auction_gap: '09:25–09:30不采集',
-    pre_market: '等待交易窗口',
-    closed: '非交易时段不采集'
-  })[reason] || '实时采集已停止';
-}
-
-function runStatus(status) {
-  return ({ success: '采集正常', failed: '采集失败', degraded: '降级运行' })[status] || '等待行情';
-}
-
-function formatTime(value) {
-  if (!value) return '—';
-  const match = String(value).match(/T?(\d{2}):(\d{2})/);
-  return match ? `${match[1]}:${match[2]}` : '—';
-}
-
-function formatDate(value) {
-  const match = String(value || '').match(/(\d{4})-?(\d{2})-?(\d{2})/);
-  return match ? `${match[2]}-${match[3]}` : '—';
-}
-
-function renderThemes(selector, items, pending) {
+function renderThemes(selector, items, mode) {
   const root = $(selector);
   root.classList.remove('skeleton-list');
+  const pending = mode === 'pending';
   root.innerHTML = items.length
-    ? items.map(theme => themeCard(theme, pending)).join('')
-    : emptyState(pending ? '暂无候选题材' : '暂无正式题材', pending
-      ? '机器发现共性异动后会立即显示在这里。'
-      : '确认候选题材后，三项评分会在这里出现。');
+    ? items.map(theme => themeCard(theme, mode)).join('')
+    : emptyState(
+      pending ? '没有正在审查的题材' : mode === 'archived' ? '没有已归档题材' : '暂无重点题材',
+      pending
+        ? '只有同题材至少4只股票当日曾触及涨停，才会出现在这里。'
+        : '通过新颖性、催化和持续性审查后才会自动入库。'
+    );
   root.querySelectorAll('[data-action]').forEach(button => {
-    button.addEventListener('click', event => {
+    button.addEventListener('click', async event => {
       const theme = items.find(item => Number(item.id) === Number(button.dataset.id));
-      openSheet(button.dataset.action, theme || {}, event.currentTarget);
+      if (!theme) return;
+      if (button.dataset.action === 'toggle-pin' || button.dataset.action === 'restore') {
+        await immediateThemeAction(button.dataset.action, theme, button);
+      } else {
+        openSheet(button.dataset.action, theme, event.currentTarget);
+      }
+    });
+  });
+  root.querySelectorAll('details[data-collapse-key]').forEach(details => {
+    details.addEventListener('toggle', () => {
+      state.expanded[details.dataset.collapseKey] = details.open;
+      localStorage.setItem('stocktopicSections', JSON.stringify(state.expanded));
     });
   });
 }
 
-function themeCard(theme, pending) {
+function themeCard(theme, mode) {
+  const pending = mode === 'pending';
+  const archived = mode === 'archived';
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
   const activeMembers = theme.members.filter(member => member.active);
-  const returnLabel = pending ? '发现后' : '确认后';
+  const returnLabel = pending ? '发现后' : '入库后';
   const members = activeMembers.map((member, index) => memberRow(member, index + 1, returnLabel)).join('');
   const score = theme.score;
   const summary = theme.market_summary || {};
+  const review = theme.admission_review;
+  const scoreHtml = score ? `<div class="score-grid">
+    ${scoreCell('热度', score.heat, 'heat')}
+    ${scoreCell('持续性', score.persistence, 'persistence')}
+    ${scoreCell('接盘风险', score.entry_risk, 'risk')}
+  </div><div class="lifecycle-row">
+    <span class="lifecycle-chip">${escapeHtml(score.lifecycle)} · Day ${escapeHtml(score.details.day_number)}</span>
+    ${score.leader_theme_divergence ? '<span class="risk-note">龙头—板块背离</span>' : ''}
+  </div>` : `<div class="locked-score"><span class="lock-icon">◇</span><span>${escapeHtml(admissionLabel(theme.admission_status))}</span></div>`;
+  const reviewHtml = review ? `<div class="admission-strip">
+    ${summaryMetric('新颖性', `${Number(review.novelty_confidence).toFixed(0)}`)}
+    ${summaryMetric('催化可信度', `${Number(review.catalyst_confidence).toFixed(0)}`)}
+    ${summaryMetric('预估持续', `${review.expected_duration_days}日`)}
+    ${summaryMetric('龙头情景空间', formatPct(review.leader_upside_scenario_pct))}
+  </div>` : '';
   const summaryHtml = `<div class="market-summary">
     ${summaryMetric('当前平均', formatPct(summary.current_average_pct))}
     ${summaryMetric(`${returnLabel}平均`, formatPct(summary.confirmed_average_return))}
     ${summaryMetric('上涨家数', `${summary.up_count ?? 0}/${summary.member_count ?? activeMembers.length}`)}
     ${summaryMetric('涨停 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
   </div>`;
-  const scoreHtml = score ? `<div class="score-grid">
-    ${scoreCell('热度', score.heat, 'heat')}
-    ${scoreCell('持续性', score.persistence, 'persistence')}
-    ${scoreCell('接盘风险', score.entry_risk, 'risk')}
-  </div>
-  <div class="lifecycle-row">
-    <span class="lifecycle-chip">${escapeHtml(score.lifecycle)} · Day ${escapeHtml(score.details.day_number)}</span>
-    ${score.leader_theme_divergence ? '<span class="risk-note">龙头—板块背离</span>' : ''}
-  </div>` : `<div class="locked-score"><span class="lock-icon">◇</span><span>确认前评分锁定，只展示股票与发现原因</span></div>`;
-  const actions = pending ? `<div class="card-actions">
-    <button class="primary-button pressable" data-action="confirm" data-id="${theme.id}">确认题材</button>
-    <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">AI解释</button>
-    <button class="text-button pressable" data-action="merge" data-id="${theme.id}">合并</button>
-    <button class="text-button pressable" data-action="split" data-id="${theme.id}">拆分</button>
-    <button class="text-button danger pressable" data-action="reject" data-id="${theme.id}">忽略</button>
-  </div>` : `<div class="card-actions">
-    <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">更新新闻解释</button>
-  </div>`;
-  const explanation = theme.latest_explanation;
-  const catalystHtml = catalystList(theme.catalysts || [], explanation);
-  return `<article class="theme-card">
-    <div class="theme-head"><div><div class="theme-title">${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
-    ${scoreHtml}
-    ${summaryHtml}
-    <div class="member-section-head"><div><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · 龙头信号为辅助判断</small></div><span>${activeMembers.length}只</span></div>
+  const stockKey = `theme-${theme.id}-stocks`;
+  const newsKey = `theme-${theme.id}-news`;
+  const stockDetails = `<details class="fold-section" data-collapse-key="${stockKey}" ${state.expanded[stockKey] ? 'open' : ''}>
+    <summary><span><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
     <div class="member-table" role="table" aria-label="${escapeHtml(title)}股票行情">
       <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span></div>
       <div class="member-table-body">${members}</div>
     </div>
+  </details>`;
+  const catalysts = theme.catalysts || [];
+  const explanation = theme.latest_explanation;
+  const newsDetails = (catalysts.length || explanation) ? `<details class="fold-section catalyst-fold" data-collapse-key="${newsKey}" ${state.expanded[newsKey] ? 'open' : ''}>
+    <summary><span><strong>新闻催化</strong><small>定时更新 · ${catalysts.length}条</small></span><i>⌄</i></summary>
+    ${catalystContent(catalysts, explanation)}
+  </details>` : '';
+  let actions = '';
+  if (!pending && !archived) {
+    actions = `<div class="card-actions">
+      <button class="secondary-button pressable" data-action="toggle-pin" data-id="${theme.id}">${theme.pinned ? '取消置顶' : '置顶'}</button>
+      <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">更新新闻催化</button>
+      <button class="text-button danger pressable" data-action="archive" data-id="${theme.id}">移除并归档</button>
+    </div>`;
+  } else if (archived) {
+    actions = `<div class="card-actions"><button class="secondary-button pressable" data-action="restore" data-id="${theme.id}">恢复到题材库</button></div>`;
+  }
+  return `<article class="theme-card ${theme.pinned ? 'pinned-theme' : ''}">
+    <div class="theme-head"><div><div class="theme-title">${theme.pinned ? '<span class="pin-mark">置顶</span>' : ''}${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
+    ${scoreHtml}${reviewHtml}${summaryHtml}${stockDetails}
     <p class="theme-footnote">Day 1 ${escapeHtml(theme.day1_date)} · 行情 ${escapeHtml(formatDataTime(summary.market_data_at))} · 市值 ${escapeHtml(formatDate(summary.metric_trade_date))}</p>
-    ${catalystHtml}
-    ${actions}
+    ${newsDetails}${actions}
   </article>`;
 }
 
 function memberRow(member, position, returnLabel) {
-  const reasons = (member.evidence?.anomaly_reasons || []).join('；') || '共享题材标签';
+  const evidence = member.evidence || {};
+  const reasons = evidence.limit_reason || evidence.ai_reason || evidence.shared_tag || '同题材确定性证据';
   const current = Number(member.current_pct);
   const cumulative = member.confirmed_return;
   const leader = Number(member.leader_rank) === 1;
   const boardHistory = (member.board_history || [])
-    .map(item => `${formatDate(item.trade_date)} ${item.status || item.tag || '普通'}`)
-    .join(' · ');
+    .map(item => `${formatDate(item.trade_date)} ${item.status || item.tag || '普通'}`).join(' · ');
   const board = member.board_status || (member.latest_board_tag ? `近期${member.latest_board_tag}` : '—');
   const sequence = member.limit_sequence ? `第${member.limit_sequence}封板` : '';
   const follow = Number(member.follow_count_30m || 0);
   return `<div class="member-row ${leader ? 'leader-row' : ''}" role="row" title="${escapeHtml(reasons)}">
-    <div class="member-name" role="cell"><span class="member-rank">${position}</span><span><strong>${escapeHtml(member.name)}</strong><small>${escapeHtml(member.code)}${member.signal_active ? ' · 当前异动' : ''}</small></span>${leader ? '<b class="leader-badge">龙头候选</b>' : ''}</div>
+    <div class="member-name" role="cell"><span class="member-rank">${position}</span><span><strong>${escapeHtml(member.name)}</strong><small>${escapeHtml(member.code)}</small></span>${leader ? '<b class="leader-badge">龙头候选</b>' : ''}</div>
     <div class="member-number ${valueClass(current)}" role="cell"><strong>${formatPct(current)}</strong><small>${escapeHtml(formatPrice(member.current_price))}</small></div>
     <div class="member-number ${valueClass(cumulative)}" role="cell"><strong>${formatPct(cumulative)}</strong><small>${escapeHtml(returnLabel)}累计</small></div>
     <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, timeLabel(member.first_limit_time)].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
@@ -323,12 +325,7 @@ function memberRow(member, position, returnLabel) {
   </div>`;
 }
 
-function summaryMetric(label, value) {
-  return `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
-}
-
-function catalystList(items, explanation) {
-  if (!items.length && !explanation) return '';
+function catalystContent(items, explanation) {
   const rows = items.map(item => {
     const url = safeUrl(item.source_url);
     const title = url
@@ -338,16 +335,157 @@ function catalystList(items, explanation) {
   }).join('');
   const summary = explanation?.catalyst_summary
     ? `<p class="catalyst-summary">${escapeHtml(explanation.catalyst_summary)}</p>` : '';
-  return `<section class="catalyst-panel"><div class="catalyst-head"><div><strong>新闻催化</strong><small>定时更新 · 事实与推断分开标记</small></div><time>${escapeHtml(formatDataTime(explanation?.created_at))}</time></div>${summary}<ol>${rows}</ol></section>`;
+  return `<div class="catalyst-panel">${summary}<ol>${rows}</ol></div>`;
 }
 
-function safeUrl(value) {
+async function immediateThemeAction(action, theme, button) {
+  button.disabled = true;
   try {
-    const url = new URL(String(value || ''));
-    return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
-  } catch (_) {
-    return '';
+    if (action === 'toggle-pin') {
+      await api(`/api/v1/themes/${theme.id}/pin`, {
+        method: 'POST', body: JSON.stringify({ pinned: !Boolean(theme.pinned) })
+      });
+      toast(theme.pinned ? '已取消置顶' : '已置顶');
+    } else if (action === 'restore') {
+      await api(`/api/v1/themes/${theme.id}/restore`, { method: 'POST' });
+      toast('题材已恢复');
+    }
+    await load();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
   }
+}
+
+function openSheet(action, theme, trigger) {
+  const title = theme.final_name || theme.suggested_name || theme.provisional_name || '';
+  const content = sheetContent(action, title);
+  if (!content) return;
+  state.sheet = { action, theme };
+  state.lastFocus = trigger;
+  $('#sheetKicker').textContent = content.kicker;
+  $('#sheetTitle').textContent = content.title;
+  $('#sheetFields').innerHTML = content.fields || '';
+  $('#sheetHint').textContent = content.hint || '';
+  $('#sheetSubmit').textContent = content.submit;
+  $('#sheetSubmit').classList.toggle('danger', action === 'archive');
+  $('#sheetBackdrop').hidden = false;
+  $('#actionSheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+  requestAnimationFrame(() => $('#sheetSubmit').focus());
+}
+
+function sheetContent(action, title) {
+  return {
+    explain: {
+      kicker: '新闻催化', title: `更新“${title}”`, submit: '搜索并更新',
+      hint: '将搜索近期及海外隔夜催化，保存来源、时间和证据等级。'
+    },
+    archive: {
+      kicker: '移除题材', title: `归档“${title}”`, submit: '移除并归档',
+      hint: '题材会从当前列表移除，历史数据保留，可在“已归档”中恢复。'
+    },
+    wecom: {
+      kicker: '通知通道', title: '测试企业微信', submit: '发送测试消息',
+      hint: '失败时会显示取Token、可信IP、接收账号或网络阶段的具体errcode。'
+    },
+    logout: {
+      kicker: '当前会话', title: '退出 StockTopic', submit: '退出登录',
+      hint: '仅清除当前标签页的登录凭据，不影响后台采集。'
+    }
+  }[action];
+}
+
+function closeSheet() {
+  $('#sheetBackdrop').hidden = true;
+  $('#actionSheet').hidden = true;
+  document.body.style.overflow = '';
+  state.lastFocus?.focus();
+  state.sheet = null;
+}
+
+$('#sheetForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!state.sheet) return;
+  const { action, theme } = state.sheet;
+  const submit = $('#sheetSubmit');
+  const originalText = submit.textContent;
+  submit.disabled = true;
+  submit.textContent = '正在处理…';
+  try {
+    if (action === 'explain') {
+      await api(`/api/v1/themes/${theme.id}/explain`, { method: 'POST' });
+    } else if (action === 'archive') {
+      await api(`/api/v1/themes/${theme.id}/archive`, { method: 'POST' });
+    } else if (action === 'wecom') {
+      await api('/api/v1/admin/wecom-test', { method: 'POST' });
+    } else if (action === 'logout') {
+      closeSheet(); showLogin(); toast('已退出当前会话'); return;
+    }
+    closeSheet();
+    await load();
+    toast(action === 'wecom' ? '企业微信测试消息已送达' : '操作已完成');
+  } catch (error) {
+    $('#sheetHint').textContent = error.message;
+    toast(error.message, true);
+  } finally {
+    submit.disabled = false;
+    submit.textContent = originalText;
+  }
+});
+
+function renderAlerts(items) {
+  $('#alertList').innerHTML = items.length ? items.map(item => {
+    const delivery = item.pushed_wecom
+      ? '<span class="delivery-ok">微信已送达</span>'
+      : item.push_error
+        ? `<span class="delivery-failed" title="${escapeHtml(item.push_error)}">微信失败</span>`
+        : '<span class="delivery-pending">未推送</span>';
+    return `<article class="event-card">
+      <time class="event-time">${escapeHtml(formatDataTime(item.created_at))}</time>
+      <div class="event-main"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.body)}</small>${item.push_error ? `<p class="push-error">${escapeHtml(item.push_error)}</p>` : ''}</div>
+      <div class="alert-status"><span class="event-badge ${item.severity === 'critical' ? 'critical' : 'high'}">${escapeHtml(item.severity)}</span>${delivery}</div>
+    </article>`;
+  }).join('') : emptyState('暂无预警', '没有新重点题材、风险事件或数据故障。');
+}
+
+function updateSectionCount() {
+  if (!state.data) return;
+  const { themes, alerts } = state.data;
+  let count = 0;
+  if (state.view === 'candidates') count = themes.filter(theme => theme.status === 'pending').length;
+  if (state.view === 'confirmed') {
+    count = state.themeFilter === 'archived'
+      ? themes.filter(theme => theme.status === 'archived').length
+      : themes.filter(theme => theme.status === 'confirmed' && (state.themeFilter !== 'pinned' || theme.pinned)).length;
+  }
+  if (state.view === 'alerts') count = alerts.length;
+  $('#sectionCount').textContent = count;
+}
+
+function admissionLabel(status) {
+  return ({
+    awaiting_ai: '等待AI准入审查', analyzing: '正在分析新颖性、催化与持续性',
+    analysis_failed: 'AI分析失败，下一轮涨停池更新后重试'
+  })[status] || '等待准入证据';
+}
+
+function marketLabel(session) {
+  return ({ opening_auction: '集合竞价', morning: '上午交易', afternoon: '下午交易',
+    lunch_break: '午间休市', auction_gap: '竞价间隙', pre_market: '盘前待机', closed: '已收市'
+  })[session] || '系统待机';
+}
+
+function marketReason(reason) {
+  return ({ exchange_closed: '交易所休市 · 不采集', calendar_unknown_fail_closed: '日历未知 · 已停止采集',
+    lunch_break: '午休期间不采集', auction_gap: '09:25–09:30不采集',
+    pre_market: '等待交易窗口', closed: '等待下个交易窗口'
+  })[reason] || '实时采集已停止';
+}
+
+function runStatus(status) {
+  return ({ success: '采集正常', failed: '采集失败', degraded: '降级运行' })[status] || '等待行情';
 }
 
 function scoreCell(label, value, className) {
@@ -355,20 +493,8 @@ function scoreCell(label, value, className) {
   return `<div class="score-cell ${className}"><span>${label}</span><strong>${escapeHtml(value)}</strong><div class="score-track"><i style="width:${score}%"></i></div></div>`;
 }
 
-function renderAnomalies(items) {
-  const filtered = state.anomalyFilter === 'all'
-    ? items
-    : items.filter(item => item.direction === state.anomalyFilter);
-  $('#anomalyList').innerHTML = filtered.length ? filtered.map(item => {
-    const negative = item.direction === 'negative';
-    const pct = Number(item.pct_change || 0);
-    const tags = [...(item.themes || []), ...(item.industries || [])].slice(0, 5);
-    return `<article class="event-card">
-      <time class="event-time">${escapeHtml(formatTime(item.captured_at))}</time>
-      <div class="event-main"><strong>${escapeHtml(item.name)} · ${escapeHtml(item.code)}</strong><small>${escapeHtml((item.reasons || []).join('；'))}</small>${tags.length ? `<div class="event-tags">${tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join('')}</div>` : ''}</div>
-      <div class="event-value ${negative ? 'negative' : ''}">${pct > 0 ? '+' : ''}${pct.toFixed(2)}%</div>
-    </article>`;
-  }).join('') : emptyState('当前没有匹配异动', '系统仅显示符合平衡模式规则的股票。');
+function summaryMetric(label, value) {
+  return `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
 }
 
 function formatPct(value) {
@@ -399,161 +525,36 @@ function timeLabel(value) {
   return digits && digits !== '000000' ? `${digits.slice(0, 2)}:${digits.slice(2, 4)}` : '';
 }
 
+function formatTime(value) {
+  if (!value) return '—';
+  const match = String(value).match(/T?(\d{2}):(\d{2})/);
+  return match ? `${match[1]}:${match[2]}` : '—';
+}
+
+function formatDate(value) {
+  const match = String(value || '').match(/(\d{4})-?(\d{2})-?(\d{2})/);
+  return match ? `${match[2]}-${match[3]}` : '—';
+}
+
 function formatDataTime(value) {
   if (!value) return '待采集';
   return `${formatDate(value)} ${formatTime(value)}`;
 }
 
 function formatCatalystTime(value) {
-  if (!value) return '时间待确认';
-  return formatDataTime(value);
+  return value ? formatDataTime(value) : '时间待确认';
 }
 
-function renderAlerts(items) {
-  $('#alertList').innerHTML = items.length ? items.map(item => `<article class="event-card">
-    <time class="event-time">${escapeHtml(formatTime(item.created_at))}</time>
-    <div class="event-main"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.body)}</small></div>
-    <span class="event-badge ${item.severity === 'critical' ? 'critical' : 'high'}">${escapeHtml(item.severity)}</span>
-  </article>`).join('') : emptyState('暂无预警', '没有高风险事件，也没有需要处理的数据故障。');
+function safeUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : '';
+  } catch (_) { return ''; }
 }
 
 function emptyState(title, detail) {
   return `<div class="empty-state"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span></div>`;
 }
-
-function updateSectionCount() {
-  if (!state.data) return;
-  const { themes, anomalies, alerts } = state.data;
-  const counts = {
-    candidates: themes.filter(theme => theme.status === 'pending').length,
-    confirmed: themes.filter(theme => theme.status === 'confirmed').length,
-    anomalies: state.anomalyFilter === 'all'
-      ? anomalies.length
-      : anomalies.filter(item => item.direction === state.anomalyFilter).length,
-    alerts: alerts.length
-  };
-  $('#sectionCount').textContent = counts[state.view].toLocaleString();
-}
-
-function openSheet(action, theme, trigger) {
-  state.sheet = { action, theme };
-  state.lastFocus = trigger || document.activeElement;
-  const title = theme.final_name || theme.suggested_name || theme.provisional_name || '';
-  const content = sheetContent(action, title);
-  $('#sheetKicker').textContent = content.kicker;
-  $('#sheetTitle').textContent = content.title;
-  $('#sheetFields').innerHTML = content.fields;
-  $('#sheetHint').textContent = content.hint;
-  $('#sheetSubmit').textContent = content.submit;
-  $('#sheetSubmit').classList.toggle('danger', action === 'reject' || action === 'logout');
-  $('#sheetBackdrop').hidden = false;
-  $('#actionSheet').hidden = false;
-  document.body.style.overflow = 'hidden';
-  requestAnimationFrame(() => $('#actionSheet input, #actionSheet textarea, #sheetSubmit')?.focus());
-}
-
-function sheetContent(action, title) {
-  const safeTitle = escapeHtml(title);
-  const templates = {
-    confirm: {
-      kicker: '人工确认', title: `确认“${title}”`, submit: '确认并生成评分',
-      fields: `<label class="field">题材名称<input name="final_name" value="${safeTitle}" maxlength="40" required></label>
-        <label class="field">催化强度（0–100，可选）<input name="catalyst_strength" type="number" min="0" max="100" placeholder="例如 75"></label>
-        <label class="field">催化持续时间（可选）<input name="catalyst_duration" maxlength="20" placeholder="例如 一周 / 数月"></label>`,
-      hint: 'Day 1保持为机器首次发现共性异动的日期。'
-    },
-    reject: {
-      kicker: '忽略候选', title: `忽略“${title}”`, submit: '确认忽略', fields: '',
-      hint: '该操作不会删除历史记录，之后仍可在数据库中追溯。'
-    },
-    explain: {
-      kicker: 'Theme Explanation Engine', title: `解释“${title}”`, submit: '搜索并更新解释', fields: '',
-      hint: 'AI会搜索最近72小时催化，只负责命名、合并建议和新闻解释，不改变股票成员。'
-    },
-    merge: {
-      kicker: '人工合并', title: `合并到“${title}”`, submit: '确认合并',
-      fields: '<label class="field">来源题材 ID<input name="source_ids" placeholder="例如 12, 15" required></label>',
-      hint: '输入需要合并进当前题材的候选ID，多个ID用逗号分隔。'
-    },
-    split: {
-      kicker: '人工拆分', title: `拆分“${title}”`, submit: '创建新题材',
-      fields: '<label class="field">股票代码<textarea name="member_codes" rows="3" placeholder="600000.SH, 000001.SZ" required></textarea></label><label class="field">新题材名称<input name="new_name" maxlength="40" required></label>',
-      hint: '只允许从当前题材已有成员中拆分，股票成员不会由AI修改。'
-    },
-    wecom: {
-      kicker: '通知通道', title: '测试企业微信', submit: '发送测试消息', fields: '',
-      hint: '将向.env中配置的企业微信UserID发送一条连接测试消息。'
-    },
-    logout: {
-      kicker: '当前会话', title: '退出 StockTopic', submit: '退出登录', fields: '',
-      hint: '退出后会清除当前标签页保存的登录凭据，不影响后台采集。'
-    }
-  };
-  return templates[action];
-}
-
-function closeSheet() {
-  $('#sheetBackdrop').hidden = true;
-  $('#actionSheet').hidden = true;
-  document.body.style.overflow = '';
-  state.lastFocus?.focus();
-  state.sheet = null;
-}
-
-$('#sheetForm').addEventListener('submit', async event => {
-  event.preventDefault();
-  if (!state.sheet) return;
-  const { action, theme } = state.sheet;
-  const data = Object.fromEntries(new FormData(event.currentTarget));
-  const submit = $('#sheetSubmit');
-  submit.disabled = true;
-  const originalText = submit.textContent;
-  submit.textContent = '正在处理…';
-  try {
-    if (action === 'confirm') {
-      await api(`/api/v1/themes/${theme.id}/confirm`, {
-        method: 'POST',
-        body: JSON.stringify({
-          final_name: data.final_name.trim(),
-          catalyst_strength: data.catalyst_strength ? Number(data.catalyst_strength) : null,
-          catalyst_duration: data.catalyst_duration.trim() || null
-        })
-      });
-    } else if (action === 'reject') {
-      await api(`/api/v1/themes/${theme.id}/reject`, { method: 'POST' });
-    } else if (action === 'explain') {
-      await api(`/api/v1/themes/${theme.id}/explain`, { method: 'POST' });
-    } else if (action === 'merge') {
-      const sourceIds = data.source_ids.split(/[\s,]+/).map(value => Number(value.trim())).filter(Boolean);
-      if (!sourceIds.length) throw new Error('请输入有效的来源题材ID');
-      await api(`/api/v1/themes/${theme.id}/merge`, {
-        method: 'POST', body: JSON.stringify({ source_ids: sourceIds })
-      });
-    } else if (action === 'split') {
-      const memberCodes = data.member_codes.split(/[\s,]+/).map(value => value.trim()).filter(Boolean);
-      await api(`/api/v1/themes/${theme.id}/split`, {
-        method: 'POST',
-        body: JSON.stringify({ member_codes: memberCodes, new_name: data.new_name.trim() })
-      });
-    } else if (action === 'wecom') {
-      await api('/api/v1/admin/wecom-test', { method: 'POST' });
-    } else if (action === 'logout') {
-      closeSheet();
-      showLogin();
-      toast('已退出当前会话');
-      return;
-    }
-    closeSheet();
-    await load();
-    toast(action === 'wecom' ? '企业微信测试消息已发送' : '操作已完成');
-  } catch (error) {
-    $('#sheetHint').textContent = error.message;
-    toast(error.message, true);
-  } finally {
-    submit.disabled = false;
-    submit.textContent = originalText;
-  }
-});
 
 let toastTimer;
 function toast(message, isError = false) {
@@ -563,7 +564,7 @@ function toast(message, isError = false) {
   node.classList.toggle('error', isError);
   node.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.classList.remove('show'), 2800);
+  toastTimer = setTimeout(() => node.classList.remove('show'), 3200);
 }
 
 if (state.auth) {
@@ -572,7 +573,4 @@ if (state.auth) {
 } else {
   showLogin();
 }
-
-setInterval(() => {
-  if (state.auth && document.visibilityState === 'visible') load();
-}, 60_000);
+setInterval(() => { if (state.auth && document.visibilityState === 'visible') load(); }, 60_000);

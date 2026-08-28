@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from stocktopic.api import create_app
 from stocktopic.config import Settings
+from stocktopic.wecom import WeComDeliveryError
 
 
 class FailingWeComNotifier:
@@ -34,7 +35,8 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.2.1" in page.text
+        assert "app.js?v=0.3.0" in page.text
+        assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
         assert script.status_code == 200
@@ -49,10 +51,7 @@ def test_api_auth_and_csrf_guard():
         assert dashboard.status_code == 200
         assert dashboard.headers["cache-control"] == "no-store"
         assert dashboard.headers["x-frame-options"] == "DENY"
-        assert dashboard.json()["data_context"] == {
-            "anomaly_trade_date": None,
-            "has_intraday_data": False,
-        }
+        assert "anomalies" not in dashboard.json()
 
         basic_value = base64.b64encode(b"admin:password").decode()
         basic = {"Authorization": f"Basic {basic_value}"}
@@ -62,8 +61,35 @@ def test_api_auth_and_csrf_guard():
         assert response.status_code == 200
         assert response.json()["status"] == "idle"
 
+        theme_id = app.state.service.database.upsert_candidate(
+            fingerprint="api-theme",
+            provisional_name="接口题材",
+            shared_tag="接口测试",
+            direction="positive",
+            discovered_at="2026-08-26T10:00:00+08:00",
+            day1_date="2026-08-26",
+            discovery_reason="测试置顶和归档",
+            members=[],
+        )
+        app.state.service.database.set_theme_status(theme_id, "confirmed", "接口题材")
+        response = client.post(
+            f"/api/v1/themes/{theme_id}/pin", json={"pinned": True}, headers=basic
+        )
+        assert response.status_code == 200
+        assert response.json()["theme"]["pinned"] == 1
+        assert client.post(f"/api/v1/themes/{theme_id}/archive", headers=basic).status_code == 200
+        assert app.state.service.database.get_theme(theme_id)["status"] == "archived"
+        assert client.post(f"/api/v1/themes/{theme_id}/restore", headers=basic).status_code == 200
+        assert app.state.service.database.get_theme(theme_id)["status"] == "confirmed"
+
         app.state.service.notifier = FailingWeComNotifier()
         response = client.post("/api/v1/admin/wecom-test", headers=basic)
         assert response.status_code == 502
         assert "errcode=60020" in response.json()["detail"]
         assert "sensitive-token" not in response.text
+
+
+def test_wecom_trusted_ip_error_has_actionable_guidance():
+    error = WeComDeliveryError("获取Token", 60020, "not allow to access from your ip")
+    assert "errcode=60020" in str(error)
+    assert "企业可信IP" in str(error)

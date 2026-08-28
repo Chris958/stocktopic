@@ -13,9 +13,7 @@ class OpenAIEndpointTests(TestCase):
         self.assertEqual(client.endpoint, "https://provider.example/openai/v1/responses")
 
     def test_complete_responses_endpoint_is_not_duplicated(self):
-        client = OpenAIThemeExplainer(
-            "key", "model", "https://provider.example/v1/responses/"
-        )
+        client = OpenAIThemeExplainer("key", "model", "https://provider.example/v1/responses/")
         self.assertEqual(client.endpoint, "https://provider.example/v1/responses")
 
     def test_base_url_rejects_credentials(self):

@@ -13,7 +13,7 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=0.2.1">
+  <link rel="stylesheet" href="/static/style.css?v=0.3.0">
 </head>
 <body>
   <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -23,12 +23,11 @@
     <div class="header-inner">
       <button class="brand pressable" data-view="candidates" aria-label="返回候选题材">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span><strong>StockTopic</strong><small>资金共识 · 题材生命周期</small></span>
+        <span><strong>StockTopic</strong><small>新重点题材 · 自动准入</small></span>
       </button>
       <nav class="desktop-nav" aria-label="主要页面">
         <button class="nav-item active pressable" data-view="candidates" aria-current="page">发现</button>
         <button class="nav-item pressable" data-view="confirmed">题材</button>
-        <button class="nav-item pressable" data-view="anomalies">异动</button>
         <button class="nav-item pressable" data-view="alerts">预警</button>
       </nav>
       <div class="header-actions">
@@ -44,9 +43,9 @@
   <main class="app-main">
     <section class="market-hero" aria-labelledby="pageTitle">
       <div class="hero-copy">
-        <p class="eyebrow">MARKET FIRST · NEWS SECOND</p>
-        <h1 id="pageTitle">发现市场正在形成的共识</h1>
-        <p id="pageSummary" class="hero-summary">从全市场异动反推题材，确认后再判断热度、持续性和接盘风险。</p>
+        <p class="eyebrow">LIMIT-UP CONSENSUS · NOVELTY FIRST</p>
+        <h1 id="pageTitle">只发现正在发酵的新重点题材</h1>
+        <p id="pageSummary" class="hero-summary">四只股票触及涨停后才启动分析，再通过60交易日历史与新闻催化判断持续性。</p>
       </div>
       <div id="marketState" class="market-state loading" role="status">
         <span class="state-dot"></span>
@@ -63,9 +62,9 @@
       </article>
       <article class="glance-card">
         <div class="glance-icon red" aria-hidden="true">候</div>
-        <span>待确认</span>
+        <span>AI审查中</span>
         <strong id="candidateMetric">—</strong>
-        <small>确认前不生成评分</small>
+        <small>已通过四只触板门槛</small>
       </article>
       <article class="glance-card">
         <div class="glance-icon green" aria-hidden="true">题</div>
@@ -84,9 +83,9 @@
     <section class="content-shell">
       <div class="section-toolbar">
         <div>
-          <p class="section-kicker" id="sectionKicker">候选题材</p>
-          <h2 id="sectionTitle">机器发现，人工确认</h2>
-          <p id="sectionDescription">股票成员由确定性规则产生，AI只负责命名与解释。</p>
+          <p class="section-kicker" id="sectionKicker">准入审查</p>
+          <h2 id="sectionTitle">只显示达到硬门槛的题材</h2>
+          <p id="sectionDescription">普通异动不再展示；系统自动完成新颖性、催化和持续性审查。</p>
         </div>
         <div class="count-badge" id="sectionCount">0</div>
       </div>
@@ -97,15 +96,12 @@
         </div>
       </section>
       <section id="confirmed" class="view-panel" aria-label="正式题材">
-        <div id="confirmedList" class="theme-list"></div>
-      </section>
-      <section id="anomalies" class="view-panel" aria-label="异动池">
-        <div class="filter-row" role="group" aria-label="异动方向筛选">
-          <button class="filter-chip active pressable" data-filter="all">全部</button>
-          <button class="filter-chip pressable" data-filter="positive">上涨</button>
-          <button class="filter-chip pressable" data-filter="negative">负反馈</button>
+        <div class="filter-row" role="group" aria-label="题材状态筛选">
+          <button class="filter-chip active pressable" data-theme-filter="active">当前题材</button>
+          <button class="filter-chip pressable" data-theme-filter="pinned">仅置顶</button>
+          <button class="filter-chip pressable" data-theme-filter="archived">已归档</button>
         </div>
-        <div id="anomalyList" class="event-list"></div>
+        <div id="confirmedList" class="theme-list"></div>
       </section>
       <section id="alerts" class="view-panel" aria-label="预警">
         <div class="inline-action">
@@ -120,7 +116,6 @@
   <nav class="mobile-tabbar" aria-label="移动端导航">
     <button class="mobile-tab active pressable" data-view="candidates" aria-current="page"><span class="tab-icon">⌁</span><span>发现</span><b id="candidateCount">0</b></button>
     <button class="mobile-tab pressable" data-view="confirmed"><span class="tab-icon">▱</span><span>题材</span><b id="confirmedCount">0</b></button>
-    <button class="mobile-tab pressable" data-view="anomalies"><span class="tab-icon">ϟ</span><span>异动</span><b id="anomalyCount">0</b></button>
     <button class="mobile-tab pressable" data-view="alerts"><span class="tab-icon">◌</span><span>预警</span><b id="alertCount">0</b></button>
   </nav>
 
@@ -157,6 +152,6 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
-  <script src="/static/app.js?v=0.2.1" defer></script>
+  <script src="/static/app.js?v=0.3.0" defer></script>
 </body>
 </html>

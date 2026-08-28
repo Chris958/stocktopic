@@ -3,7 +3,6 @@ import Foundation
 struct DashboardResponse: Decodable {
     let health: Health
     let themes: [Theme]
-    let anomalies: [Anomaly]
     let alerts: [AlertItem]
 }
 
@@ -67,18 +66,6 @@ struct ScoreDetails: Decodable {
     let averagePct: Double
     let strongCount: Int
     let negativeCount: Int
-}
-
-struct Anomaly: Decodable, Identifiable {
-    let id: Int
-    let capturedAt: String
-    let code: String
-    let name: String
-    let direction: String
-    let severity: Double
-    let pctChange: Double
-    let change5m: Double
-    let reasons: [String]
 }
 
 struct AlertItem: Decodable, Identifiable {

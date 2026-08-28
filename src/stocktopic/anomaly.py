@@ -33,6 +33,10 @@ class AnomalyDetector:
         context: StockContext,
         history: list[dict[str, Any]],
     ) -> list[Anomaly]:
+        # During the opening auction rt_k can return close=0 when no indicative
+        # price is available. Such rows are unavailable data, never a -100% move.
+        if quote.pre_close <= 0 or quote.close <= 0:
+            return []
         previous, prior = _history_pair(history, quote.captured_at)
         change_5m = _price_change(quote.close, previous.get("close") if previous else None)
         amount_delta = (
@@ -163,9 +167,7 @@ class AnomalyDetector:
         hard = False
         touched_limit = _at_or_above(quote.high, context.upper_limit, t.limit_tolerance)
         failed_limit = bool(
-            touched_limit
-            and context.upper_limit
-            and quote.close < context.upper_limit - 0.01
+            touched_limit and context.upper_limit and quote.close < context.upper_limit - 0.01
         )
         at_lower_limit = _at_or_below(quote.close, context.lower_limit, t.limit_tolerance)
         if failed_limit:

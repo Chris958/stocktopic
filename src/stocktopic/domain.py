@@ -16,6 +16,7 @@ class CandidateStatus(StrEnum):
     CONFIRMED = "confirmed"
     REJECTED = "rejected"
     MERGED = "merged"
+    ARCHIVED = "archived"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +36,7 @@ class Quote:
 
     @property
     def pct_change(self) -> float:
-        if not self.pre_close:
+        if self.pre_close <= 0 or self.close <= 0:
             return 0.0
         return (self.close / self.pre_close - 1.0) * 100.0
 
@@ -64,4 +65,3 @@ class Anomaly:
     event_types: tuple[str, ...]
     reasons: tuple[str, ...]
     metrics: dict[str, Any] = field(default_factory=dict)
-

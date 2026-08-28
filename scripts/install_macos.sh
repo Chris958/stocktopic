@@ -69,10 +69,34 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     printf 'STOCKTOPIC_ARCHIVE_DIR=%s/data/archive\n' "$APP_DIR"
     printf 'STOCKTOPIC_HOST=127.0.0.1\n'
     printf 'STOCKTOPIC_PORT=8765\n'
+    printf 'PUBLIC_BASE_URL=https://stock.bnken.com\n'
+    printf 'MINIMUM_LIMIT_TOUCHES=4\n'
+    printf 'NOVELTY_LOOKBACK_TRADE_DAYS=60\n'
+    printf 'NOVELTY_CONFIDENCE_THRESHOLD=70\n'
+    printf 'CATALYST_CONFIDENCE_THRESHOLD=65\n'
+    printf 'MINIMUM_EXPECTED_DURATION_DAYS=3\n'
+    printf 'LEADER_UPSIDE_THRESHOLD_PCT=30\n'
     printf 'LOG_LEVEL=INFO\n'
   } > "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
 fi
+
+append_default() {
+  local key="$1"
+  local value="$2"
+  if ! grep -q "^${key}=" "$APP_DIR/.env"; then
+    printf '\n%s=%s\n' "$key" "$value" >> "$APP_DIR/.env"
+  fi
+}
+
+append_default "PUBLIC_BASE_URL" "https://stock.bnken.com"
+append_default "MINIMUM_LIMIT_TOUCHES" "4"
+append_default "NOVELTY_LOOKBACK_TRADE_DAYS" "60"
+append_default "NOVELTY_CONFIDENCE_THRESHOLD" "70"
+append_default "CATALYST_CONFIDENCE_THRESHOLD" "65"
+append_default "MINIMUM_EXPECTED_DURATION_DAYS" "3"
+append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
+chmod 600 "$APP_DIR/.env"
 
 if ! grep -q '^OPENAI_BASE_URL=' "$APP_DIR/.env"; then
   OPENAI_BASE_URL_INPUT="https://api.openai.com/v1"

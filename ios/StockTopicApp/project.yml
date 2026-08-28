@@ -6,7 +6,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.1.0"
+    MARKETING_VERSION: "0.3.0"
     CURRENT_PROJECT_VERSION: "1"
 targets:
   StockTopic:
@@ -31,4 +31,3 @@ targets:
     sources: [Tests/StockTopicAppTests]
     dependencies:
       - target: StockTopic
-

@@ -44,6 +44,26 @@ class Database:
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self.connect() as connection:
             connection.executescript(schema)
+            self._migrate_schema(connection)
+            connection.execute("DELETE FROM anomaly_events WHERE pct_change<=-99")
+            connection.execute("DELETE FROM quote_snapshots WHERE close<=0 OR pre_close<=0")
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(candidate_themes)").fetchall()
+        }
+        additions = {
+            "pinned": "INTEGER NOT NULL DEFAULT 0",
+            "archived_at": "TEXT",
+            "admission_status": "TEXT NOT NULL DEFAULT 'legacy'",
+            "admission_reason": "TEXT",
+            "admission_reviewed_at": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE candidate_themes ADD COLUMN {name} {definition}")
 
     def set_metadata(self, key: str, value: str) -> None:
         with self.connect() as connection:
@@ -234,10 +254,7 @@ class Database:
                 "SELECT code, upper_limit, lower_limit FROM daily_limits WHERE trade_date=?",
                 (trade_date,),
             ).fetchall()
-        return {
-            str(row["code"]): (row["upper_limit"], row["lower_limit"])
-            for row in rows
-        }
+        return {str(row["code"]): (row["upper_limit"], row["lower_limit"]) for row in rows}
 
     def upsert_daily_metrics(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
@@ -382,9 +399,7 @@ class Database:
             ).fetchone()
         return str(row["trade_date"]) if row and row["trade_date"] else None
 
-    def anomalies_for_trade_date(
-        self, trade_date: str, limit: int = 200
-    ) -> list[dict[str, Any]]:
+    def anomalies_for_trade_date(self, trade_date: str, limit: int = 200) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
                 """
@@ -505,8 +520,8 @@ class Database:
         active = self.active_stock_map()
         values = []
         for row in rows:
-            code = str(row.get("con_code") or "")
-            tag = str(row.get("name") or "").strip()
+            code = str(row.get("ts_code") or "")
+            tag = str(row.get("con_name") or "").strip()
             if code in active and tag:
                 values.append((code, tag, "theme", "tushare_kpl_concept_cons", 0.9, now))
         with self.connect() as connection:
@@ -521,9 +536,7 @@ class Database:
             )
         return len(values)
 
-    def kpl_events_for_codes(
-        self, trade_date: str, codes: Sequence[str]
-    ) -> list[dict[str, Any]]:
+    def kpl_events_for_codes(self, trade_date: str, codes: Sequence[str]) -> list[dict[str, Any]]:
         if not codes:
             return []
         placeholders = ",".join("?" for _ in codes)
@@ -546,6 +559,116 @@ class Database:
                 "SELECT 1 FROM kpl_events WHERE trade_date=? LIMIT 1", (trade_date,)
             ).fetchone()
         return row is not None
+
+    def kpl_theme_clusters(self, trade_date: str) -> list[dict[str, Any]]:
+        """Return themes grouped by stocks that touched limit-up during the day.
+
+        Both currently sealed boards and failed boards count. A stock is counted
+        once per theme, preferring the sealed-board record when both exist.
+        """
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_date, code, name, board_tag, themes_json, status,
+                       limit_up_time, open_time, last_limit_time, limit_reason,
+                       pct_change, realtime_pct_change, synced_at
+                FROM kpl_events
+                WHERE trade_date=? AND board_tag IN ('涨停','炸板')
+                ORDER BY CASE board_tag WHEN '涨停' THEN 0 ELSE 1 END,
+                         limit_up_time ASC
+                """,
+                (trade_date,),
+            ).fetchall()
+        clusters: dict[str, dict[str, dict[str, Any]]] = {}
+        for row in rows:
+            item = dict(row)
+            themes = json.loads(str(item.pop("themes_json") or "[]"))
+            for theme in themes:
+                tag = str(theme).strip()
+                if not tag:
+                    continue
+                clusters.setdefault(tag, {}).setdefault(str(item["code"]), item)
+        return [
+            {
+                "tag": tag,
+                "members": list(members.values()),
+                "touch_count": len(members),
+                "sealed_count": sum(item.get("board_tag") == "涨停" for item in members.values()),
+                "failed_count": sum(item.get("board_tag") == "炸板" for item in members.values()),
+            }
+            for tag, members in sorted(
+                clusters.items(), key=lambda item: len(item[1]), reverse=True
+            )
+        ]
+
+    def eligible_members_for_tag(self, tag: str, limit: int = 160) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT s.code, s.name, s.industry, st.source, st.confidence,
+                       st.updated_at
+                FROM stock_tags st
+                JOIN stocks s ON s.code=st.code
+                WHERE st.tag=? AND st.tag_type='theme' AND st.confidence>=0.9
+                  AND s.active=1
+                ORDER BY st.confidence DESC, st.updated_at DESC
+                LIMIT ?
+                """,
+                (tag, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def historical_theme_matches(
+        self,
+        *,
+        theme_id: int,
+        shared_tag: str,
+        member_codes: Sequence[str],
+        since_date: str,
+        limit: int = 20,
+    ) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, shared_tag, provisional_name, suggested_name, final_name,
+                       status, discovered_at, day1_date, admission_status
+                FROM candidate_themes
+                WHERE id<>? AND discovered_at>=?
+                ORDER BY discovered_at DESC
+                """,
+                (theme_id, since_date),
+            ).fetchall()
+            candidates = [dict(row) for row in rows]
+            if not candidates:
+                return []
+            ids = [int(item["id"]) for item in candidates]
+            placeholders = ",".join("?" for _ in ids)
+            member_rows = connection.execute(
+                f"SELECT theme_id, code FROM theme_members WHERE theme_id IN ({placeholders}) "
+                "AND active=1",
+                ids,
+            ).fetchall()
+        members_by_theme: dict[int, set[str]] = {}
+        for row in member_rows:
+            members_by_theme.setdefault(int(row["theme_id"]), set()).add(str(row["code"]))
+        current = set(member_codes)
+        matches = []
+        for item in candidates:
+            old = members_by_theme.get(int(item["id"]), set())
+            overlap = len(current & old) / max(1, min(len(current), len(old)))
+            names = {
+                str(item.get("shared_tag") or ""),
+                str(item.get("provisional_name") or ""),
+                str(item.get("suggested_name") or ""),
+                str(item.get("final_name") or ""),
+            }
+            exact_tag = shared_tag in names or str(item.get("shared_tag")) == shared_tag
+            if not exact_tag and overlap < 0.5:
+                continue
+            item["member_overlap"] = round(overlap, 3)
+            item["exact_tag_match"] = exact_tag
+            matches.append(item)
+        return matches[:limit]
 
     def recent_live_theme_fingerprint(
         self, shared_tag: str, direction: str, since: datetime
@@ -591,6 +714,7 @@ class Database:
         day1_date: str,
         discovery_reason: str,
         members: Sequence[dict[str, Any]],
+        admission_status: str = "awaiting_ai",
     ) -> int:
         now = utc_now_iso()
         with self.connect() as connection:
@@ -598,10 +722,14 @@ class Database:
                 """
                 INSERT INTO candidate_themes(
                     fingerprint, provisional_name, shared_tag, direction,
-                    discovered_at, day1_date, discovery_reason, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    discovered_at, day1_date, discovery_reason, admission_status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint) DO UPDATE SET
                     discovery_reason=excluded.discovery_reason,
+                    admission_status=CASE
+                        WHEN candidate_themes.status='pending' THEN excluded.admission_status
+                        ELSE candidate_themes.admission_status
+                    END,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -612,6 +740,7 @@ class Database:
                     discovered_at,
                     day1_date,
                     discovery_reason,
+                    admission_status,
                     now,
                 ),
             )
@@ -636,7 +765,7 @@ class Database:
                         theme_id,
                         member["code"],
                         member["name"],
-                        "deterministic_tag_cluster",
+                        str(member.get("membership_source") or "limit_touch_cluster"),
                         json.dumps(member.get("evidence", {}), ensure_ascii=False),
                         discovered_at,
                         discovered_at,
@@ -650,7 +779,7 @@ class Database:
         if status:
             sql += " WHERE status=?"
             params.append(status)
-        sql += " ORDER BY updated_at DESC"
+        sql += " ORDER BY pinned DESC, updated_at DESC"
         with self.connect() as connection:
             themes = [dict(row) for row in connection.execute(sql, params).fetchall()]
             for theme in themes:
@@ -710,9 +839,7 @@ class Database:
                         else None
                     )
                     circ_mv = _number(member.get("circ_mv"))
-                    member["circ_mv_billion"] = (
-                        round(circ_mv / 10_000.0, 2) if circ_mv else None
-                    )
+                    member["circ_mv_billion"] = round(circ_mv / 10_000.0, 2) if circ_mv else None
                     theme["members"].append(member)
                 self._attach_board_context(connection, theme)
                 self._attach_theme_market_summary(theme)
@@ -750,11 +877,192 @@ class Database:
                     (theme["id"],),
                 ).fetchall()
                 theme["catalysts"] = [dict(row) for row in catalyst_rows]
+                admission = connection.execute(
+                    """
+                    SELECT created_at, model, is_new_theme, novelty_confidence,
+                           catalyst_confidence, expected_duration_days,
+                           leader_candidate_code, leader_upside_scenario_pct,
+                           admitted, decision_reason, historical_matches_json,
+                           proposed_members_json, validated_members_json
+                    FROM theme_admission_reviews WHERE theme_id=?
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    (theme["id"],),
+                ).fetchone()
+                theme["admission_review"] = dict(admission) if admission else None
+                if theme["admission_review"]:
+                    for key in (
+                        "historical_matches_json",
+                        "proposed_members_json",
+                        "validated_members_json",
+                    ):
+                        theme["admission_review"][key.removesuffix("_json")] = json.loads(
+                            theme["admission_review"].pop(key)
+                        )
         return themes
 
-    def _attach_board_context(
-        self, connection: sqlite3.Connection, theme: dict[str, Any]
+    def set_theme_pin(self, theme_id: int, pinned: bool) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE candidate_themes SET pinned=?, updated_at=? WHERE id=?",
+                (int(pinned), utc_now_iso(), theme_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(f"Theme {theme_id} not found")
+
+    def archive_theme(self, theme_id: int) -> None:
+        now = utc_now_iso()
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM candidate_themes WHERE id=?", (theme_id,)
+            ).fetchone()
+            if not row:
+                raise KeyError(f"Theme {theme_id} not found")
+            connection.execute(
+                """
+                UPDATE candidate_themes SET status='archived', archived_at=?, pinned=0,
+                    updated_at=? WHERE id=?
+                """,
+                (now, now, theme_id),
+            )
+
+    def restore_theme(self, theme_id: int) -> None:
+        now = utc_now_iso()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE candidate_themes SET status='confirmed', archived_at=NULL,
+                    updated_at=? WHERE id=? AND status='archived'
+                """,
+                (now, theme_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(f"Archived theme {theme_id} not found")
+
+    def set_admission_status(self, theme_id: int, status: str, reason: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE candidate_themes SET admission_status=?, admission_reason=?,
+                    admission_reviewed_at=?, updated_at=? WHERE id=?
+                """,
+                (status, reason[:2000], utc_now_iso(), utc_now_iso(), theme_id),
+            )
+            if not cursor.rowcount:
+                raise KeyError(f"Theme {theme_id} not found")
+
+    def add_validated_members(
+        self, theme_id: int, members: Sequence[dict[str, Any]], seen_at: str
+    ) -> int:
+        inserted = 0
+        with self.connect() as connection:
+            for member in members:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO theme_members(
+                        theme_id, code, name, membership_source, evidence_json,
+                        first_seen_at, last_seen_at, active, role
+                    ) VALUES (?, ?, ?, 'ai_proposed_deterministic_validated', ?, ?, ?, 1, ?)
+                    ON CONFLICT(theme_id, code) DO UPDATE SET
+                        name=excluded.name, evidence_json=excluded.evidence_json,
+                        last_seen_at=excluded.last_seen_at, active=1,
+                        role=COALESCE(excluded.role, theme_members.role)
+                    """,
+                    (
+                        theme_id,
+                        member["code"],
+                        member["name"],
+                        json.dumps(member.get("evidence", {}), ensure_ascii=False),
+                        seen_at,
+                        seen_at,
+                        member.get("role"),
+                    ),
+                )
+                inserted += int(cursor.rowcount > 0)
+        return inserted
+
+    def save_admission_review(
+        self,
+        theme_id: int,
+        item: dict[str, Any],
+        historical_matches: Sequence[dict[str, Any]],
+        validated_members: Sequence[dict[str, Any]],
+        admitted: bool,
+        decision_reason: str,
     ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO theme_admission_reviews(
+                    theme_id, created_at, model, is_new_theme, novelty_confidence,
+                    catalyst_confidence, expected_duration_days, leader_candidate_code,
+                    leader_upside_scenario_pct, admitted, decision_reason,
+                    historical_matches_json, proposed_members_json,
+                    validated_members_json, raw_response_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    theme_id,
+                    utc_now_iso(),
+                    item.get("model", "unknown"),
+                    int(bool(item.get("is_new_theme"))),
+                    float(item.get("novelty_confidence") or 0),
+                    float(item.get("catalyst_confidence") or 0),
+                    int(item.get("expected_duration_days") or 0),
+                    item.get("leader_candidate_code"),
+                    float(item.get("leader_upside_scenario_pct") or 0),
+                    int(admitted),
+                    decision_reason,
+                    json.dumps(list(historical_matches), ensure_ascii=False),
+                    json.dumps(item.get("proposed_members", []), ensure_ascii=False),
+                    json.dumps(list(validated_members), ensure_ascii=False),
+                    json.dumps(item.get("raw", {}), ensure_ascii=False),
+                ),
+            )
+
+    def reclassify_legacy_pending(self, minimum_touches: int) -> dict[str, int]:
+        """Re-evaluate old pending themes using retained KPL evidence."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, shared_tag, day1_date FROM candidate_themes
+                WHERE status='pending' AND admission_status='legacy'
+                """
+            ).fetchall()
+        waiting = 0
+        failed = 0
+        for row in rows:
+            compact = str(row["day1_date"]).replace("-", "")
+            cluster = next(
+                (
+                    item
+                    for item in self.kpl_theme_clusters(compact)
+                    if item["tag"] == row["shared_tag"]
+                ),
+                None,
+            )
+            if cluster and int(cluster["touch_count"]) >= minimum_touches:
+                self.set_admission_status(
+                    int(row["id"]),
+                    "awaiting_ai",
+                    f"旧候选复核通过：当日{cluster['touch_count']}只股票曾触及涨停",
+                )
+                waiting += 1
+            else:
+                with self.connect() as connection:
+                    connection.execute(
+                        """
+                        UPDATE candidate_themes SET status='rejected',
+                            admission_status='legacy_gate_failed',
+                            admission_reason='旧候选无法证明同题材至少4只股票曾触及涨停',
+                            admission_reviewed_at=?, updated_at=? WHERE id=?
+                        """,
+                        (utc_now_iso(), utc_now_iso(), row["id"]),
+                    )
+                failed += 1
+        return {"awaiting_ai": waiting, "failed": failed}
+
+    def _attach_board_context(self, connection: sqlite3.Connection, theme: dict[str, Any]) -> None:
         members = theme["members"]
         codes = [str(member["code"]) for member in members]
         if not codes:
@@ -811,9 +1119,7 @@ class Database:
             if history:
                 latest_date = str(history[0].get("trade_date") or "")
                 same_day = [
-                    item
-                    for item in history
-                    if str(item.get("trade_date") or "") == latest_date
+                    item for item in history if str(item.get("trade_date") or "") == latest_date
                 ]
                 current_pct = _number(member.get("current_pct"))
                 preferred_tag = "涨停" if current_pct >= 9.5 else "炸板"
@@ -847,9 +1153,7 @@ class Database:
         for sequence, member in enumerate(limit_members, 1):
             member["limit_sequence"] = sequence
 
-        move_times = {
-            code: _parse_datetime(value) for code, value in first_moves.items()
-        }
+        move_times = {code: _parse_datetime(value) for code, value in first_moves.items()}
         move_times = {code: value for code, value in move_times.items() if value}
         for member in members:
             moved_at = move_times.get(str(member["code"]))
@@ -909,9 +1213,7 @@ class Database:
             "current_average_pct": round(sum(current_values) / len(current_values), 3)
             if current_values
             else None,
-            "confirmed_average_return": round(
-                sum(confirmed_values) / len(confirmed_values), 3
-            )
+            "confirmed_average_return": round(sum(confirmed_values) / len(confirmed_values), 3)
             if confirmed_values
             else None,
             "up_count": sum(value > 0 for value in current_values),
@@ -1210,9 +1512,7 @@ class Database:
                 ),
             )
 
-    def save_theme_catalysts(
-        self, theme_id: int, catalysts: Sequence[dict[str, Any]]
-    ) -> int:
+    def save_theme_catalysts(self, theme_id: int, catalysts: Sequence[dict[str, Any]]) -> int:
         captured_at = utc_now_iso()
         inserted = 0
         with self.connect() as connection:

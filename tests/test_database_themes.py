@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -73,9 +74,7 @@ class ThemeDatabaseTests(TestCase):
         self.assertEqual(set(self.db.active_stock_map()), {"600000.SH", "002001.SZ"})
 
     def test_kpl_themes_become_deterministic_stock_tags(self):
-        self.db.upsert_stocks(
-            [{"ts_code": "600000.SH", "name": "浦发银行", "market": "主板"}]
-        )
+        self.db.upsert_stocks([{"ts_code": "600000.SH", "name": "浦发银行", "market": "主板"}])
         self.db.upsert_kpl_events(
             [
                 {
@@ -215,22 +214,37 @@ class ThemeDatabaseTests(TestCase):
             [{"ts_code": "600000.SH", "name": "浦发银行", "market": "主板", "industry": "银行"}]
         )
         self.db.upsert_kpl_events(
-            [{
-                "trade_date": "20260826", "ts_code": "600000.SH", "name": "浦发银行",
-                "tag": "涨停", "theme": "金融科技", "status": "首板",
-            }]
+            [
+                {
+                    "trade_date": "20260826",
+                    "ts_code": "600000.SH",
+                    "name": "浦发银行",
+                    "tag": "涨停",
+                    "theme": "金融科技",
+                    "status": "首板",
+                }
+            ]
         )
         base = datetime(2026, 8, 26, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
         for minute, severity in ((0, 70), (5, 82)):
-            self.db.save_anomalies([
-                Anomaly(
-                    code="600000.SH", name="浦发银行",
-                    captured_at=base.replace(minute=minute), direction=Direction.POSITIVE,
-                    severity=severity, pct_change=7.5, change_5m=2.8,
-                    amount_delta=80_000_000, trade_delta=900, is_hard_event=False,
-                    event_types=("rapid_rise",), reasons=("量价齐升",),
-                )
-            ])
+            self.db.save_anomalies(
+                [
+                    Anomaly(
+                        code="600000.SH",
+                        name="浦发银行",
+                        captured_at=base.replace(minute=minute),
+                        direction=Direction.POSITIVE,
+                        severity=severity,
+                        pct_change=7.5,
+                        change_5m=2.8,
+                        amount_delta=80_000_000,
+                        trade_delta=900,
+                        is_hard_event=False,
+                        event_types=("rapid_rise",),
+                        reasons=("量价齐升",),
+                    )
+                ]
+            )
         items = self.db.high_signal_anomalies_for_trade_date("2026-08-26")
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["severity"], 82)
@@ -251,3 +265,112 @@ class ThemeDatabaseTests(TestCase):
         self.assertEqual(self.db.save_theme_catalysts(theme_id, [catalyst]), 1)
         self.assertEqual(self.db.save_theme_catalysts(theme_id, [catalyst]), 0)
         self.assertEqual(len(self.db.get_theme(theme_id)["catalysts"]), 1)
+
+    def test_limit_touch_discovery_requires_four_and_counts_failed_boards(self):
+        self.db.upsert_stocks(
+            [{"ts_code": f"60000{i}.SH", "name": f"股票{i}", "market": "主板"} for i in range(4)]
+        )
+        now = datetime(2026, 8, 26, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        first_three = [
+            {
+                "trade_date": "20260826",
+                "ts_code": f"60000{i}.SH",
+                "name": f"股票{i}",
+                "tag": "涨停" if i < 2 else "炸板",
+                "theme": "新型储能",
+                "status": "首板",
+                "lu_time": f"093{i}00",
+            }
+            for i in range(3)
+        ]
+        self.db.upsert_kpl_events(first_three)
+        discovery = ThemeDiscovery(self.db, minimum_limit_touches=4)
+        self.assertEqual(discovery.discover(now), [])
+        self.db.upsert_kpl_events(
+            [
+                {
+                    "trade_date": "20260826",
+                    "ts_code": "600003.SH",
+                    "name": "股票3",
+                    "tag": "炸板",
+                    "theme": "新型储能",
+                    "status": "首板",
+                    "lu_time": "093300",
+                }
+            ]
+        )
+        ids = discovery.discover(now)
+        self.assertEqual(len(ids), 1)
+        theme = self.db.get_theme(ids[0])
+        self.assertEqual(len(theme["members"]), 4)
+        self.assertEqual(theme["admission_status"], "awaiting_ai")
+        self.assertIn("炸板2只", theme["discovery_reason"])
+
+    def test_pin_archive_and_restore_are_reversible(self):
+        theme_id = self.create_candidate()
+        self.db.set_theme_status(theme_id, "confirmed", "粮食安全")
+        self.db.set_theme_pin(theme_id, True)
+        self.assertEqual(self.db.get_theme(theme_id)["pinned"], 1)
+        self.db.archive_theme(theme_id)
+        archived = self.db.get_theme(theme_id)
+        self.assertEqual(archived["status"], "archived")
+        self.assertEqual(archived["pinned"], 0)
+        self.db.restore_theme(theme_id)
+        self.assertEqual(self.db.get_theme(theme_id)["status"], "confirmed")
+
+    def test_kpl_concept_member_maps_stock_code_and_concept_name(self):
+        self.db.upsert_stocks([{"ts_code": "600000.SH", "name": "测试股份", "market": "主板"}])
+        count = self.db.upsert_kpl_concept_members(
+            [
+                {
+                    "ts_code": "600000.SH",
+                    "name": "测试股份",
+                    "con_name": "液冷服务器",
+                    "con_code": "885999",
+                }
+            ]
+        )
+        self.assertEqual(count, 1)
+        pool = self.db.eligible_members_for_tag("液冷服务器")
+        self.assertEqual(pool[0]["code"], "600000.SH")
+
+    def test_existing_v2_database_is_migrated_without_losing_theme(self):
+        legacy_path = Path(self.temp.name) / "legacy.sqlite3"
+        with sqlite3.connect(legacy_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE candidate_themes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint TEXT NOT NULL UNIQUE,
+                    provisional_name TEXT NOT NULL,
+                    suggested_name TEXT,
+                    final_name TEXT,
+                    shared_tag TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    direction TEXT NOT NULL DEFAULT 'positive',
+                    discovered_at TEXT NOT NULL,
+                    day1_date TEXT NOT NULL,
+                    confirmed_at TEXT,
+                    merged_into_id INTEGER,
+                    discovery_reason TEXT NOT NULL,
+                    catalyst_strength REAL NOT NULL DEFAULT 0,
+                    catalyst_duration TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO candidate_themes(
+                    fingerprint, provisional_name, shared_tag, discovered_at,
+                    day1_date, discovery_reason, updated_at
+                ) VALUES ('legacy', '旧候选', '旧题材', '2026-08-20T10:00:00+08:00',
+                          '2026-08-20', '旧规则产生', '2026-08-20T10:00:00+08:00')
+                """
+            )
+        legacy = Database(legacy_path, Path(self.temp.name) / "legacy-archive")
+        legacy.initialize()
+        theme = legacy.get_theme(1)
+        self.assertEqual(theme["provisional_name"], "旧候选")
+        self.assertEqual(theme["admission_status"], "legacy")
+        self.assertEqual(theme["pinned"], 0)
