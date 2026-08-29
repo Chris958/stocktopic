@@ -1,6 +1,19 @@
+import urllib.error
 from unittest import TestCase
+from unittest.mock import patch
 
 from stocktopic.ai import OpenAIThemeExplainer
+
+
+class JsonResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def read(self):
+        return b'{"output": []}'
 
 
 class OpenAIEndpointTests(TestCase):
@@ -19,6 +32,30 @@ class OpenAIEndpointTests(TestCase):
     def test_base_url_rejects_credentials(self):
         with self.assertRaisesRegex(ValueError, "must not contain credentials"):
             OpenAIThemeExplainer("key", "model", "https://user:pass@provider.example/v1")
+
+    def test_transient_dns_failure_is_retried_before_ai_request_fails(self):
+        client = OpenAIThemeExplainer("key", "model", "https://relay.example/v1")
+        error = urllib.error.URLError(OSError(8, "nodename nor servname provided"))
+        with (
+            patch("stocktopic.ai.open_url", side_effect=[error, JsonResponse()]) as opener,
+            patch("stocktopic.ai.time.sleep") as sleeper,
+        ):
+            result = client._request_json_with_retry(object())
+        self.assertEqual(result, {"output": []})
+        self.assertEqual(opener.call_count, 2)
+        sleeper.assert_called_once_with(1.0)
+
+    def test_persistent_dns_failure_reports_host_after_three_attempts(self):
+        client = OpenAIThemeExplainer("key", "model", "https://relay.example/v1")
+        error = urllib.error.URLError(OSError(8, "nodename nor servname provided"))
+        with (
+            patch("stocktopic.ai.open_url", side_effect=error) as opener,
+            patch("stocktopic.ai.time.sleep") as sleeper,
+            self.assertRaisesRegex(RuntimeError, "host=relay.example"),
+        ):
+            client._request_json_with_retry(object())
+        self.assertEqual(opener.call_count, 3)
+        self.assertEqual(sleeper.call_count, 2)
 
     def test_semantic_cluster_only_accepts_input_codes_and_actual_search_urls(self):
         client = OpenAIThemeExplainer("key", "model")

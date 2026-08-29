@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from stocktopic.config import Settings
 from stocktopic.domain import Quote
-from stocktopic.service import StockTopicService
+from stocktopic.service import StockTopicService, _admission_candidate_due
 
 CN = ZoneInfo("Asia/Shanghai")
 
@@ -97,6 +97,30 @@ class ServiceGuardTests(TestCase):
         self.assertEqual(
             self.service._catalyst_refresh_slot(datetime(2026, 8, 26, 14, 10, tzinfo=CN)),
             "13:30",
+        )
+
+    def test_failed_ai_candidate_retries_only_after_thirty_minute_cooldown(self):
+        now = datetime(2026, 8, 29, 10, 0, tzinfo=CN)
+        self.assertTrue(
+            _admission_candidate_due({"admission_status": "awaiting_ai"}, now)
+        )
+        self.assertFalse(
+            _admission_candidate_due(
+                {
+                    "admission_status": "analysis_failed",
+                    "admission_reviewed_at": "2026-08-29T09:45:00+08:00",
+                },
+                now,
+            )
+        )
+        self.assertTrue(
+            _admission_candidate_due(
+                {
+                    "admission_status": "analysis_failed",
+                    "admission_reviewed_at": "2026-08-29T09:29:59+08:00",
+                },
+                now,
+            )
         )
 
     def test_auction_zero_prices_are_skipped_without_minus_one_hundred_events(self):

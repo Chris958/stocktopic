@@ -1032,7 +1032,7 @@ class StockTopicService:
                 candidate_ids.extend(
                     int(theme["id"])
                     for theme in self.database.list_themes(status="pending")
-                    if theme.get("admission_status") == "awaiting_ai"
+                    if _admission_candidate_due(theme, now)
                 )
                 candidate_ids = list(dict.fromkeys(candidate_ids))
                 if candidate_ids and self.explainer.enabled:
@@ -1100,6 +1100,7 @@ class StockTopicService:
                 "semantic_event_clustering": True,
                 "backfill_trade_days": 2,
                 "levels": ["early_watch", "formal"],
+                "analysis_failure_retry_minutes": 30,
                 "novelty_lookback_trade_days": self.settings.novelty_lookback_trade_days,
                 "minimum_expected_duration_days": (self.settings.minimum_expected_duration_days),
                 "leader_upside_threshold_pct": self.settings.leader_upside_threshold_pct,
@@ -1132,6 +1133,20 @@ def _within_retry_cooldown(value: Any, now: datetime, *, minutes: int) -> bool:
         return now - created_at.astimezone(now.tzinfo) < timedelta(minutes=minutes)
     except (TypeError, ValueError):
         return False
+
+
+def _admission_candidate_due(
+    theme: dict[str, Any], now: datetime, *, retry_minutes: int = 30
+) -> bool:
+    status = str(theme.get("admission_status") or "")
+    if status == "awaiting_ai":
+        return True
+    if status != "analysis_failed":
+        return False
+    reviewed_at = theme.get("admission_reviewed_at")
+    if not reviewed_at:
+        return True
+    return not _within_retry_cooldown(reviewed_at, now, minutes=retry_minutes)
 
 
 def _admission_evidence_grade(catalysts: list[dict[str, Any]]) -> str:

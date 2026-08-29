@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -345,15 +346,44 @@ class OpenAIThemeExplainer:
                 "Content-Type": "application/json",
             },
         )
-        try:
-            with open_url(request, timeout=self.timeout) as response:
-                raw = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            body = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenAI HTTP {error.code}: {body[:500]}") from error
+        raw = self._request_json_with_retry(request)
         parsed = _parse_json_object(_output_text(raw))
         sources = _sources(raw)
         return raw, parsed, sources
+
+    def _request_json_with_retry(
+        self, request: urllib.request.Request, attempts: int = 3
+    ) -> dict[str, Any]:
+        """Retry DNS, timeout, rate-limit and upstream 5xx failures with bounded backoff."""
+        host = urllib.parse.urlsplit(self.endpoint).hostname or "unknown"
+        last_error: Exception | None = None
+        last_message = "unknown upstream error"
+        for attempt in range(max(1, attempts)):
+            try:
+                with open_url(request, timeout=self.timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as error:
+                last_error = error
+                body = error.read().decode("utf-8", errors="replace")
+                last_message = f"OpenAI HTTP {error.code}: {body[:500]}"
+                retryable = error.code == 429 or error.code >= 500
+                if not retryable or attempt >= attempts - 1:
+                    raise RuntimeError(last_message) from error
+            except (urllib.error.URLError, TimeoutError) as error:
+                last_error = error
+                last_message = (
+                    f"AI upstream network failed after {attempt + 1}/{attempts} attempts "
+                    f"(host={host}): {error}"
+                )
+                if attempt >= attempts - 1:
+                    raise RuntimeError(last_message) from error
+            except json.JSONDecodeError as error:
+                last_error = error
+                last_message = f"AI upstream returned non-JSON response (host={host})"
+                if attempt >= attempts - 1:
+                    raise RuntimeError(last_message) from error
+            time.sleep(1.0 * (2**attempt))
+        raise RuntimeError(last_message) from last_error
 
 
 def _output_text(response: dict[str, Any]) -> str:

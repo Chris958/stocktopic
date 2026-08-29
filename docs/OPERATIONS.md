@@ -95,3 +95,6 @@ OPENAI_MODEL=服务商支持的模型名
 launchctl kickstart -k gui/$(id -u)/com.chris958.stocktopic
 ./scripts/doctor.sh
 ```
+
+AI请求遇到DNS瞬断、连接超时、HTTP 429或上游5xx时，会按1秒、2秒间隔最多尝试3次。
+若仍失败，候选保持在“AI分析失败”状态，后台每30分钟重新审查，不需要重新创建候选。
