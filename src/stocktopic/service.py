@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from . import __version__
 from .ai import OpenAIThemeExplainer
 from .anomaly import AnomalyDetector
+from .backtest import PaperTradeTracker
 from .config import Settings
 from .db import Database
 from .domain import StockContext
@@ -37,6 +38,7 @@ class StockTopicService:
             settings.minimum_limit_touches,
         )
         self.scorer = ThemeScorer(self.database)
+        self.test_pool = PaperTradeTracker(self.database)
         self.explainer = OpenAIThemeExplainer(
             settings.openai_api_key,
             settings.openai_model,
@@ -67,6 +69,7 @@ class StockTopicService:
                 f"awaiting_ai={result['awaiting_ai']},failed={result['failed']}",
             )
         self.bootstrap_reference_data()
+        self.refresh_test_pool_prices(self.clock.china_now())
 
     def bootstrap_reference_data(self) -> None:
         now = self.clock.china_now()
@@ -177,6 +180,62 @@ class StockTopicService:
             logger.warning("Daily metric sync degraded: %s", error)
             self._data_pull_failure("sync_daily_metrics", error)
             return 0
+
+    def sync_daily_prices(self, trade_date: str) -> int:
+        run_id = self.database.begin_run("sync_daily_prices")
+        try:
+            rows = self.provider.daily_prices(trade_date)
+            count = self.database.upsert_daily_bars(rows)
+            if count < 2000:
+                raise RuntimeError(f"Daily price coverage abnormal: {count}")
+            self.database.set_metadata(f"daily_prices_synced:{trade_date}", "true")
+            self.database.finish_run(run_id, "success", count)
+            return count
+        except Exception as error:
+            self.database.finish_run(run_id, "degraded", detail=str(error))
+            logger.warning("Daily price sync degraded for %s: %s", trade_date, error)
+            self._data_pull_failure("sync_daily_prices", error)
+            return 0
+
+    def refresh_test_pool_prices(self, now: datetime | None = None) -> dict[str, Any]:
+        now = self.clock.normalize(now or self.clock.china_now())
+        compact = now.strftime("%Y%m%d")
+        calendar_open = self.database.calendar_status(compact)
+        if calendar_open and now.time() < time(17, 0):
+            ready_through = self.database.previous_trade_date(compact)
+        else:
+            dates = self.database.open_trade_dates(compact, 1)
+            ready_through = dates[0] if dates else None
+        passes: list[dict[str, int]] = []
+        synced: list[str] = []
+        attempted: set[str] = set()
+        for _ in range(15):
+            settled = self.test_pool.settle()
+            passes.append(settled)
+            newly_synced = []
+            if ready_through:
+                for trade_date in self.database.pending_test_pool_price_dates(ready_through):
+                    if trade_date in attempted:
+                        continue
+                    if self.database.get_metadata(f"daily_prices_synced:{trade_date}") == "true":
+                        continue
+                    attempted.add(trade_date)
+                    if self.sync_daily_prices(trade_date) >= 2000:
+                        synced.append(trade_date)
+                        newly_synced.append(trade_date)
+            if not newly_synced and not any(settled.values()):
+                break
+        return {
+            "ready_through": ready_through,
+            "synced_dates": synced,
+            "passes": passes,
+        }
+
+    def add_test_pool_stock(
+        self, theme_id: int, code: str, now: datetime | None = None
+    ) -> tuple[dict[str, Any], bool]:
+        current = self.clock.normalize(now or self.clock.china_now())
+        return self.test_pool.add(theme_id, code, current)
 
     def sync_kpl_events(self, trade_date: str) -> int:
         run_id = self.database.begin_run("sync_kpl_events")
@@ -1049,6 +1108,15 @@ class StockTopicService:
                         asyncio.to_thread(self.refresh_theme_catalysts),
                         name=f"catalyst-refresh-{catalyst_slot.replace(':', '')}",
                     )
+            settlement_slot = now.strftime("%H:%M")
+            if settlement_slot in {"08:35", "17:10"} and now.second < 25:
+                refresh_key = f"test_pool_refresh:{now.date().isoformat()}:{settlement_slot}"
+                if not self.database.get_metadata(refresh_key):
+                    self.database.set_metadata(refresh_key, now.isoformat())
+                    asyncio.create_task(
+                        asyncio.to_thread(self.refresh_test_pool_prices, now),
+                        name=f"test-pool-refresh-{settlement_slot.replace(':', '')}",
+                    )
             current = self.clock.china_now()
             delay = max(0.25, 10.0 - (current.second % 10) - current.microsecond / 1_000_000)
             try:
@@ -1083,6 +1151,10 @@ class StockTopicService:
                 "apns": False,
             },
             "latest_catalyst_refresh_at": self.database.get_metadata("last_catalyst_refresh_at"),
+            "test_pool": {
+                "total_count": self.database.test_pool_summary()["total_count"],
+                "latest_price_sync": self.database.latest_run("sync_daily_prices"),
+            },
             "latest_catalyst_refresh_started_at": self.database.get_metadata(
                 "last_catalyst_refresh_started_at"
             ),

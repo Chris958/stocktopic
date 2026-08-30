@@ -7,6 +7,7 @@ const state = {
   view: 'candidates',
   candidateFilter: 'watching',
   themeFilter: 'active',
+  backtestFilter: 'all',
   sheet: null,
   lastFocus: null,
   expanded: savedSections
@@ -22,6 +23,11 @@ const views = {
     kicker: '重点题材库',
     title: '已经通过多源证据验证',
     description: '正式题材通过持续性审查与官方信息或多源产业证据交叉验证。'
+  },
+  backtest: {
+    kicker: '测试票池',
+    title: '验证题材股票的次日买入效果',
+    description: '按正式日线自动结算成功率、等权标准收益和第三交易日最高可能收益。'
   },
   alerts: {
     kicker: '系统预警',
@@ -140,6 +146,13 @@ $$('[data-candidate-filter]').forEach(button => button.addEventListener('click',
   updateSectionCount();
 }));
 
+$$('[data-backtest-filter]').forEach(button => button.addEventListener('click', () => {
+  state.backtestFilter = button.dataset.backtestFilter;
+  $$('[data-backtest-filter]').forEach(item => item.classList.toggle('active', item === button));
+  renderBacktest();
+  updateSectionCount();
+}));
+
 $('#refresh').addEventListener('click', () => load(true));
 $('#accountButton').addEventListener('click', event => openSheet('logout', {}, event.currentTarget));
 $('#wecomTest').addEventListener('click', event => openSheet('wecom', {}, event.currentTarget));
@@ -177,7 +190,7 @@ async function load(manual = false) {
 
 function render() {
   if (!state.data) return;
-  const { health, themes, alerts } = state.data;
+  const { health, themes, alerts, backtest = { entries: [], summary: {} } } = state.data;
   const pending = themes.filter(theme => theme.status === 'pending');
   const watching = themes.filter(theme => theme.status === 'watching');
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
@@ -199,9 +212,11 @@ function render() {
   $('#lastRunDetail').textContent = runStatus(health.latest_quote_run?.status);
   $('#candidateCount').textContent = pending.length + watching.length;
   $('#confirmedCount').textContent = confirmed.length;
+  $('#backtestCount').textContent = backtest.entries.length;
   $('#alertCount').textContent = alerts.length;
   renderCandidates();
   renderConfirmed();
+  renderBacktest();
   renderAlerts(alerts);
   updateSectionCount();
 }
@@ -252,7 +267,9 @@ function renderThemes(selector, items, mode) {
     button.addEventListener('click', async event => {
       const theme = items.find(item => Number(item.id) === Number(button.dataset.id));
       if (!theme) return;
-      if (button.dataset.action === 'toggle-pin' || button.dataset.action === 'restore') {
+      if (button.dataset.action === 'track-stock') {
+        await trackStock(theme, button.dataset.code, button);
+      } else if (button.dataset.action === 'toggle-pin' || button.dataset.action === 'restore') {
         await immediateThemeAction(button.dataset.action, theme, button);
       } else {
         openSheet(button.dataset.action, theme, event.currentTarget);
@@ -275,7 +292,13 @@ function themeCard(theme, mode) {
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
   const activeMembers = theme.members.filter(member => member.active);
   const returnLabel = pending || watching || rejected ? '触发后' : '入库后';
-  const members = activeMembers.map((member, index) => memberRow(member, index + 1, returnLabel)).join('');
+  const backtest = state.data?.backtest || { entries: [] };
+  const trackedCodes = new Set(backtest.entries
+    .filter(item => item.signal_trade_date === backtest.current_signal_trade_date)
+    .map(item => item.code));
+  const members = activeMembers.map((member, index) => memberRow(
+    member, index + 1, returnLabel, theme.id, trackedCodes.has(member.code)
+  )).join('');
   const score = theme.score;
   const summary = theme.market_summary || {};
   const review = theme.admission_review;
@@ -312,7 +335,7 @@ function themeCard(theme, mode) {
   const stockDetails = `<details class="fold-section" data-collapse-key="${stockKey}" ${state.expanded[stockKey] ? 'open' : ''}>
     <summary><span><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
     <div class="member-table" role="table" aria-label="${escapeHtml(title)}股票行情">
-      <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span></div>
+      <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span><span>测试</span></div>
       <div class="member-table-body">${members}</div>
     </div>
   </details>`;
@@ -340,7 +363,7 @@ function themeCard(theme, mode) {
   </article>`;
 }
 
-function memberRow(member, position, returnLabel) {
+function memberRow(member, position, returnLabel, themeId, tracked) {
   const evidence = member.evidence || {};
   const reasons = evidence.limit_reason || evidence.ai_reason || evidence.shared_tag || '同题材确定性证据';
   const current = Number(member.current_pct);
@@ -358,7 +381,79 @@ function memberRow(member, position, returnLabel) {
     <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, timeLabel(member.first_limit_time)].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
     <div class="member-number neutral" role="cell"><strong>${formatMarketCap(member.circ_mv_billion)}</strong><small>${member.turnover_rate != null ? `换手 ${Number(member.turnover_rate).toFixed(1)}%` : '亿元'}</small></div>
     <div class="drive-cell" role="cell"><strong>${follow}</strong><small>30分钟跟随</small></div>
+    <div class="track-cell" role="cell"><button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>
   </div>`;
+}
+
+async function trackStock(theme, code, button) {
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = '记录中…';
+  try {
+    const result = await api('/api/v1/test-pool', {
+      method: 'POST', body: JSON.stringify({ theme_id: Number(theme.id), code })
+    });
+    toast(result.created ? '已加入测试票池' : '本交易日已跟踪，题材来源已合并');
+    await load();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = original;
+    toast(error.message, true);
+  }
+}
+
+function renderBacktest() {
+  if (!state.data) return;
+  const backtest = state.data.backtest || { entries: [], summary: {} };
+  const summary = backtest.summary || {};
+  $('#backtestSummary').innerHTML = [
+    backtestMetric('有效样本', summary.completed_count ?? 0, `${summary.success_count ?? 0}成功 · ${summary.failure_count ?? 0}失败`),
+    backtestMetric('成功率', formatPct(summary.success_rate), `持平 ${summary.flat_count ?? 0} 笔不计成败`),
+    backtestMetric('等权标准收益', formatPct(summary.average_standard_return_pct), 'T+1开盘买 · T+2开盘卖'),
+    backtestMetric('最高可能收益', formatPct(summary.average_maximum_return_pct), 'T+2最高价理论上限'),
+    backtestMetric('待结算 / 未成交', `${summary.pending_count ?? 0} / ${summary.unfilled_count ?? 0}`, '未成交不进入收益统计')
+  ].join('');
+  let entries = [...(backtest.entries || [])];
+  if (state.backtestFilter === 'pending') {
+    entries = entries.filter(item => ['awaiting_buy', 'awaiting_exit'].includes(item.status));
+  } else if (state.backtestFilter === 'completed') {
+    entries = entries.filter(item => ['success', 'failure', 'flat'].includes(item.status));
+  } else if (state.backtestFilter === 'unfilled') {
+    entries = entries.filter(item => ['unfilled', 'invalid'].includes(item.status));
+  }
+  $('#backtestList').innerHTML = entries.length
+    ? entries.map(backtestRow).join('')
+    : emptyState('当前筛选下没有测试记录', '在题材股票行情榜点击“跟踪”即可建立一笔独立样本。');
+}
+
+function backtestMetric(label, value, detail) {
+  return `<article><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><small>${escapeHtml(detail)}</small></article>`;
+}
+
+function backtestRow(item) {
+  const sources = (item.source_themes || []).map(source =>
+    `<span>${escapeHtml(source.name)}</span>`).join('');
+  const status = backtestStatus(item.status);
+  const exitDate = item.actual_exit_date || item.exit_attempt_date || item.planned_exit_date;
+  const delay = Number(item.exit_delay_trade_days || 0);
+  return `<article class="backtest-row status-${escapeHtml(item.status)}">
+    <div class="backtest-stock"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.code)} · 信号 ${escapeHtml(formatDate(item.signal_trade_date))}</small><div>${sources}</div></div>
+    <div class="backtest-step"><span>T+1 买入</span><strong>${escapeHtml(formatPrice(item.buy_open))}</strong><small>${escapeHtml(formatDate(item.planned_buy_date))}</small></div>
+    <div class="backtest-step"><span>${delay ? '顺延退出' : 'T+2 开盘'}</span><strong>${escapeHtml(formatPrice(item.exit_open))}</strong><small>${escapeHtml(formatDate(exitDate))}${delay ? ` · 延迟${delay}日` : ''}</small></div>
+    <div class="backtest-return ${valueClass(item.standard_return_pct)}"><span>标准收益</span><strong>${escapeHtml(formatPct(item.standard_return_pct))}</strong><small>开盘卖出</small></div>
+    <div class="backtest-return ${valueClass(item.maximum_return_pct)}"><span>最高可能</span><strong>${escapeHtml(formatPct(item.maximum_return_pct))}</strong><small>${item.exit_high ? `最高 ¥${Number(item.exit_high).toFixed(2)}` : '等待最高价'}</small></div>
+    <div class="backtest-outcome"><span class="outcome-badge ${escapeHtml(item.status)}">${escapeHtml(status)}</span><small>${escapeHtml(item.status_reason || backtestStatusDetail(item.status))}</small></div>
+  </article>`;
+}
+
+function backtestStatus(status) {
+  return ({ awaiting_buy: '待买入', awaiting_exit: '持有中', success: '成功', failure: '失败',
+    flat: '持平', unfilled: '未成交', invalid: '数据无效' })[status] || '待处理';
+}
+
+function backtestStatusDetail(status) {
+  return ({ awaiting_buy: '等待T+1正式日线', awaiting_exit: '等待退出日结算', success: '开盘卖出高于买入价',
+    failure: '开盘卖出低于买入价', flat: '开盘卖出等于买入价', unfilled: '不计入统计' })[status] || '';
 }
 
 function catalystContent(items, explanation) {
@@ -488,7 +583,7 @@ function renderAlerts(items) {
 
 function updateSectionCount() {
   if (!state.data) return;
-  const { themes, alerts } = state.data;
+  const { themes, alerts, backtest = { entries: [] } } = state.data;
   let count = 0;
   if (state.view === 'candidates') {
     const map = {
@@ -503,6 +598,13 @@ function updateSectionCount() {
       : themes.filter(theme => theme.status === 'confirmed' && (state.themeFilter !== 'pinned' || theme.pinned)).length;
   }
   if (state.view === 'alerts') count = alerts.length;
+  if (state.view === 'backtest') {
+    const entries = backtest.entries || [];
+    if (state.backtestFilter === 'pending') count = entries.filter(item => ['awaiting_buy', 'awaiting_exit'].includes(item.status)).length;
+    else if (state.backtestFilter === 'completed') count = entries.filter(item => ['success', 'failure', 'flat'].includes(item.status)).length;
+    else if (state.backtestFilter === 'unfilled') count = entries.filter(item => ['unfilled', 'invalid'].includes(item.status)).length;
+    else count = entries.length;
+  }
   $('#sectionCount').textContent = count;
 }
 

@@ -13,7 +13,7 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=0.4.0">
+  <link rel="stylesheet" href="/static/style.css?v=0.5.0">
 </head>
 <body>
   <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -23,11 +23,12 @@
     <div class="header-inner">
       <button class="brand pressable" data-view="candidates" aria-label="返回候选题材">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span><strong>StockTopic</strong><small>V4 · 早期观察 · 正式题材</small></span>
+        <span><strong>StockTopic</strong><small>V5 · 题材识别 · 测试票池</small></span>
       </button>
       <nav class="desktop-nav" aria-label="主要页面">
         <button class="nav-item active pressable" data-view="candidates" aria-current="page">发现</button>
         <button class="nav-item pressable" data-view="confirmed">题材</button>
+        <button class="nav-item pressable" data-view="backtest">测试票池</button>
         <button class="nav-item pressable" data-view="alerts">预警</button>
       </nav>
       <div class="header-actions">
@@ -116,12 +117,27 @@
         </div>
         <div id="alertList" class="event-list"></div>
       </section>
+      <section id="backtest" class="view-panel" aria-label="测试票池">
+        <div class="backtest-rule">
+          <strong>T+1开盘模拟买入 → T+2开盘/最高价结算</strong>
+          <p>一字涨停或停牌不假设成交；退出日无法卖出会顺延，所有收益按每笔等金额计算。</p>
+        </div>
+        <div id="backtestSummary" class="backtest-summary"></div>
+        <div class="filter-row" role="group" aria-label="测试票池状态筛选">
+          <button class="filter-chip active pressable" data-backtest-filter="all">全部</button>
+          <button class="filter-chip pressable" data-backtest-filter="pending">待结算</button>
+          <button class="filter-chip pressable" data-backtest-filter="completed">已完成</button>
+          <button class="filter-chip pressable" data-backtest-filter="unfilled">未成交</button>
+        </div>
+        <div id="backtestList" class="backtest-list"></div>
+      </section>
     </section>
   </main>
 
   <nav class="mobile-tabbar" aria-label="移动端导航">
     <button class="mobile-tab active pressable" data-view="candidates" aria-current="page"><span class="tab-icon">⌁</span><span>发现</span><b id="candidateCount">0</b></button>
     <button class="mobile-tab pressable" data-view="confirmed"><span class="tab-icon">▱</span><span>题材</span><b id="confirmedCount">0</b></button>
+    <button class="mobile-tab pressable" data-view="backtest"><span class="tab-icon">◎</span><span>回测</span><b id="backtestCount">0</b></button>
     <button class="mobile-tab pressable" data-view="alerts"><span class="tab-icon">◌</span><span>预警</span><b id="alertCount">0</b></button>
   </nav>
 
@@ -158,6 +174,6 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
-  <script src="/static/app.js?v=0.4.0" defer></script>
+  <script src="/static/app.js?v=0.5.0" defer></script>
 </body>
 </html>

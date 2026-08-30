@@ -18,6 +18,7 @@ curl http://127.0.0.1:8765/health
 - `latest_wecom_error`：最近一次企业微信失败的阶段、errcode和处理建议；空字符串表示最近一次发送成功。
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
 - `admission_policy`：当前生效的共同事件4只触板、两交易日回补、早期观察/正式题材、60交易日和3日/30%准入口径。
+- `test_pool`：测试票池记录数量和最近一次Tushare正式日线同步任务。
 
 ## 更新
 
@@ -41,6 +42,16 @@ curl -u '你的管理用户名' \
 `curl` 会交互询问管理密码，不要把密码直接写进命令历史。
 
 该任务只调用日度开盘啦接口，不调用实时 `rt_k`。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。
+
+测试票池会在服务启动、08:35和17:10检查待结算记录。手工立即回补和结算可执行：
+
+```bash
+curl -u '你的管理用户名' \
+  -H 'X-StockTopic-Request: 1' \
+  -X POST http://127.0.0.1:8765/api/v1/admin/refresh-test-pool
+```
+
+该任务调用Tushare `daily`正式日线，不调用 `rt_k`。若出现 `sync_daily_prices` 数据故障，先确认Token具备日线接口权限，并检查返回覆盖是否达到2000只；失败日期不会被标记完成，下一次调度会继续回补。
 
 ## 备份与归档
 

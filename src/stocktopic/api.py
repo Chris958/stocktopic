@@ -38,6 +38,11 @@ class PinRequest(BaseModel):
     pinned: bool
 
 
+class TrackStockRequest(BaseModel):
+    theme_id: int = Field(gt=0)
+    code: str = Field(min_length=6, max_length=16)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     service = StockTopicService(settings)
@@ -54,7 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.4.1",
+        version="0.5.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -117,7 +122,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "health": await asyncio.to_thread(service.health),
             "themes": service.database.list_themes(),
             "alerts": service.database.recent_alerts(100),
+            "backtest": service.test_pool.dashboard(service.clock.china_now()),
         }
+
+    @app.get("/api/v1/test-pool")
+    async def test_pool():
+        return service.test_pool.dashboard(service.clock.china_now())
+
+    @app.post("/api/v1/test-pool")
+    async def track_stock(request: TrackStockRequest):
+        try:
+            entry, created = service.add_test_pool_stock(request.theme_id, request.code)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (ValueError, RuntimeError) as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        return {"ok": True, "created": created, "entry": entry}
 
     @app.get("/api/v1/themes")
     async def themes(status: str | None = None):
@@ -221,6 +241,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not service.explainer.enabled:
             raise HTTPException(status_code=503, detail="OpenAI API not configured")
         return await asyncio.to_thread(service.refresh_theme_catalysts)
+
+    @app.post("/api/v1/admin/refresh-test-pool")
+    async def refresh_test_pool():
+        return await asyncio.to_thread(service.refresh_test_pool_prices)
 
     @app.post("/api/v1/admin/run-once")
     async def run_once():

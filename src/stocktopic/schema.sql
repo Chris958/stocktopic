@@ -105,6 +105,24 @@ CREATE TABLE IF NOT EXISTS stock_daily_metrics (
 CREATE INDEX IF NOT EXISTS idx_daily_metrics_code_date
 ON stock_daily_metrics(code, trade_date DESC);
 
+CREATE TABLE IF NOT EXISTS stock_daily_bars (
+    trade_date TEXT NOT NULL,
+    code TEXT NOT NULL,
+    open REAL NOT NULL,
+    high REAL NOT NULL,
+    low REAL NOT NULL,
+    close REAL NOT NULL,
+    pre_close REAL NOT NULL,
+    pct_change REAL NOT NULL,
+    volume REAL NOT NULL,
+    amount REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (trade_date, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_bars_code_date
+ON stock_daily_bars(code, trade_date DESC);
+
 CREATE TABLE IF NOT EXISTS quote_snapshots (
     trade_date TEXT NOT NULL,
     slot TEXT NOT NULL,
@@ -317,3 +335,32 @@ CREATE TABLE IF NOT EXISTS service_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_service_runs_job ON service_runs(job_name, started_at DESC);
+
+CREATE TABLE IF NOT EXISTS test_pool_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    signal_trade_date TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    source_themes_json TEXT NOT NULL DEFAULT '[]',
+    planned_buy_date TEXT,
+    planned_exit_date TEXT,
+    exit_attempt_date TEXT,
+    actual_exit_date TEXT,
+    exit_delay_trade_days INTEGER NOT NULL DEFAULT 0,
+    buy_open REAL,
+    exit_open REAL,
+    exit_high REAL,
+    standard_return_pct REAL,
+    maximum_return_pct REAL,
+    status TEXT NOT NULL DEFAULT 'awaiting_buy',
+    status_reason TEXT,
+    settled_at TEXT,
+    UNIQUE(code, signal_trade_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_test_pool_status_dates
+ON test_pool_entries(status, planned_buy_date, planned_exit_date);
+
+CREATE INDEX IF NOT EXISTS idx_test_pool_created
+ON test_pool_entries(created_at DESC);

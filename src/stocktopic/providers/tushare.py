@@ -118,6 +118,16 @@ class TushareClient:
             ("ts_code,trade_date,close,turnover_rate,volume_ratio,float_share,total_mv,circ_mv"),
         )
 
+    def daily_prices(self, trade_date: str) -> list[dict[str, Any]]:
+        return self.call(
+            "daily",
+            {"trade_date": trade_date},
+            (
+                "ts_code,trade_date,open,high,low,close,pre_close,"
+                "change,pct_chg,vol,amount"
+            ),
+        )
+
     def kpl_list(self, trade_date: str, tag: str) -> list[dict[str, Any]]:
         return self.call(
             "kpl_list",

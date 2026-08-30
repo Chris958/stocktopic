@@ -1,5 +1,6 @@
 import base64
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -35,7 +36,7 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.4.0" in page.text
+        assert "app.js?v=0.5.0" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
@@ -52,6 +53,7 @@ def test_api_auth_and_csrf_guard():
         assert dashboard.headers["cache-control"] == "no-store"
         assert dashboard.headers["x-frame-options"] == "DENY"
         assert "anomalies" not in dashboard.json()
+        assert "backtest" in dashboard.json()
 
         basic_value = base64.b64encode(b"admin:password").decode()
         basic = {"Authorization": f"Basic {basic_value}"}
@@ -81,6 +83,44 @@ def test_api_auth_and_csrf_guard():
         assert app.state.service.database.get_theme(theme_id)["status"] == "archived"
         assert client.post(f"/api/v1/themes/{theme_id}/restore", headers=basic).status_code == 200
         assert app.state.service.database.get_theme(theme_id)["status"] == "confirmed"
+
+        now = app.state.service.clock.china_now()
+        calendar_rows = []
+        for offset in range(3):
+            day = now.date() + timedelta(days=offset)
+            previous = day - timedelta(days=1)
+            calendar_rows.append(
+                {
+                    "cal_date": day.strftime("%Y%m%d"),
+                    "is_open": "1",
+                    "pretrade_date": previous.strftime("%Y%m%d"),
+                }
+            )
+        app.state.service.database.replace_calendar(calendar_rows)
+        tracked_theme_id = app.state.service.database.upsert_candidate(
+            fingerprint="api-tracked-theme",
+            provisional_name="回测接口题材",
+            shared_tag="回测接口",
+            direction="positive",
+            discovered_at=now.isoformat(),
+            day1_date=now.date().isoformat(),
+            discovery_reason="测试股票跟踪接口",
+            members=[{"code": "600000.SH", "name": "浦发银行", "evidence": {}}],
+        )
+        response = client.post(
+            "/api/v1/test-pool",
+            json={"theme_id": tracked_theme_id, "code": "600000.SH"},
+            headers=basic,
+        )
+        assert response.status_code == 200
+        assert response.json()["created"] is True
+        duplicate = client.post(
+            "/api/v1/test-pool",
+            json={"theme_id": tracked_theme_id, "code": "600000.SH"},
+            headers=basic,
+        )
+        assert duplicate.status_code == 200
+        assert duplicate.json()["created"] is False
 
         app.state.service.notifier = FailingWeComNotifier()
         response = client.post("/api/v1/admin/wecom-test", headers=basic)

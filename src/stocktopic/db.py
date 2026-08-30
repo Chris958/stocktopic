@@ -165,6 +165,18 @@ class Database:
             ).fetchall()
         return [str(row["cal_date"]) for row in rows]
 
+    def next_open_trade_dates(self, after: str, limit: int = 2) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT cal_date FROM trading_calendar
+                WHERE cal_date>? AND is_open=1
+                ORDER BY cal_date ASC LIMIT ?
+                """,
+                (after, limit),
+            ).fetchall()
+        return [str(row["cal_date"]) for row in rows]
+
     def upsert_stocks(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
         values: list[tuple[Any, ...]] = []
@@ -317,6 +329,54 @@ class Database:
                 values,
             )
         return len(values)
+
+    def upsert_daily_bars(self, rows: Sequence[dict[str, Any]]) -> int:
+        updated_at = utc_now_iso()
+        values = []
+        for row in rows:
+            code = str(row.get("ts_code") or row.get("code") or "")
+            trade_date = str(row.get("trade_date") or "").replace("-", "")
+            if not code or not trade_date:
+                continue
+            values.append(
+                (
+                    trade_date,
+                    code,
+                    _number(row.get("open")),
+                    _number(row.get("high")),
+                    _number(row.get("low")),
+                    _number(row.get("close")),
+                    _number(row.get("pre_close")),
+                    _number(row.get("pct_chg") or row.get("pct_change")),
+                    _number(row.get("vol") or row.get("volume")),
+                    _number(row.get("amount")),
+                    updated_at,
+                )
+            )
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO stock_daily_bars(
+                    trade_date, code, open, high, low, close, pre_close,
+                    pct_change, volume, amount, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, code) DO UPDATE SET
+                    open=excluded.open, high=excluded.high, low=excluded.low,
+                    close=excluded.close, pre_close=excluded.pre_close,
+                    pct_change=excluded.pct_change, volume=excluded.volume,
+                    amount=excluded.amount, updated_at=excluded.updated_at
+                """,
+                values,
+            )
+        return len(values)
+
+    def daily_bar(self, trade_date: str, code: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM stock_daily_bars WHERE trade_date=? AND code=?",
+                (trade_date.replace("-", ""), code),
+            ).fetchone()
+        return dict(row) if row else None
 
     def latest_quote_history(
         self, trade_date: str, depth: int = 2
@@ -1804,6 +1864,169 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def add_test_pool_entry(
+        self,
+        *,
+        code: str,
+        name: str,
+        signal_trade_date: str,
+        planned_buy_date: str | None,
+        planned_exit_date: str | None,
+        source_theme: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        compact = signal_trade_date.replace("-", "")
+        created_at = utc_now_iso()
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM test_pool_entries WHERE code=? AND signal_trade_date=?",
+                (code, compact),
+            ).fetchone()
+            if existing:
+                sources = json.loads(existing["source_themes_json"] or "[]")
+                by_id = {int(item["id"]): item for item in sources if item.get("id") is not None}
+                by_id[int(source_theme["id"])] = source_theme
+                connection.execute(
+                    """
+                    UPDATE test_pool_entries SET name=?, source_themes_json=?,
+                        planned_buy_date=COALESCE(planned_buy_date, ?),
+                        planned_exit_date=COALESCE(planned_exit_date, ?),
+                        exit_attempt_date=COALESCE(exit_attempt_date, ?)
+                    WHERE id=?
+                    """,
+                    (
+                        name,
+                        json.dumps(list(by_id.values()), ensure_ascii=False),
+                        planned_buy_date,
+                        planned_exit_date,
+                        planned_exit_date,
+                        existing["id"],
+                    ),
+                )
+                entry_id = int(existing["id"])
+                created = False
+            else:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO test_pool_entries(
+                        code, name, signal_trade_date, created_at, source_themes_json,
+                        planned_buy_date, planned_exit_date, exit_attempt_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        code,
+                        name,
+                        compact,
+                        created_at,
+                        json.dumps([source_theme], ensure_ascii=False),
+                        planned_buy_date,
+                        planned_exit_date,
+                        planned_exit_date,
+                    ),
+                )
+                entry_id = int(cursor.lastrowid)
+                created = True
+            row = connection.execute(
+                "SELECT * FROM test_pool_entries WHERE id=?", (entry_id,)
+            ).fetchone()
+        return _decode_test_pool_entry(row), created
+
+    def list_test_pool_entries(self, limit: int = 1000) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM test_pool_entries ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_decode_test_pool_entry(row) for row in rows]
+
+    def update_test_pool_schedule(
+        self, entry_id: int, planned_buy_date: str, planned_exit_date: str
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE test_pool_entries SET planned_buy_date=?, planned_exit_date=?
+                    , exit_attempt_date=COALESCE(exit_attempt_date, ?)
+                WHERE id=? AND (planned_buy_date IS NULL OR planned_exit_date IS NULL)
+                """,
+                (planned_buy_date, planned_exit_date, planned_exit_date, entry_id),
+            )
+
+    def update_test_pool_entry(self, entry_id: int, **values: Any) -> None:
+        allowed = {
+            "buy_open",
+            "exit_open",
+            "exit_high",
+            "exit_attempt_date",
+            "actual_exit_date",
+            "exit_delay_trade_days",
+            "standard_return_pct",
+            "maximum_return_pct",
+            "status",
+            "status_reason",
+            "settled_at",
+        }
+        fields = [(name, value) for name, value in values.items() if name in allowed]
+        if not fields:
+            return
+        assignments = ", ".join(f"{name}=?" for name, _ in fields)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE test_pool_entries SET {assignments} WHERE id=?",
+                [*(value for _, value in fields), entry_id],
+            )
+
+    def pending_test_pool_price_dates(self, ready_through: str) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT trade_date FROM (
+                    SELECT planned_buy_date AS trade_date FROM test_pool_entries
+                    WHERE status='awaiting_buy'
+                    UNION
+                    SELECT COALESCE(exit_attempt_date, planned_exit_date) AS trade_date
+                    FROM test_pool_entries
+                    WHERE status='awaiting_exit'
+                )
+                WHERE trade_date IS NOT NULL AND trade_date<=?
+                ORDER BY trade_date
+                """,
+                (ready_through,),
+            ).fetchall()
+        return [str(row["trade_date"]) for row in rows]
+
+    def test_pool_summary(self) -> dict[str, Any]:
+        entries = self.list_test_pool_entries()
+        completed = [item for item in entries if item["status"] in {"success", "failure", "flat"}]
+        success_count = sum(item["status"] == "success" for item in completed)
+        failure_count = sum(item["status"] == "failure" for item in completed)
+        flat_count = sum(item["status"] == "flat" for item in completed)
+        directional_count = success_count + failure_count
+        standard = [float(item["standard_return_pct"]) for item in completed]
+        maximum = [float(item["maximum_return_pct"]) for item in completed]
+        return {
+            "total_count": len(entries),
+            "completed_count": len(completed),
+            "success_count": success_count,
+            "failure_count": failure_count,
+            "flat_count": flat_count,
+            "unfilled_count": sum(item["status"] == "unfilled" for item in entries),
+            "invalid_count": sum(item["status"] == "invalid" for item in entries),
+            "pending_count": sum(
+                item["status"] in {"awaiting_buy", "awaiting_exit"} for item in entries
+            ),
+            "success_rate": round(success_count / directional_count * 100.0, 2)
+            if directional_count
+            else None,
+            "average_standard_return_pct": round(sum(standard) / len(standard), 3)
+            if standard
+            else None,
+            "average_maximum_return_pct": round(sum(maximum) / len(maximum), 3)
+            if maximum
+            else None,
+            "flat_policy": "excluded_from_success_rate",
+            "aggregation": "equal_weight_average",
+        }
+
     def begin_run(self, job_name: str) -> int:
         with self.connect() as connection:
             cursor = connection.execute(
@@ -1888,6 +2111,12 @@ def _decode_anomaly_rows(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
             item[target] = json.loads(item.pop(source))
         result.append(item)
     return result
+
+
+def _decode_test_pool_entry(row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    item["source_themes"] = json.loads(item.pop("source_themes_json") or "[]")
+    return item
 
 
 def _split_tags(value: str) -> list[str]:
