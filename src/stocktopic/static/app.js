@@ -3,7 +3,7 @@ try { savedSections = JSON.parse(localStorage.getItem('stocktopicSections') || '
 catch (_) { savedSections = {}; }
 const state = {
   data: null,
-  auth: sessionStorage.getItem('stocktopicAuth') || '',
+  authenticated: false,
   view: 'candidates',
   candidateFilter: 'watching',
   themeFilter: 'active',
@@ -27,7 +27,7 @@ const views = {
   backtest: {
     kicker: '测试票池',
     title: '验证题材股票的次日买入效果',
-    description: '按正式日线自动结算成功率、等权标准收益和第三交易日最高可能收益。'
+    description: '开盘后确认买入并实时跟踪涨跌，收盘日线校准后自动结算。'
   },
   alerts: {
     kicker: '系统预警',
@@ -42,28 +42,20 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, character =>
   '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
 }[character]));
 
-function basicAuthorization(username, password) {
-  const bytes = new TextEncoder().encode(`${username}:${password}`);
-  let binary = '';
-  bytes.forEach(byte => { binary += String.fromCharCode(byte); });
-  return `Basic ${btoa(binary)}`;
-}
-
-async function api(path, options = {}, authOverride = null) {
-  const authorization = authOverride ?? state.auth;
+async function api(path, options = {}) {
   const response = await fetch(path, {
     cache: 'no-store',
+    credentials: 'same-origin',
     ...options,
     headers: {
       'Content-Type': 'application/json',
       'X-StockTopic-Request': '1',
-      ...(authorization ? { Authorization: authorization } : {}),
       ...(options.headers || {})
     }
   });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401) {
-    if (!authOverride) showLogin('登录已失效，请重新输入密码。');
+    if (path !== '/api/v1/auth/login') showLogin('登录已失效，请重新输入密码。');
     throw new Error('用户名或密码不正确');
   }
   if (!response.ok) throw new Error(body.detail || `请求失败 ${response.status}`);
@@ -71,14 +63,14 @@ async function api(path, options = {}, authOverride = null) {
 }
 
 function showLogin(message = '') {
-  state.auth = '';
-  sessionStorage.removeItem('stocktopicAuth');
+  state.authenticated = false;
   $('#loginBackdrop').classList.remove('authenticated');
   $('#loginError').textContent = message;
   requestAnimationFrame(() => $('#loginPassword').focus());
 }
 
 function hideLogin() {
+  state.authenticated = true;
   $('#loginBackdrop').classList.add('authenticated');
   $('#loginError').textContent = '';
   $('#loginPassword').value = '';
@@ -87,16 +79,18 @@ function hideLogin() {
 $('#loginForm').addEventListener('submit', async event => {
   event.preventDefault();
   const button = $('#loginSubmit');
-  const authorization = basicAuthorization(
-    $('#loginUsername').value.trim(), $('#loginPassword').value
-  );
+  const credentials = {
+    username: $('#loginUsername').value.trim(),
+    password: $('#loginPassword').value
+  };
   button.disabled = true;
   button.textContent = '正在验证…';
   $('#loginError').textContent = '';
   try {
-    state.data = await api('/api/v1/dashboard', {}, authorization);
-    state.auth = authorization;
-    sessionStorage.setItem('stocktopicAuth', authorization);
+    await api('/api/v1/auth/login', {
+      method: 'POST', body: JSON.stringify(credentials)
+    });
+    state.data = await api('/api/v1/dashboard');
     hideLogin();
     render();
     toast('连接成功');
@@ -174,7 +168,6 @@ document.addEventListener('keydown', event => {
 });
 
 async function load(manual = false) {
-  if (!state.auth) return showLogin();
   const refresh = $('#refresh');
   refresh.classList.add('loading');
   try {
@@ -182,7 +175,7 @@ async function load(manual = false) {
     render();
     if (manual) toast('数据已刷新');
   } catch (error) {
-    if (state.auth) toast(error.message, true);
+    if (state.authenticated) toast(error.message, true);
   } finally {
     refresh.classList.remove('loading');
   }
@@ -436,12 +429,19 @@ function backtestRow(item) {
   const status = backtestStatus(item.status);
   const exitDate = item.actual_exit_date || item.exit_attempt_date || item.planned_exit_date;
   const delay = Number(item.exit_delay_trade_days || 0);
+  const holding = item.status === 'awaiting_exit';
+  const liveTime = item.live_updated_at ? `更新 ${formatTime(item.live_updated_at)}` : '等待实时行情';
+  const standardValue = holding ? item.current_return_pct : item.standard_return_pct;
+  const maximumValue = holding ? item.current_high_return_pct : item.maximum_return_pct;
+  const source = item.buy_confirmation_source === 'realtime_rt_k'
+    ? '盘中确认 · 待日线校准'
+    : item.buy_confirmation_source === 'official_daily' ? '正式日线已确认' : formatDate(item.planned_buy_date);
   return `<article class="backtest-row status-${escapeHtml(item.status)}">
     <div class="backtest-stock"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.code)} · 信号 ${escapeHtml(formatDate(item.signal_trade_date))}</small><div>${sources}</div></div>
-    <div class="backtest-step"><span>T+1 买入</span><strong>${escapeHtml(formatPrice(item.buy_open))}</strong><small>${escapeHtml(formatDate(item.planned_buy_date))}</small></div>
+    <div class="backtest-step"><span>T+1 买入</span><strong>${escapeHtml(formatPrice(item.buy_open))}</strong><small>${escapeHtml(source)}</small></div>
     <div class="backtest-step"><span>${delay ? '顺延退出' : 'T+2 开盘'}</span><strong>${escapeHtml(formatPrice(item.exit_open))}</strong><small>${escapeHtml(formatDate(exitDate))}${delay ? ` · 延迟${delay}日` : ''}</small></div>
-    <div class="backtest-return ${valueClass(item.standard_return_pct)}"><span>标准收益</span><strong>${escapeHtml(formatPct(item.standard_return_pct))}</strong><small>开盘卖出</small></div>
-    <div class="backtest-return ${valueClass(item.maximum_return_pct)}"><span>最高可能</span><strong>${escapeHtml(formatPct(item.maximum_return_pct))}</strong><small>${item.exit_high ? `最高 ¥${Number(item.exit_high).toFixed(2)}` : '等待最高价'}</small></div>
+    <div class="backtest-return ${valueClass(standardValue)}"><span>${holding ? '持仓涨跌' : '标准收益'}</span><strong>${escapeHtml(formatPct(standardValue))}</strong><small>${holding ? `${formatPrice(item.current_price)} · ${liveTime}` : '开盘卖出'}</small></div>
+    <div class="backtest-return ${valueClass(maximumValue)}"><span>${holding ? '持仓最高' : '最高可能'}</span><strong>${escapeHtml(formatPct(maximumValue))}</strong><small>${holding && item.current_high ? `最高 ¥${Number(item.current_high).toFixed(2)}` : item.exit_high ? `最高 ¥${Number(item.exit_high).toFixed(2)}` : '等待最高价'}</small></div>
     <div class="backtest-outcome"><span class="outcome-badge ${escapeHtml(item.status)}">${escapeHtml(status)}</span><small>${escapeHtml(item.status_reason || backtestStatusDetail(item.status))}</small></div>
   </article>`;
 }
@@ -452,7 +452,7 @@ function backtestStatus(status) {
 }
 
 function backtestStatusDetail(status) {
-  return ({ awaiting_buy: '等待T+1正式日线', awaiting_exit: '等待退出日结算', success: '开盘卖出高于买入价',
+  return ({ awaiting_buy: '等待T+1开盘行情', awaiting_exit: '盘中跟踪，等待退出日结算', success: '开盘卖出高于买入价',
     failure: '开盘卖出低于买入价', flat: '开盘卖出等于买入价', unfilled: '不计入统计' })[status] || '';
 }
 
@@ -522,8 +522,8 @@ function sheetContent(action, title) {
       hint: '失败时会显示取Token、可信IP、接收账号或网络阶段的具体errcode。'
     },
     logout: {
-      kicker: '当前会话', title: '退出 StockTopic', submit: '退出登录',
-      hint: '仅清除当前标签页的登录凭据，不影响后台采集。'
+      kicker: '当前账户', title: '退出 StockTopic', submit: '退出登录',
+      hint: '将清除本浏览器的安全登录会话，不影响后台采集。'
     }
   }[action];
 }
@@ -552,7 +552,8 @@ $('#sheetForm').addEventListener('submit', async event => {
     } else if (action === 'wecom') {
       await api('/api/v1/admin/wecom-test', { method: 'POST' });
     } else if (action === 'logout') {
-      closeSheet(); showLogin(); toast('已退出当前会话'); return;
+      await api('/api/v1/auth/logout', { method: 'POST' });
+      closeSheet(); showLogin(); toast('已退出当前账户'); return;
     }
     closeSheet();
     await load();
@@ -729,10 +730,7 @@ function toast(message, isError = false) {
   toastTimer = setTimeout(() => node.classList.remove('show'), 3200);
 }
 
-if (state.auth) {
-  hideLogin();
-  load();
-} else {
-  showLogin();
-}
-setInterval(() => { if (state.auth && document.visibilityState === 'visible') load(); }, 60_000);
+load().then(() => {
+  if (state.data) hideLogin();
+}).catch(() => {});
+setInterval(() => { if (state.authenticated && document.visibilityState === 'visible') load(); }, 60_000);

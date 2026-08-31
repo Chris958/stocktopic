@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from stocktopic.backtest import PaperTradeTracker
 from stocktopic.db import Database
+from stocktopic.domain import Quote
 
 CN = ZoneInfo("Asia/Shanghai")
 
@@ -60,6 +61,24 @@ class TestPoolTrackerTests(TestCase):
         self.db.upsert_daily_bars([defaults])
         self.db.set_metadata(f"daily_prices_synced:{trade_date}", "true")
 
+    def _quote(self, captured_at: datetime, **values):
+        defaults = {
+            "code": "600000.SH",
+            "name": "浦发银行",
+            "pre_close": 9.8,
+            "open": 10.0,
+            "high": 10.6,
+            "low": 9.9,
+            "close": 10.5,
+            "volume": 1000,
+            "amount": 10000.0,
+            "trades": 100,
+            "trade_time": captured_at.strftime("%H:%M:%S"),
+            "captured_at": captured_at,
+        }
+        defaults.update(values)
+        return Quote(**defaults)
+
     def test_normal_trade_uses_t_plus_one_open_and_t_plus_two_open_high(self):
         entry, created = self.tracker.add(self.theme_id, "600000.SH", self.now)
         self.assertTrue(created)
@@ -76,6 +95,72 @@ class TestPoolTrackerTests(TestCase):
         self.assertEqual(settled["standard_return_pct"], 10.0)
         self.assertEqual(settled["maximum_return_pct"], 20.0)
         self.assertEqual(self.db.test_pool_summary()["success_rate"], 100.0)
+
+    def test_realtime_quote_confirms_buy_and_updates_live_returns(self):
+        self.tracker.add(self.theme_id, "600000.SH", self.now)
+        captured = datetime(2026, 8, 27, 9, 30, 5, tzinfo=CN)
+
+        result = self.tracker.update_realtime(
+            [self._quote(captured, open=10, close=10.5, high=10.8)],
+            "20260827",
+            {"600000.SH": 10.78},
+        )
+        entry = self.db.list_test_pool_entries()[0]
+
+        self.assertEqual(result, {"bought": 1, "marked": 1, "limit_pending": 0})
+        self.assertEqual(entry["status"], "awaiting_exit")
+        self.assertEqual(entry["buy_open"], 10)
+        self.assertEqual(entry["buy_confirmation_source"], "realtime_rt_k")
+        self.assertEqual(entry["current_price"], 10.5)
+        self.assertEqual(entry["current_return_pct"], 5.0)
+        self.assertEqual(entry["current_high_return_pct"], 8.0)
+
+        later = datetime(2026, 8, 27, 10, 0, 5, tzinfo=CN)
+        self.tracker.update_realtime(
+            [self._quote(later, open=10, close=9.9, high=11)],
+            "20260827",
+        )
+        entry = self.db.list_test_pool_entries()[0]
+        self.assertEqual(entry["current_return_pct"], -1.0)
+        self.assertEqual(entry["current_high_return_pct"], 10.0)
+
+    def test_realtime_limit_open_waits_until_price_range_opens(self):
+        self.tracker.add(self.theme_id, "600000.SH", self.now)
+        captured = datetime(2026, 8, 27, 9, 30, 5, tzinfo=CN)
+        result = self.tracker.update_realtime(
+            [self._quote(captured, open=11, high=11, low=11, close=11)],
+            "20260827",
+            {"600000.SH": 11},
+        )
+        pending = self.db.list_test_pool_entries()[0]
+        self.assertEqual(result["limit_pending"], 1)
+        self.assertEqual(pending["status"], "awaiting_buy")
+
+        opened = datetime(2026, 8, 27, 9, 40, 5, tzinfo=CN)
+        self.tracker.update_realtime(
+            [self._quote(opened, open=11, high=11, low=10.8, close=10.9)],
+            "20260827",
+            {"600000.SH": 11},
+        )
+        bought = self.db.list_test_pool_entries()[0]
+        self.assertEqual(bought["status"], "awaiting_exit")
+        self.assertEqual(bought["buy_open"], 11)
+
+    def test_official_daily_can_reverse_provisional_buy_to_unfilled(self):
+        self.tracker.add(self.theme_id, "600000.SH", self.now)
+        captured = datetime(2026, 8, 27, 9, 30, 5, tzinfo=CN)
+        self.tracker.update_realtime(
+            [self._quote(captured, open=10, high=10.2, low=9.9, close=10.1)],
+            "20260827",
+        )
+        self._sync(
+            "20260827", open=11, high=11, low=11, close=11, pre_close=10, pct_chg=10
+        )
+
+        self.tracker.settle()
+        entry = self.db.list_test_pool_entries()[0]
+        self.assertEqual(entry["status"], "unfilled")
+        self.assertEqual(entry["buy_confirmation_source"], "official_daily")
 
     def test_same_stock_and_signal_date_merges_theme_sources(self):
         second_theme = self._theme("第二题材")

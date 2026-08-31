@@ -510,6 +510,11 @@ class StockTopicService:
                         )
                     )
                 self.database.save_quotes(quotes, trade_date, state.slot)
+                live_pool = self.test_pool.update_realtime(
+                    quotes,
+                    compact,
+                    {code: values[0] for code, values in limits.items()},
+                )
                 self.database.save_anomalies(anomalies)
                 self.database.set_metadata("last_quote_slot", slot_key)
                 self.database.set_metadata("last_quote_signature", signature)
@@ -530,7 +535,7 @@ class StockTopicService:
                     "success",
                     len(quotes),
                     f"internal_events={len(anomalies)}, invalid_quotes={len(invalid_quotes)}, "
-                    f"candidates={len(candidate_ids)}",
+                    f"candidates={len(candidate_ids)}, live_pool={live_pool}",
                 )
                 return {
                     "status": "success",
@@ -541,6 +546,7 @@ class StockTopicService:
                     "candidate_ids": candidate_ids,
                     "discovery_trade_date": discovery_trade_date,
                     "scored_ids": scored_ids,
+                    "live_test_pool": live_pool,
                 }
             except Exception as error:
                 self.database.finish_run(run_id, "failed", detail=str(error))

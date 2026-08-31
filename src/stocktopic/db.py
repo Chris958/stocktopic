@@ -88,6 +88,22 @@ class Database:
                 "ALTER TABLE theme_catalysts ADD COLUMN "
                 "source_kind TEXT NOT NULL DEFAULT 'unknown'"
             )
+        test_pool_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(test_pool_entries)").fetchall()
+        }
+        test_pool_additions = {
+            "buy_confirmed_at": "TEXT",
+            "buy_confirmation_source": "TEXT",
+            "current_price": "REAL",
+            "current_return_pct": "REAL",
+            "current_high": "REAL",
+            "current_high_return_pct": "REAL",
+            "live_updated_at": "TEXT",
+        }
+        for name, definition in test_pool_additions.items():
+            if name not in test_pool_columns:
+                connection.execute(f"ALTER TABLE test_pool_entries ADD COLUMN {name} {definition}")
 
     def set_metadata(self, key: str, value: str) -> None:
         with self.connect() as connection:
@@ -1954,6 +1970,13 @@ class Database:
     def update_test_pool_entry(self, entry_id: int, **values: Any) -> None:
         allowed = {
             "buy_open",
+            "buy_confirmed_at",
+            "buy_confirmation_source",
+            "current_price",
+            "current_return_pct",
+            "current_high",
+            "current_high_return_pct",
+            "live_updated_at",
             "exit_open",
             "exit_high",
             "exit_attempt_date",

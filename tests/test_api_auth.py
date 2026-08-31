@@ -32,11 +32,11 @@ def test_api_auth_and_csrf_guard():
         )
         app = create_app(settings)
         app.state.service.database.initialize()
-        client = TestClient(app)
+        client = TestClient(app, base_url="https://testserver")
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.5.0" in page.text
+        assert "app.js?v=0.6.0" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
@@ -46,6 +46,25 @@ def test_api_auth_and_csrf_guard():
         icon = client.get("/static/app-icon-180.png")
         assert icon.status_code == 200
         assert icon.headers["content-type"] == "image/png"
+        assert client.get("/api/v1/dashboard").status_code == 401
+        login = client.post(
+            "/api/v1/auth/login",
+            json={"username": "admin", "password": "password"},
+        )
+        assert login.status_code == 200
+        cookie = login.headers["set-cookie"]
+        assert "stocktopic_session=" in cookie
+        assert "HttpOnly" in cookie
+        assert "Secure" in cookie
+        assert "SameSite=strict" in cookie
+        assert "Max-Age=2592000" in cookie
+        assert "password" not in cookie
+        session_dashboard = client.get("/api/v1/dashboard")
+        assert session_dashboard.status_code == 200
+        assert client.post("/api/v1/auth/logout").status_code == 403
+        assert client.post(
+            "/api/v1/auth/logout", headers={"X-StockTopic-Request": "1"}
+        ).status_code == 200
         assert client.get("/api/v1/dashboard").status_code == 401
         bearer = {"Authorization": "Bearer app-token"}
         dashboard = client.get("/api/v1/dashboard", headers=bearer)

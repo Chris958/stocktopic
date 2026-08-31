@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from .db import Database, utc_now_iso
+from .domain import Quote
 
 FINAL_STATUSES = {"success", "failure", "flat", "unfilled", "invalid"}
 
@@ -89,12 +90,55 @@ class PaperTradeTracker:
                 self.database.update_test_pool_entry(
                     int(entry["id"]),
                     buy_open=buy_open,
+                    buy_confirmed_at=utc_now_iso(),
+                    buy_confirmation_source="official_daily",
                     status="awaiting_exit",
                     status_reason=None,
                 )
                 entry["buy_open"] = buy_open
                 entry["status"] = "awaiting_exit"
                 counts["bought"] += 1
+
+            if (
+                entry["status"] == "awaiting_exit"
+                and entry.get("buy_confirmation_source") == "realtime_rt_k"
+                and self._date_synced(str(entry["planned_buy_date"]))
+            ):
+                buy_bar = self.database.daily_bar(
+                    str(entry["planned_buy_date"]), str(entry["code"])
+                )
+                reason = _buy_unfilled_reason(buy_bar)
+                if reason:
+                    self.database.update_test_pool_entry(
+                        int(entry["id"]),
+                        status="unfilled",
+                        status_reason=reason,
+                        buy_confirmation_source="official_daily",
+                        settled_at=utc_now_iso(),
+                    )
+                    counts["unfilled"] += 1
+                    continue
+                official_open = float(buy_bar["open"])
+                current_price = float(entry.get("current_price") or 0)
+                current_high = float(entry.get("current_high") or 0)
+                self.database.update_test_pool_entry(
+                    int(entry["id"]),
+                    buy_open=official_open,
+                    buy_confirmation_source="official_daily",
+                    current_return_pct=(
+                        round((current_price / official_open - 1.0) * 100.0, 3)
+                        if current_price > 0
+                        else None
+                    ),
+                    current_high_return_pct=(
+                        round((current_high / official_open - 1.0) * 100.0, 3)
+                        if current_high > 0
+                        else None
+                    ),
+                    status_reason=None,
+                )
+                entry["buy_open"] = official_open
+                entry["buy_confirmation_source"] = "official_daily"
 
             if entry["status"] != "awaiting_exit":
                 continue
@@ -138,6 +182,80 @@ class PaperTradeTracker:
                 settled_at=utc_now_iso(),
             )
             counts["settled"] += 1
+        return counts
+
+    def update_realtime(
+        self,
+        quotes: list[Quote],
+        trade_date: str,
+        upper_limits: dict[str, float | None] | None = None,
+    ) -> dict[str, int]:
+        """Confirm T+1 buys and mark open positions using an existing rt_k snapshot."""
+        compact = trade_date.replace("-", "")
+        quote_map = {quote.code: quote for quote in quotes}
+        upper_limits = upper_limits or {}
+        counts = {"bought": 0, "marked": 0, "limit_pending": 0}
+        for entry in self.database.list_test_pool_entries():
+            if entry["status"] not in {"awaiting_buy", "awaiting_exit"}:
+                continue
+            quote = quote_map.get(str(entry["code"]))
+            if not quote or quote.open <= 0 or quote.close <= 0:
+                continue
+
+            if entry["status"] == "awaiting_buy":
+                if str(entry.get("planned_buy_date") or "") != compact:
+                    continue
+                if quote.volume <= 0 or quote.trades <= 0:
+                    continue
+                upper = upper_limits.get(quote.code)
+                opens_at_known_limit = bool(
+                    upper and quote.open >= float(upper) - max(0.005, float(upper) * 0.0001)
+                )
+                opens_near_ten_percent = (
+                    quote.pre_close > 0
+                    and (quote.open / quote.pre_close - 1.0) * 100.0 >= 9.5
+                )
+                opens_at_limit = opens_at_known_limit or opens_near_ten_percent
+                still_one_price = max(quote.open, quote.high, quote.low, quote.close) - min(
+                    quote.open, quote.high, quote.low, quote.close
+                ) <= 0.005
+                if opens_at_limit and still_one_price:
+                    self.database.update_test_pool_entry(
+                        int(entry["id"]),
+                        status_reason="开盘涨停且尚未打开，等待成交确认",
+                        current_price=quote.close,
+                        current_high=quote.high,
+                        live_updated_at=quote.captured_at.isoformat(timespec="seconds"),
+                    )
+                    counts["limit_pending"] += 1
+                    continue
+                self.database.update_test_pool_entry(
+                    int(entry["id"]),
+                    buy_open=quote.open,
+                    buy_confirmed_at=quote.captured_at.isoformat(timespec="seconds"),
+                    buy_confirmation_source="realtime_rt_k",
+                    status="awaiting_exit",
+                    status_reason="rt_k盘中确认，收盘后由正式日线校准",
+                )
+                entry["buy_open"] = quote.open
+                entry["status"] = "awaiting_exit"
+                counts["bought"] += 1
+
+            buy_open = float(entry.get("buy_open") or 0)
+            if entry["status"] != "awaiting_exit" or buy_open <= 0:
+                continue
+            current_return = round((quote.close / buy_open - 1.0) * 100.0, 3)
+            holding_high = max(float(entry.get("current_high") or 0), quote.high)
+            high_return = round((holding_high / buy_open - 1.0) * 100.0, 3)
+            self.database.update_test_pool_entry(
+                int(entry["id"]),
+                current_price=quote.close,
+                current_return_pct=current_return,
+                current_high=holding_high,
+                current_high_return_pct=high_return,
+                live_updated_at=quote.captured_at.isoformat(timespec="seconds"),
+            )
+            counts["marked"] += 1
         return counts
 
     def dashboard(self, now: datetime) -> dict[str, Any]:

@@ -58,6 +58,7 @@ class Settings:
     admin_username: str = "admin"
     admin_password: str = ""
     app_api_token: str = ""
+    session_cookie_days: int = 30
     public_base_url: str = "https://stock.bnken.com"
     log_level: str = "INFO"
 
@@ -104,6 +105,7 @@ class Settings:
             admin_username=os.getenv("ADMIN_USERNAME", "admin").strip(),
             admin_password=admin_password,
             app_api_token=app_api_token,
+            session_cookie_days=max(1, int(os.getenv("SESSION_COOKIE_DAYS", "30"))),
             public_base_url=os.getenv("PUBLIC_BASE_URL", "https://stock.bnken.com")
             .strip()
             .rstrip("/"),

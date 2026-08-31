@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
+import json
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -43,6 +46,14 @@ class TrackStockRequest(BaseModel):
     code: str = Field(min_length=6, max_length=16)
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=100)
+    password: str = Field(min_length=1, max_length=500)
+
+
+SESSION_COOKIE = "stocktopic_session"
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     service = StockTopicService(settings)
@@ -59,7 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.5.0",
+        version="0.6.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -72,16 +83,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "/",
             "/health",
             "/favicon.ico",
+            "/api/v1/auth/login",
         } or request.url.path.startswith("/static/")
-        if not public_path and not _authorized(request, settings):
+        auth_kind = _authorization_kind(request, settings)
+        if not public_path and not auth_kind:
             response = JSONResponse(
                 {"detail": "Unauthorized"},
                 status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="StockTopic"'},
             )
         elif (
             request.method not in {"GET", "HEAD", "OPTIONS"}
-            and request.headers.get("Authorization", "").startswith("Basic ")
+            and request.url.path != "/api/v1/auth/login"
+            and auth_kind in {"basic", "session"}
             and request.headers.get("X-StockTopic-Request") != "1"
         ):
             response = JSONResponse({"detail": "CSRF check failed"}, status_code=403)
@@ -115,6 +128,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/")
     async def dashboard_page():
         return FileResponse(static_dir / "index.html")
+
+    @app.post("/api/v1/auth/login")
+    async def login(credentials: LoginRequest):
+        valid = hmac.compare_digest(
+            credentials.username, settings.admin_username
+        ) and hmac.compare_digest(credentials.password, settings.admin_password)
+        if not valid:
+            raise HTTPException(status_code=401, detail="用户名或密码不正确")
+        max_age = settings.session_cookie_days * 24 * 60 * 60
+        response = JSONResponse({"ok": True, "expires_in_days": settings.session_cookie_days})
+        response.set_cookie(
+            SESSION_COOKIE,
+            _make_session_token(settings, credentials.username, int(time.time()) + max_age),
+            max_age=max_age,
+            httponly=True,
+            secure=settings.public_base_url.startswith("https://"),
+            samesite="strict",
+            path="/",
+        )
+        return response
+
+    @app.post("/api/v1/auth/logout")
+    async def logout():
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(
+            SESSION_COOKIE,
+            path="/",
+            secure=settings.public_base_url.startswith("https://"),
+            httponly=True,
+            samesite="strict",
+        )
+        return response
 
     @app.get("/api/v1/dashboard")
     async def dashboard():
@@ -288,21 +333,67 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     return app
 
 
-def _authorized(request: Request, settings: Settings) -> bool:
+def _authorization_kind(request: Request, settings: Settings) -> str | None:
     header = request.headers.get("Authorization", "")
     if header.startswith("Bearer "):
         supplied = header[7:].strip()
-        return bool(supplied) and hmac.compare_digest(supplied, settings.app_api_token)
+        if supplied and hmac.compare_digest(supplied, settings.app_api_token):
+            return "bearer"
+        return None
     if header.startswith("Basic "):
         try:
             decoded = base64.b64decode(header[6:]).decode("utf-8")
             username, password = decoded.split(":", 1)
         except (ValueError, UnicodeDecodeError):
-            return False
-        return hmac.compare_digest(username, settings.admin_username) and hmac.compare_digest(
+            return None
+        if hmac.compare_digest(username, settings.admin_username) and hmac.compare_digest(
             password, settings.admin_password
+        ):
+            return "basic"
+        return None
+    token = request.cookies.get(SESSION_COOKIE, "")
+    if token and _valid_session_token(settings, token):
+        return "session"
+    return None
+
+
+def _session_key(settings: Settings) -> bytes:
+    material = (
+        f"stocktopic-session-v1\0{settings.app_api_token}\0{settings.admin_password}"
+    ).encode()
+    return hashlib.sha256(material).digest()
+
+
+def _make_session_token(settings: Settings, username: str, expires_at: int) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps(
+            {"u": username, "exp": expires_at}, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    signature = hmac.new(_session_key(settings), payload.encode("ascii"), hashlib.sha256).digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{payload}.{encoded_signature}"
+
+
+def _valid_session_token(settings: Settings, token: str) -> bool:
+    try:
+        payload, supplied_signature = token.split(".", 1)
+        expected = hmac.new(
+            _session_key(settings), payload.encode("ascii"), hashlib.sha256
+        ).digest()
+        supplied = base64.urlsafe_b64decode(
+            supplied_signature + "=" * (-len(supplied_signature) % 4)
         )
-    return False
+        if not hmac.compare_digest(supplied, expected):
+            return False
+        decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+        data = json.loads(decoded.decode("utf-8"))
+        return (
+            hmac.compare_digest(str(data.get("u") or ""), settings.admin_username)
+            and int(data.get("exp") or 0) > int(time.time())
+        )
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
 
 
 def _safe_integration_error(error: Exception) -> str:
