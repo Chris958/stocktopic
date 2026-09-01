@@ -2183,6 +2183,31 @@ class Database:
                 [started_at, started_at, trade_date, slot, *codes],
             )
 
+    def pending_fund_flow_codes(self, trade_date: str, slot: str) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT code FROM fund_flow_updates
+                WHERE trade_date=? AND slot=? AND status!='completed'
+                  AND (
+                    (owner_type='theme' AND EXISTS (
+                        SELECT 1 FROM candidate_themes theme
+                        WHERE theme.id=fund_flow_updates.owner_id
+                          AND theme.status IN ('watching','confirmed')
+                    ))
+                    OR
+                    (owner_type='test_pool' AND EXISTS (
+                        SELECT 1 FROM test_pool_entries entry
+                        WHERE entry.id=fund_flow_updates.owner_id
+                          AND entry.status IN ('awaiting_buy','awaiting_exit')
+                    ))
+                  )
+                ORDER BY code
+                """,
+                (trade_date, slot),
+            ).fetchall()
+        return [str(row["code"]) for row in rows]
+
     def finish_fund_flow_code(
         self,
         code: str,
@@ -2203,6 +2228,7 @@ class Database:
                 UPDATE fund_flow_updates
                 SET status=?, completed_at=?, error=?, report_json=?, updated_at=?
                 WHERE code=? AND trade_date=? AND slot=?
+                  AND status!='completed'
                   AND (
                     (owner_type='theme' AND EXISTS (
                         SELECT 1 FROM candidate_themes theme

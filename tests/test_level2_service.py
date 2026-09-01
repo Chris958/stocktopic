@@ -266,6 +266,12 @@ class Level2ServiceTests(TestCase):
         self.assertEqual(awaiting_entry["fund_flow"]["status"], "completed")
         self.assertEqual(sold_entry["fund_flow"]["status"], "stopped")
 
+        provider.trade_windows.clear()
+        repeated = self.service.refresh_fund_flows("morning", now)
+        self.assertEqual(repeated["stock_count"], 0)
+        self.assertEqual(repeated["skipped_completed_count"], 6)
+        self.assertEqual(provider.trade_windows, [])
+
     def test_fund_flow_slots_catch_up_after_due_times(self):
         morning = datetime(2026, 9, 1, 10, 0, tzinfo=CN)
         close = datetime(2026, 9, 1, 17, 10, tzinfo=CN)

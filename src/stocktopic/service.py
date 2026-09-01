@@ -425,17 +425,20 @@ class StockTopicService:
                 self.database.prepare_fund_flow_updates(
                     targets, trade_date, slot, updated_at
                 )
-                codes = sorted({str(item["code"]) for item in targets})
+                target_codes = {str(item["code"]) for item in targets}
+                codes = self.database.pending_fund_flow_codes(trade_date, slot)
                 if not codes:
-                    self.database.finish_run(run_id, "success", 0, "no active targets")
+                    detail = "no active targets" if not targets else "all targets completed"
+                    self.database.finish_run(run_id, "success", 0, detail)
                     return {
                         "status": "success",
                         "slot": slot,
                         "trade_date": trade_date,
-                        "target_count": 0,
+                        "target_count": len(targets),
                         "stock_count": 0,
                         "completed_count": 0,
                         "failed_count": 0,
+                        "skipped_completed_count": len(target_codes),
                     }
                 self.database.mark_fund_flow_codes_running(
                     codes, trade_date, slot, updated_at
@@ -512,6 +515,7 @@ class StockTopicService:
                     "stock_count": len(codes),
                     "completed_count": completed,
                     "failed_count": len(failures),
+                    "skipped_completed_count": len(target_codes) - len(codes),
                     "failures": failures,
                 }
             except Exception as error:
