@@ -341,7 +341,7 @@ class StockTopicService:
             if trade_error:
                 error = trade_error
                 if not _is_numcat_no_data(error):
-                    raise
+                    raise error
                 last_no_data_error = error
                 continue
             if not candidate_trades:

@@ -154,6 +154,28 @@ class Level2ServiceTests(TestCase):
             )
         self.assertEqual(provider.trade_calls, ["20260901"])
 
+    def test_non_no_data_provider_error_preserves_original_error(self):
+        class FailedProvider(Level2ProviderStub):
+            def trade_history(
+                self,
+                symbol: str,
+                trade_date: str,
+                *,
+                start_time: str | None = None,
+                end_time: str | None = None,
+            ):
+                raise NumcatError(429, "请求频率超过套餐限制")
+
+        self.service.level2_provider = FailedProvider("20260901")
+
+        with self.assertRaisesRegex(NumcatError, "429.*请求频率超过套餐限制"):
+            self.service.analyze_level2_stock(
+                "603269.SH",
+                "20260901",
+                now=datetime(2026, 9, 1, 17, 10, tzinfo=CN),
+                force_refresh=True,
+            )
+
     def test_scheduled_flow_tracks_theme_top5_and_unsold_test_pool_only(self):
         theme_codes = [f"60010{index}.SH" for index in range(6)]
         awaiting_code = "000001.SZ"
