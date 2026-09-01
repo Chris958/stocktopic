@@ -50,7 +50,9 @@ class ThemeScorer:
         recent = self.database.recent_anomalies(now - timedelta(minutes=45))
         member_events = [event for event in recent if event["code"] in codes]
         kpl_events = self.database.kpl_events_for_codes(now.strftime("%Y%m%d"), codes)
-        kpl_limit_count = sum(event["board_tag"] == "涨停" for event in kpl_events)
+        kpl_limit_count = sum(
+            event["board_tag"] in {"涨停", "创业板涨幅超10%"} for event in kpl_events
+        )
         kpl_failed_count = sum(event["board_tag"] == "炸板" for event in kpl_events)
         kpl_down_count = sum(event["board_tag"] == "跌停" for event in kpl_events)
         failed_count = max(

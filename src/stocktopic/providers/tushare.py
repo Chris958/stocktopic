@@ -64,7 +64,7 @@ class TushareClient:
     def realtime_quotes(self, captured_at: datetime) -> list[Quote]:
         rows = self.call(
             "rt_k",
-            {"ts_code": "6*.SH,0*.SZ"},
+            {"ts_code": "6*.SH,0*.SZ,3*.SZ"},
             "ts_code,name,pre_close,high,open,low,close,vol,amount,num,trade_time",
         )
         quotes: list[Quote] = []

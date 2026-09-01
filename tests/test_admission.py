@@ -232,7 +232,69 @@ class RepeatedThemeExplainer(PassingAdmissionExplainer):
         item["is_new_theme"] = False
         item["novelty_confidence"] = 25
         item["novelty_reason"] = "过去60个交易日已反复发酵"
+        item["within_window_match_ids"] = [historical_matches[0]["id"]]
         return item
+
+
+class OldWebHistoryOnlyExplainer(PassingAdmissionExplainer):
+    def assess_for_admission(self, theme, historical_matches, eligible_stock_pool):
+        item = super().assess_for_admission(theme, historical_matches, eligible_stock_pool)
+        item["suggested_name"] = "AI漫剧新作上星"
+        item["is_new_theme"] = False
+        item["novelty_confidence"] = 20
+        item["novelty_reason"] = "2月份曾出现过AI漫剧热点"
+        item["within_window_match_ids"] = []
+        return item
+
+
+def test_history_older_than_window_cannot_veto_a_new_concrete_event():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        service = StockTopicService(
+            Settings(
+                tushare_token="test",
+                db_path=root / "test.sqlite3",
+                archive_dir=root / "archive",
+                openai_api_key="test",
+                admin_password="test",
+                app_api_token="test",
+            )
+        )
+        service.database.initialize()
+        service.explainer = OldWebHistoryOnlyExplainer()
+        service.notifier = CapturingNotifier()
+        service.database.replace_calendar(
+            [{"cal_date": "20260901", "is_open": "1", "pretrade_date": "20260831"}]
+        )
+        service.database.upsert_stocks(
+            [
+                {"ts_code": f"60000{i}.SH", "name": f"股票{i}", "market": "主板"}
+                for i in range(4)
+            ]
+        )
+        service.database.upsert_kpl_events(
+            [
+                {
+                    "trade_date": "20260901",
+                    "ts_code": f"60000{i}.SH",
+                    "name": f"股票{i}",
+                    "tag": "涨停",
+                    "theme": "AI漫剧新作上星",
+                    "status": "首板",
+                }
+                for i in range(4)
+            ]
+        )
+        ids = service.discovery.discover_for_date(
+            "20260901", datetime(2026, 9, 1, 14, 0, tzinfo=CN)
+        )
+        service._assess_and_admit_candidates(ids)
+        theme = service.database.get_theme(ids[0])
+        review = theme["admission_review"]
+        assert theme["status"] == "confirmed"
+        assert review["is_new_theme"] == 1
+        assert review["novelty_confidence"] == 70
+        assert "约90自然日" in theme["latest_explanation"]["explanation"]
 
 
 def test_four_touch_candidate_keeps_a_visible_rejection_reason():
@@ -273,6 +335,19 @@ def test_four_touch_candidate_keeps_a_visible_rejection_reason():
                 }
                 for i in range(4)
             ]
+        )
+        service.database.upsert_candidate(
+            fingerprint="same-window-old-theme",
+            provisional_name="反复轮动题材",
+            shared_tag="反复轮动题材",
+            direction="positive",
+            discovered_at="2026-08-27T09:00:00+08:00",
+            day1_date="2026-08-27",
+            discovery_reason="窗口内旧题材",
+            members=[
+                {"code": f"60000{i}.SH", "name": f"股票{i}", "evidence": {}}
+                for i in range(4)
+            ],
         )
         ids = service.discovery.discover_for_date(
             "20260827", datetime(2026, 8, 27, 14, 0, tzinfo=CN)

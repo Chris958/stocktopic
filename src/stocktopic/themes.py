@@ -50,6 +50,7 @@ class ThemeDiscovery:
         for item in eligible:
             item["codes"] = {str(member["code"]) for member in item["members"]}
             tag = str(item["tag"])
+            member_reasons = dict(item.get("member_reasons") or {})
             fingerprint = hashlib.sha256(
                 (
                     f"event-cluster-v3|{trade_date}|{tag}|"
@@ -59,7 +60,7 @@ class ThemeDiscovery:
             ordered = sorted(
                 item["members"],
                 key=lambda member: (
-                    member.get("board_tag") != "涨停",
+                    _signal_rank(member.get("board_tag")),
                     _clock_sort(member.get("limit_up_time")),
                 ),
             )
@@ -67,7 +68,7 @@ class ThemeDiscovery:
                 {
                     "code": str(member["code"]),
                     "name": str(member["name"]),
-                    "membership_source": "same_day_limit_touch",
+                    "membership_source": "same_day_market_strength",
                     "evidence": {
                         "shared_tag": tag,
                         "source_themes": member.get("themes", []),
@@ -75,6 +76,7 @@ class ThemeDiscovery:
                         "board_tag": member.get("board_tag"),
                         "board_status": member.get("status"),
                         "limit_reason": member.get("limit_reason"),
+                        "aggregated_reason": member_reasons.get(str(member["code"])),
                         "first_limit_time": member.get("limit_up_time"),
                         "last_limit_time": member.get("last_limit_time"),
                         "failed_open_time": member.get("open_time"),
@@ -93,8 +95,9 @@ class ThemeDiscovery:
                 else "由开盘啦共同标签归并。"
             )
             reason = (
-                f"{trade_date}共同事件“{tag}”有{item['touch_count']}只股票曾触及涨停；"
-                f"封板{item['sealed_count']}只、炸板{item['failed_count']}只。"
+                f"{trade_date}共同事件“{tag}”有{item['touch_count']}只股票形成强势共识；"
+                f"封板{item['sealed_count']}只、创业板涨幅超10%"
+                f"{int(item.get('growth_count') or 0)}只、炸板{item['failed_count']}只。"
                 + (f"共同逻辑：{common_logic}。" if common_logic else "")
                 + grouping_reason
             )
@@ -185,3 +188,7 @@ def candidate_for_ai(theme: dict[str, Any]) -> dict[str, Any]:
 def _clock_sort(value: Any) -> str:
     digits = "".join(character for character in str(value or "") if character.isdigit())
     return digits.zfill(6)
+
+
+def _signal_rank(value: Any) -> int:
+    return {"涨停": 0, "创业板涨幅超10%": 1, "炸板": 2}.get(str(value), 9)

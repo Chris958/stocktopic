@@ -13,11 +13,11 @@ curl http://127.0.0.1:8765/health
 
 - `realtime_collection_enabled=false`：休市、午休、交易日历未知或不在有效窗口。
 - `calendar_unknown_fail_closed`：交易日历同步失败，系统主动停止实时采集。
-- `coverage abnormal`：Tushare返回的有效主板股票不足2000只，本周期不参与计算。
+- `coverage abnormal`：Tushare返回的有效主板与创业板行情低于当前股票池80%（且至少2000只），本周期不参与计算。
 - `data_stale`：全市场累计成交量和成交额没有变化，本周期信号熔断。
 - `latest_wecom_error`：最近一次企业微信失败的阶段、errcode和处理建议；空字符串表示最近一次发送成功。
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
-- `admission_policy`：当前生效的共同事件4只触板、两交易日回补、早期观察/正式题材、60交易日和3日/30%准入口径。
+- `admission_policy`：当前生效的共同事件4只强势股票、主板涨停/炸板与创业板涨幅超过10%、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
 - `test_pool`：测试票池记录数量和最近一次Tushare正式日线同步任务。
 
 ## 更新
@@ -41,7 +41,7 @@ curl -u '你的管理用户名' \
 
 `curl` 会交互询问管理密码，不要把密码直接写进命令历史。
 
-该任务只调用日度开盘啦接口，不调用实时 `rt_k`。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。
+该任务调用日度开盘啦接口，并用Tushare `daily` 的当日最高价重建创业板涨幅超过10%的强势信号；不调用实时 `rt_k`。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。
 
 测试票池在交易时段复用已有 `rt_k` 五分钟采集确认T+1买入、T+2卖出并更新盘中涨跌；服务启动、
 08:35和17:10检查正式日线与待结算记录。手工立即回补和结算可执行：

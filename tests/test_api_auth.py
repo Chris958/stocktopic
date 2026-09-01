@@ -36,7 +36,7 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.7.0" in page.text
+        assert "app.js?v=0.8.0" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")

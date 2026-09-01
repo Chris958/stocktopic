@@ -59,19 +59,151 @@ class ThemeDatabaseTests(TestCase):
         self.assertEqual(sum(member["active"] for member in source["members"]), 3)
         self.assertEqual(child["members"][0]["membership_source"], "human_split")
 
-    def test_universe_strictly_excludes_non_a_share_main_boards(self):
+    def test_universe_includes_main_board_and_chinext_only(self):
         count = self.db.upsert_stocks(
             [
                 {"ts_code": "600000.SH", "name": "浦发银行", "market": "主板"},
                 {"ts_code": "002001.SZ", "name": "新和成", "market": "主板"},
+                {"ts_code": "300001.SZ", "name": "特锐德", "market": "创业板"},
+                {"ts_code": "301001.SZ", "name": "凯淳股份", "market": "创业板"},
                 {"ts_code": "688001.SH", "name": "科创公司", "market": "科创板"},
                 {"ts_code": "200001.SZ", "name": "深发展B", "market": "主板"},
                 {"ts_code": "900901.SH", "name": "云赛B股", "market": "主板"},
                 {"ts_code": "600001.SH", "name": "*ST测试", "market": "主板"},
             ]
         )
-        self.assertEqual(count, 2)
-        self.assertEqual(set(self.db.active_stock_map()), {"600000.SH", "002001.SZ"})
+        self.assertEqual(count, 4)
+        self.assertEqual(
+            set(self.db.active_stock_map()),
+            {"600000.SH", "002001.SZ", "300001.SZ", "301001.SZ"},
+        )
+
+    def test_chinext_intraday_high_above_ten_percent_is_a_qualifying_signal(self):
+        self.db.upsert_stocks(
+            [{"ts_code": "300001.SZ", "name": "特锐德", "market": "创业板"}]
+        )
+        self.db.upsert_kpl_concept_members(
+            [
+                {
+                    "trade_date": "20260831",
+                    "ts_code": "000001.KP",
+                    "name": "AI影视",
+                    "con_code": "300001.SZ",
+                    "con_name": "特锐德",
+                }
+            ]
+        )
+        captured = datetime(2026, 9, 1, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        count = self.db.upsert_chinext_growth_events(
+            "20260901",
+            [
+                Quote(
+                    code="300001.SZ",
+                    name="特锐德",
+                    pre_close=10,
+                    open=10.2,
+                    high=11.2,
+                    low=10.1,
+                    close=10.8,
+                    volume=100,
+                    amount=1000,
+                    trades=20,
+                    trade_time="10:00:00",
+                    captured_at=captured,
+                )
+            ],
+        )
+        events = self.db.limit_touch_events("20260901")
+        self.assertEqual(count, 1)
+        self.assertEqual(events[0]["board_tag"], "创业板涨幅超10%")
+        self.assertAlmostEqual(events[0]["pct_change"], 12.0)
+        self.assertAlmostEqual(events[0]["realtime_pct_change"], 8.0)
+        self.assertEqual(events[0]["themes"], ["AI影视"])
+        self.assertEqual(events[0]["market"], "创业板")
+
+    def test_chinext_growth_signal_can_be_rebuilt_from_daily_high(self):
+        self.db.upsert_stocks(
+            [{"ts_code": "300001.SZ", "name": "特锐德", "market": "创业板"}]
+        )
+        count = self.db.upsert_chinext_daily_growth_events(
+            "20260901",
+            [
+                {
+                    "ts_code": "300001.SZ",
+                    "pre_close": 10,
+                    "open": 10.1,
+                    "high": 11.5,
+                    "low": 9.9,
+                    "close": 10.6,
+                    "amount": 1000,
+                }
+            ],
+        )
+        event = self.db.limit_touch_events("20260901")[0]
+        self.assertEqual(count, 1)
+        self.assertEqual(event["board_tag"], "创业板涨幅超10%")
+        self.assertAlmostEqual(event["pct_change"], 15.0)
+        self.assertAlmostEqual(event["realtime_pct_change"], 6.0)
+
+    def test_main_board_and_chinext_signals_share_the_four_stock_threshold(self):
+        self.db.upsert_stocks(
+            [
+                *[
+                    {"ts_code": f"60000{i}.SH", "name": f"主板{i}", "market": "主板"}
+                    for i in range(3)
+                ],
+                {"ts_code": "300001.SZ", "name": "创业板0", "market": "创业板"},
+            ]
+        )
+        self.db.upsert_kpl_events(
+            [
+                {
+                    "trade_date": "20260901",
+                    "ts_code": f"60000{i}.SH",
+                    "name": f"主板{i}",
+                    "tag": "涨停",
+                    "theme": "AI漫剧上星",
+                    "status": "首板",
+                    "lu_desc": "AI漫剧新作进入电视台播出",
+                }
+                for i in range(3)
+            ]
+        )
+        self.db.upsert_kpl_concept_members(
+            [
+                {
+                    "trade_date": "20260901",
+                    "ts_code": "000001.KP",
+                    "name": "AI漫剧上星",
+                    "con_code": "300001.SZ",
+                    "con_name": "创业板0",
+                }
+            ]
+        )
+        captured = datetime(2026, 9, 1, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        self.db.upsert_chinext_growth_events(
+            "20260901",
+            [
+                Quote(
+                    code="300001.SZ",
+                    name="创业板0",
+                    pre_close=10,
+                    open=10.2,
+                    high=11.2,
+                    low=10.1,
+                    close=11.1,
+                    volume=100,
+                    amount=1000,
+                    trades=20,
+                    trade_time="10:00:00",
+                    captured_at=captured,
+                )
+            ],
+        )
+        ids = ThemeDiscovery(self.db, minimum_limit_touches=4).discover(captured)
+        theme = self.db.get_theme(ids[0])
+        self.assertEqual(len(theme["members"]), 4)
+        self.assertIn("创业板涨幅超10%1只", theme["discovery_reason"])
 
     def test_kpl_themes_become_deterministic_stock_tags(self):
         self.db.upsert_stocks([{"ts_code": "600000.SH", "name": "浦发银行", "market": "主板"}])

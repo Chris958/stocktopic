@@ -73,6 +73,10 @@ class OpenAIEndpointTests(TestCase):
                             "600003.SH",
                             "FAKE",
                         ],
+                        "member_reasons": [
+                            {"code": "600000.SH", "reason": "与背板材料升级直接相关"},
+                            {"code": "FAKE", "reason": "不应保留"},
+                        ],
                         "aliases": ["PTFE", "PCB材料"],
                         "cluster_confidence": 90,
                         "catalysts": [
@@ -102,5 +106,53 @@ class OpenAIEndpointTests(TestCase):
         clusters = client.cluster_limit_events("20260827", events, 4)
         self.assertEqual(len(clusters), 1)
         self.assertEqual(len(clusters[0]["member_codes"]), 4)
+        self.assertEqual(
+            clusters[0]["member_reasons"],
+            {"600000.SH": "与背板材料升级直接相关"},
+        )
         self.assertEqual(clusters[0]["catalysts"][0]["source_kind"], "supply_chain_report")
         self.assertEqual(clusters[0]["catalysts"][1]["url"], "")
+
+    def test_admission_prompt_limits_old_theme_rejection_to_system_history_window(self):
+        client = OpenAIThemeExplainer("key", "model")
+        captured = {}
+
+        def answer(prompt, reasoning_effort):
+            captured["prompt"] = prompt
+            return (
+                {"output": []},
+                {
+                    "suggested_name": "AI漫剧上星",
+                    "is_new_theme": False,
+                    "novelty_confidence": 20,
+                    "novelty_reason": "2月份曾出现AI漫剧热点",
+                    "within_window_match_ids": [],
+                    "catalyst_summary": "新剧上星",
+                    "catalyst_confidence": 80,
+                    "expected_duration_days": 3,
+                    "duration_reason": "播出与平台排期",
+                    "leader_candidate_code": "300001.SZ",
+                    "leader_upside_scenario_pct": 30,
+                    "upside_scenario_reason": "收视与商业化超预期",
+                    "counter_evidence": [],
+                    "proposed_members": [],
+                    "catalysts": [],
+                },
+                [],
+            )
+
+        client._call_prompt = answer
+        result = client.assess_for_admission(
+            {
+                "provisional_name": "AI漫剧待审",
+                "shared_tag": "AI漫剧上星",
+                "members": [
+                    {"code": "300001.SZ", "name": "测试股份", "evidence": {}}
+                ],
+            },
+            [],
+            [],
+        )
+        self.assertFalse(result["is_new_theme"])
+        self.assertEqual(result["within_window_match_ids"], [])
+        self.assertIn("更早历史只能作为产业背景", captured["prompt"])

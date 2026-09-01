@@ -127,7 +127,8 @@ class OpenAIThemeExplainer:
 你是A股“新重点题材准入审查器”。目标是排除小异动、旧题材复炒和缺乏持续性的噪声，
 不是为了尽可能多地产生题材。必须使用web_search核查最近催化及过去60个交易日的历史发酵。
 
-确定性触发证据（已经满足当日至少4只股票曾触及涨停，炸板计入）：
+确定性触发证据（已经满足当日至少4只股票形成共同强势信号；主板涨停/炸板及创业板
+盘中涨幅超过10%均按规则计入）：
 {json.dumps(trigger_members, ensure_ascii=False)}
 
 候选最小共同逻辑：{json.dumps(theme.get("shared_tag"), ensure_ascii=False)}
@@ -138,9 +139,12 @@ class OpenAIThemeExplainer:
 {json.dumps(eligible_stock_pool, ensure_ascii=False)}
 
 “新题材”指新的最小共同炒作逻辑或首次形成广泛资金共识；旧题材出现一条新新闻、换名、
-反复轮动，不算新题材。持续性与30%空间必须是有催化路径的情景判断，不得伪装成确定预测。
+反复轮动，不算新题材。只有上方“系统保存的60交易日历史相似题材”可以作为窗口内复炒的
+否决证据；web_search发现的更早历史只能作为产业背景，不能单独把is_new_theme判为false。
+大类概念过去出现过，但本次存在新的具体事件且首次形成当期广泛共识时，仍应判为新题材。
+持续性与30%空间必须是有催化路径的情景判断，不得伪装成确定预测。
 优先政府、监管、交易所、上市公司公告、产业链原始信息和权威媒体；必须列出反证和风险。
-如果市场已形成至少4只触板的广泛共识，但只有机构研报或供应链消息、尚无官方确认，仍可判定
+如果市场已形成至少4只共同强势信号的广泛共识，但只有机构研报或供应链消息、尚无官方确认，仍可判定
 为新题材和具有持续性；证据等级必须如实写为“供应链未确认”，由系统放入早期观察而非正式题材。
 
 只返回一个JSON对象，不要Markdown：
@@ -149,6 +153,7 @@ class OpenAIThemeExplainer:
   "is_new_theme": true,
   "novelty_confidence": 0,
   "novelty_reason": "与60交易日历史的区别，或为何属于复炒",
+  "within_window_match_ids": ["判为复炒时必须填写上方系统历史题材ID，否则为空数组"],
   "catalyst_summary": "当前催化链条",
   "catalyst_confidence": 0,
   "expected_duration_days": 0,
@@ -191,6 +196,11 @@ class OpenAIThemeExplainer:
             "is_new_theme": _boolean(parsed.get("is_new_theme")),
             "novelty_confidence": _bounded_number(parsed.get("novelty_confidence")),
             "novelty_reason": str(parsed.get("novelty_reason") or "未提供新颖性依据"),
+            "within_window_match_ids": [
+                _integer(value)
+                for value in (parsed.get("within_window_match_ids") or [])[:20]
+                if _integer(value) > 0
+            ],
             "catalyst_summary": str(parsed.get("catalyst_summary") or "未找到明确催化"),
             "catalyst_confidence": _bounded_number(parsed.get("catalyst_confidence")),
             "expected_duration_days": max(0, _integer(parsed.get("expected_duration_days"))),
@@ -230,6 +240,7 @@ class OpenAIThemeExplainer:
                 {
                     "code": code,
                     "name": event.get("name"),
+                    "market": event.get("market"),
                     "board_tag": event.get("board_tag"),
                     "status": event.get("status"),
                     "limit_reason": event.get("limit_reason"),
@@ -247,12 +258,16 @@ class OpenAIThemeExplainer:
 必须使用web_search核查当日及隔夜新闻。综合涨停原因、开盘啦标签、题材成分和新闻催化。
 
 硬约束：
-1. 只返回至少{minimum_members}只输入股票共同指向同一具体事件的组合，涨停和炸板都计入。
-2. 股票代码只能来自输入；不得为了凑数加入仅有宽泛行业关系的股票。
-3. “AI、英伟达、化工、国企、并购”等宽泛标签本身不是共同事件，必须下钻到最小炒作逻辑。
-4. 不同标签可以合并，例如PTFE、氟化工、PCB材料可因同一Rubin背板选材事件合并；
+1. 先逐只核查上涨原因，再聚合共同事件；不得先猜题材名称再拼凑股票。
+2. 只返回至少{minimum_members}只输入股票共同指向同一具体事件的组合。沪深主板涨停/炸板
+   与创业板盘中涨幅超过10%的等效强势信号都计入，但每只股票只能计一次。
+3. 股票代码只能来自输入；不得为了凑数加入仅有宽泛行业关系的股票。
+4. “AI、英伟达、化工、国企、并购”等宽泛标签本身不是共同事件，必须下钻到最小炒作逻辑。
+5. 不同标签可以合并，例如PTFE、氟化工、PCB材料可因同一Rubin背板选材事件合并；
    但必须逐只说明为什么与该事件有关。
-5. 同一组股票不要重复输出近义题材。没有合格组合就返回空数组。
+6. 对创业板涨幅超10%但没有开盘啦涨停原因的股票，必须用公司业务关联和当日新闻补齐原因；
+   找不到确定关联就不得纳入该组合。
+7. 同一组股票不要重复输出近义题材。没有合格组合就返回空数组。
 
 输入股票：
 {json.dumps(compact_events, ensure_ascii=False)}
@@ -264,6 +279,9 @@ class OpenAIThemeExplainer:
       "canonical_name": "具体共同事件题材名",
       "common_logic": "事件→产业变化→股票受益的共同链条",
       "member_codes": ["只能来自输入"],
+      "member_reasons": [
+        {{"code":"只能来自member_codes", "reason":"该股票当日上涨原因及与共同事件的关系"}}
+      ],
       "aliases": ["输入标签或常用近义名"],
       "cluster_confidence": 0,
       "catalysts": [
@@ -310,11 +328,19 @@ class OpenAIThemeExplainer:
                 for value in cluster.get("aliases", [])[:12]
                 if str(value).strip()
             ]
+            member_reasons = {
+                str(item.get("code") or "").strip(): str(item.get("reason") or "").strip()
+                for item in cluster.get("member_reasons", [])
+                if isinstance(item, dict)
+                and str(item.get("code") or "").strip() in codes
+                and str(item.get("reason") or "").strip()
+            }
             result.append(
                 {
                     "tag": name[:60],
                     "common_logic": logic[:1000],
                     "member_codes": codes,
+                    "member_reasons": member_reasons,
                     "aliases": list(dict.fromkeys([name, *aliases])),
                     "cluster_confidence": _bounded_number(cluster.get("cluster_confidence")),
                     "cluster_method": "semantic_event",

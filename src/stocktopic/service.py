@@ -138,7 +138,7 @@ class StockTopicService:
             rows = self.provider.stock_basic()
             count = self.database.upsert_stocks(rows)
             if count < 2000:
-                raise RuntimeError(f"Main-board universe coverage abnormal: {count}")
+                raise RuntimeError(f"Main-board and ChiNext universe coverage abnormal: {count}")
             self.database.set_metadata(
                 "universe_synced_at", datetime.now().astimezone().isoformat()
             )
@@ -196,6 +196,16 @@ class StockTopicService:
             logger.warning("Daily price sync degraded for %s: %s", trade_date, error)
             self._data_pull_failure("sync_daily_prices", error)
             return 0
+
+    def sync_chinext_growth_signals(self, trade_date: str) -> int:
+        compact = trade_date.replace("-", "")
+        if self.database.get_metadata(f"daily_prices_synced:{compact}") != "true":
+            if self.sync_daily_prices(compact) < 2000:
+                return -1
+        rows = self.database.daily_bars_for_date(compact)
+        count = self.database.upsert_chinext_daily_growth_events(compact, rows)
+        self.database.set_metadata(f"chinext_growth_synced:{compact}", str(count))
+        return count
 
     def refresh_test_pool_prices(self, now: datetime | None = None) -> dict[str, Any]:
         now = self.clock.normalize(now or self.clock.china_now())
@@ -286,6 +296,7 @@ class StockTopicService:
             signature_payload = [
                 {
                     "code": event.get("code"),
+                    "market": event.get("market"),
                     "board_tag": event.get("board_tag"),
                     "status": event.get("status"),
                     "themes": event.get("themes", []),
@@ -358,6 +369,10 @@ class StockTopicService:
                         "sealed_count": sum(
                             member.get("board_tag") == "涨停" for member in members
                         ),
+                        "growth_count": sum(
+                            member.get("board_tag") == "创业板涨幅超10%"
+                            for member in members
+                        ),
                         "failed_count": sum(
                             member.get("board_tag") == "炸板" for member in members
                         ),
@@ -389,6 +404,11 @@ class StockTopicService:
                     if self.sync_kpl_events(trade_date) < 0:
                         raise RuntimeError(f"KPL events unavailable for {trade_date}")
                     self.sync_kpl_concepts(trade_date)
+                    completed_day = trade_date < compact or observed_at.time() >= time(16, 0)
+                    if completed_day and self.sync_chinext_growth_signals(trade_date) < 0:
+                        raise RuntimeError(
+                            f"ChiNext daily growth signals unavailable for {trade_date}"
+                        )
                 candidate_ids.extend(self.discover_trade_date(trade_date, observed_at))
             except Exception as error:
                 failures.append(f"{trade_date}:{_safe_error(error)}")
@@ -444,19 +464,30 @@ class StockTopicService:
             try:
                 raw_quotes = self.provider.realtime_quotes(started)
                 universe = self.database.active_stock_map()
-                main_quotes = [quote for quote in raw_quotes if quote.code in universe]
-                if len(main_quotes) < 2000:
+                supported_quotes = [quote for quote in raw_quotes if quote.code in universe]
+                minimum_coverage = max(2000, int(len(universe) * 0.8))
+                if len(supported_quotes) < minimum_coverage:
                     raise RuntimeError(
-                        f"Quote coverage abnormal: raw={len(raw_quotes)}, main={len(main_quotes)}"
+                        "Quote coverage abnormal: "
+                        f"raw={len(raw_quotes)}, supported={len(supported_quotes)}, "
+                        f"required={minimum_coverage}"
                     )
                 invalid_quotes = [
-                    quote for quote in main_quotes if quote.pre_close <= 0 or quote.close <= 0
+                    quote for quote in supported_quotes if quote.pre_close <= 0 or quote.close <= 0
                 ]
-                quotes = [quote for quote in main_quotes if quote.pre_close > 0 and quote.close > 0]
-                if state.session in {"morning", "afternoon"} and len(quotes) < 2000:
+                quotes = [
+                    quote
+                    for quote in supported_quotes
+                    if quote.pre_close > 0 and quote.close > 0
+                ]
+                if (
+                    state.session in {"morning", "afternoon"}
+                    and len(quotes) < minimum_coverage
+                ):
                     raise RuntimeError(
                         "Valid quote coverage abnormal: "
-                        f"valid={len(quotes)}, invalid={len(invalid_quotes)}"
+                        f"valid={len(quotes)}, invalid={len(invalid_quotes)}, "
+                        f"required={minimum_coverage}"
                     )
                 if not quotes:
                     # No indicative prices at 09:15 can be a normal auction state.
@@ -510,6 +541,9 @@ class StockTopicService:
                         )
                     )
                 self.database.save_quotes(quotes, trade_date, state.slot)
+                chinext_growth_count = self.database.upsert_chinext_growth_events(
+                    compact, quotes
+                )
                 live_pool = self.test_pool.update_realtime(
                     quotes,
                     compact,
@@ -536,6 +570,7 @@ class StockTopicService:
                     "success",
                     len(quotes),
                     f"internal_events={len(anomalies)}, invalid_quotes={len(invalid_quotes)}, "
+                    f"chinext_growth={chinext_growth_count}, "
                     f"candidates={len(candidate_ids)}, live_pool={live_pool}",
                 )
                 return {
@@ -544,6 +579,7 @@ class StockTopicService:
                     "quotes": len(quotes),
                     "internal_events": len(anomalies),
                     "invalid_quotes": len(invalid_quotes),
+                    "chinext_growth_signals": chinext_growth_count,
                     "candidate_ids": candidate_ids,
                     "discovery_trade_date": discovery_trade_date,
                     "scored_ids": scored_ids,
@@ -599,6 +635,25 @@ class StockTopicService:
                     aliases.append(str(theme["shared_tag"]))
                     stock_pool = self.database.eligible_members_for_tags(aliases)
                     item = self.explainer.assess_for_admission(theme, history, stock_pool)
+                    valid_history_ids = {int(match["id"]) for match in history}
+                    cited_history_ids = {
+                        int(value)
+                        for value in item.get("within_window_match_ids", [])
+                        if int(value) in valid_history_ids
+                    }
+                    if not item.get("is_new_theme") and not cited_history_ids:
+                        item["is_new_theme"] = True
+                        item["novelty_confidence"] = max(
+                            float(item.get("novelty_confidence") or 0),
+                            self.settings.novelty_confidence_threshold,
+                        )
+                        item["novelty_reason"] = (
+                            "按60交易日（约90自然日）窗口规则撤销旧题材否决：AI未引用任何"
+                            "系统窗口内历史题材；更早网页历史仅作为产业背景。原判断："
+                            + str(item.get("novelty_reason") or "未提供")
+                        )
+                        item["novelty_policy_override"] = True
+                    item["within_window_match_ids"] = sorted(cited_history_ids)
                     pool_by_code = {str(member["code"]): member for member in stock_pool}
                     validated_members = []
                     for proposal in item.get("proposed_members", []):
@@ -881,7 +936,7 @@ class StockTopicService:
         leader_text = f"{leader.get('name', '')}({leader_code})" if leader_code else "未确认"
         body = (
             f"级别：{'正式题材' if level == 'formal' else '早期观察（证据待确认）'}\n"
-            f"触发：共同事件至少{self.settings.minimum_limit_touches}只股票当日曾触及涨停\n"
+            f"触发：共同事件至少{self.settings.minimum_limit_touches}只股票当日形成强势信号\n"
             f"核心股票：{stock_text or '等待行情补全'}\n"
             f"催化：{review.get('catalyst_summary') or '未提供'}\n"
             f"预估持续：{int(review.get('expected_duration_days') or 0)}个交易日\n"
@@ -1177,10 +1232,13 @@ class StockTopicService:
                 "minimum_limit_touches": self.settings.minimum_limit_touches,
                 "failed_boards_count": True,
                 "semantic_event_clustering": True,
+                "covered_boards": ["main_board", "chinext"],
+                "chinext_growth_signal_pct": 10,
                 "backfill_trade_days": 2,
                 "levels": ["early_watch", "formal"],
                 "analysis_failure_retry_minutes": 30,
                 "novelty_lookback_trade_days": self.settings.novelty_lookback_trade_days,
+                "novelty_window_approx_calendar_days": 90,
                 "minimum_expected_duration_days": (self.settings.minimum_expected_duration_days),
                 "leader_upside_threshold_pct": self.settings.leader_upside_threshold_pct,
             },

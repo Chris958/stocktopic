@@ -202,13 +202,14 @@ class Database:
             code = str(row.get("ts_code", ""))
             name = str(row.get("name", ""))
             market = str(row.get("market", ""))
-            is_main = bool(
+            is_supported = bool(
                 re.match(r"^(600|601|603|605)\d{3}\.SH$", code)
                 or re.match(r"^(000|001|002|003)\d{3}\.SZ$", code)
+                or re.match(r"^(300|301)\d{3}\.SZ$", code)
             )
             excluded = ""
-            if not is_main:
-                excluded = "not_main_board"
+            if not is_supported:
+                excluded = "not_main_or_chinext"
             elif "ST" in name.upper() or "退" in name:
                 excluded = "risk_warning_or_delisting"
             active = int(not excluded)
@@ -263,7 +264,7 @@ class Database:
     def active_stock_map(self) -> dict[str, dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT code, name, list_date, industry FROM stocks WHERE active=1"
+                "SELECT code, name, list_date, industry, market FROM stocks WHERE active=1"
             ).fetchall()
         return {str(row["code"]): dict(row) for row in rows}
 
@@ -393,6 +394,14 @@ class Database:
                 (trade_date.replace("-", ""), code),
             ).fetchone()
         return dict(row) if row else None
+
+    def daily_bars_for_date(self, trade_date: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM stock_daily_bars WHERE trade_date=? ORDER BY code",
+                (trade_date.replace("-", ""),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def latest_quote_history(
         self, trade_date: str, depth: int = 2
@@ -615,6 +624,140 @@ class Database:
             )
         return len(event_values)
 
+    def upsert_chinext_growth_events(
+        self, trade_date: str, quotes: Sequence[Quote]
+    ) -> int:
+        """Persist ChiNext stocks whose intraday high first exceeds +10%."""
+        active = self.active_stock_map()
+        selected = []
+        for quote in quotes:
+            if not _is_chinext_code(quote.code) or quote.code not in active:
+                continue
+            if quote.pre_close <= 0 or quote.high <= 0:
+                continue
+            peak_pct = (quote.high / quote.pre_close - 1.0) * 100.0
+            if peak_pct <= 10.0:
+                continue
+            selected.append((quote, peak_pct))
+        if not selected:
+            return 0
+        tags = self.tags_for_codes([quote.code for quote, _ in selected])
+        now = utc_now_iso()
+        values = []
+        for quote, peak_pct in selected:
+            themes = _high_confidence_theme_tags(tags.get(quote.code, []))
+            signal_time = quote.captured_at.strftime("%H%M%S")
+            reason = (
+                f"创业板盘中最高涨幅{peak_pct:.2f}%，按涨停等效样本进入共同事件聚合；"
+                "具体上涨原因结合题材标签、公司关联和当日新闻核查"
+            )
+            raw = {
+                "source": "tushare_rt_k",
+                "qualification": "chinext_intraday_high_gt_10pct",
+                "peak_pct_change": round(peak_pct, 4),
+                "current_pct_change": round(quote.pct_change, 4),
+            }
+            values.append(
+                (
+                    trade_date.replace("-", ""),
+                    quote.code,
+                    quote.name or str(active[quote.code]["name"]),
+                    "创业板涨幅超10%",
+                    json.dumps(themes, ensure_ascii=False),
+                    "创业板强势",
+                    signal_time,
+                    reason,
+                    peak_pct,
+                    quote.pct_change,
+                    quote.amount,
+                    json.dumps(raw, ensure_ascii=False),
+                    now,
+                )
+            )
+        return self._upsert_chinext_growth_values(values)
+
+    def upsert_chinext_daily_growth_events(
+        self, trade_date: str, rows: Sequence[dict[str, Any]]
+    ) -> int:
+        """Rebuild missed ChiNext >10% intraday signals from official daily highs."""
+        active = self.active_stock_map()
+        selected = []
+        for row in rows:
+            code = str(row.get("ts_code") or row.get("code") or "")
+            if not _is_chinext_code(code) or code not in active:
+                continue
+            pre_close = _number(row.get("pre_close"))
+            high = _number(row.get("high"))
+            if pre_close <= 0 or high <= 0:
+                continue
+            peak_pct = (high / pre_close - 1.0) * 100.0
+            if peak_pct > 10.0:
+                selected.append((row, code, peak_pct))
+        if not selected:
+            return 0
+        tags = self.tags_for_codes([code for _, code, _ in selected])
+        now = utc_now_iso()
+        values = []
+        for row, code, peak_pct in selected:
+            close = _number(row.get("close"))
+            pre_close = _number(row.get("pre_close"))
+            close_pct = (close / pre_close - 1.0) * 100.0 if close > 0 else 0.0
+            themes = _high_confidence_theme_tags(tags.get(code, []))
+            reason = (
+                f"创业板当日最高涨幅{peak_pct:.2f}%，由正式日线回补为涨停等效样本；"
+                "具体上涨原因结合题材标签、公司关联和当日新闻核查"
+            )
+            raw = {
+                "source": "tushare_daily",
+                "qualification": "chinext_intraday_high_gt_10pct_backfill",
+                "peak_pct_change": round(peak_pct, 4),
+                "close_pct_change": round(close_pct, 4),
+            }
+            values.append(
+                (
+                    trade_date.replace("-", ""),
+                    code,
+                    str(row.get("name") or active[code]["name"]),
+                    "创业板涨幅超10%",
+                    json.dumps(themes, ensure_ascii=False),
+                    "创业板强势",
+                    "150000",
+                    reason,
+                    peak_pct,
+                    close_pct,
+                    _number(row.get("amount")),
+                    json.dumps(raw, ensure_ascii=False),
+                    now,
+                )
+            )
+        return self._upsert_chinext_growth_values(values)
+
+    def _upsert_chinext_growth_values(self, values: Sequence[tuple[Any, ...]]) -> int:
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO kpl_events(
+                    trade_date, code, name, board_tag, themes_json, status,
+                    limit_up_time, limit_reason, pct_change, realtime_pct_change,
+                    amount, raw_json, synced_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trade_date, code, board_tag) DO UPDATE SET
+                    name=excluded.name,
+                    themes_json=CASE WHEN excluded.themes_json='[]'
+                        THEN kpl_events.themes_json ELSE excluded.themes_json END,
+                    status=excluded.status,
+                    limit_up_time=COALESCE(kpl_events.limit_up_time, excluded.limit_up_time),
+                    limit_reason=excluded.limit_reason,
+                    pct_change=MAX(COALESCE(kpl_events.pct_change, 0), excluded.pct_change),
+                    realtime_pct_change=excluded.realtime_pct_change,
+                    amount=excluded.amount,
+                    raw_json=excluded.raw_json,
+                    synced_at=excluded.synced_at
+                """,
+                values,
+            )
+        return len(values)
+
     def upsert_kpl_concept_members(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
         active = self.active_stock_map()
@@ -674,17 +817,25 @@ class Database:
                 WITH ranked AS (
                     SELECT *, ROW_NUMBER() OVER(
                         PARTITION BY code
-                        ORDER BY CASE board_tag WHEN '涨停' THEN 0 ELSE 1 END,
+                        ORDER BY CASE board_tag
+                                     WHEN '涨停' THEN 0
+                                     WHEN '创业板涨幅超10%' THEN 1
+                                     ELSE 2
+                                 END,
                                  synced_at DESC
                     ) AS rn
                     FROM kpl_events
-                    WHERE trade_date=? AND board_tag IN ('涨停','炸板')
+                    WHERE trade_date=?
+                      AND board_tag IN ('涨停','创业板涨幅超10%','炸板')
                 )
-                SELECT trade_date, code, name, board_tag, themes_json, status,
-                       limit_up_time, open_time, last_limit_time, limit_reason,
-                       pct_change, realtime_pct_change, synced_at
-                FROM ranked WHERE rn=1
-                ORDER BY limit_up_time, code
+                SELECT ranked.trade_date, ranked.code, ranked.name, ranked.board_tag,
+                       ranked.themes_json, ranked.status, ranked.limit_up_time,
+                       ranked.open_time, ranked.last_limit_time, ranked.limit_reason,
+                       ranked.pct_change, ranked.realtime_pct_change, ranked.synced_at,
+                       stocks.market
+                FROM ranked LEFT JOIN stocks ON stocks.code=ranked.code
+                WHERE rn=1
+                ORDER BY ranked.limit_up_time, ranked.code
                 """,
                 (trade_date,),
             ).fetchall()
@@ -703,6 +854,18 @@ class Database:
                     """,
                     [trade_date, *codes],
                 ).fetchall()
+                tag_rows.extend(
+                    connection.execute(
+                        f"""
+                        SELECT code, tag, source, confidence
+                        FROM stock_tags
+                        WHERE code IN ({placeholders}) AND tag_type='theme'
+                          AND confidence>=0.9
+                        ORDER BY confidence DESC, updated_at DESC, tag
+                        """,
+                        codes,
+                    ).fetchall()
+                )
         tags: dict[str, list[dict[str, Any]]] = {}
         for row in tag_rows:
             bucket = tags.setdefault(str(row["code"]), [])
@@ -741,10 +904,10 @@ class Database:
         return row is not None
 
     def kpl_theme_clusters(self, trade_date: str) -> list[dict[str, Any]]:
-        """Return themes grouped by stocks that touched limit-up during the day.
+        """Return themes grouped by qualifying same-day market-strength signals.
 
-        Both currently sealed boards and failed boards count. A stock is counted
-        once per theme, preferring the sealed-board record when both exist.
+        Limit-up, failed boards and ChiNext intraday highs above 10% count. A stock
+        is counted once per theme, preferring the strongest available record.
         """
         with self.connect() as connection:
             rows = connection.execute(
@@ -753,8 +916,13 @@ class Database:
                        limit_up_time, open_time, last_limit_time, limit_reason,
                        pct_change, realtime_pct_change, synced_at
                 FROM kpl_events
-                WHERE trade_date=? AND board_tag IN ('涨停','炸板')
-                ORDER BY CASE board_tag WHEN '涨停' THEN 0 ELSE 1 END,
+                WHERE trade_date=?
+                  AND board_tag IN ('涨停','创业板涨幅超10%','炸板')
+                ORDER BY CASE board_tag
+                             WHEN '涨停' THEN 0
+                             WHEN '创业板涨幅超10%' THEN 1
+                             ELSE 2
+                         END,
                          limit_up_time ASC
                 """,
                 (trade_date,),
@@ -774,6 +942,10 @@ class Database:
                 "members": list(members.values()),
                 "touch_count": len(members),
                 "sealed_count": sum(item.get("board_tag") == "涨停" for item in members.values()),
+                "growth_count": sum(
+                    item.get("board_tag") == "创业板涨幅超10%"
+                    for item in members.values()
+                ),
                 "failed_count": sum(item.get("board_tag") == "炸板" for item in members.values()),
             }
             for tag, members in sorted(
@@ -1399,7 +1571,13 @@ class Database:
                     item for item in history if str(item.get("trade_date") or "") == latest_date
                 ]
                 current_pct = _number(member.get("current_pct"))
-                preferred_tag = "涨停" if current_pct >= 9.5 else "炸板"
+                preferred_tag = (
+                    "涨停"
+                    if any(item.get("board_tag") == "涨停" for item in same_day)
+                    else "创业板涨幅超10%"
+                    if current_pct > 10
+                    else "炸板"
+                )
                 latest = next(
                     (item for item in same_day if item.get("board_tag") == preferred_tag),
                     same_day[0],
@@ -1497,6 +1675,11 @@ class Database:
             "strong_count": sum(value >= 5 for value in current_values),
             "limit_up_count": sum(
                 member.get("latest_board_tag") == "涨停"
+                and str(member.get("latest_limit_trade_date") or "") == current_limit_date
+                for member in members
+            ),
+            "chinext_growth_count": sum(
+                member.get("latest_board_tag") == "创业板涨幅超10%"
                 and str(member.get("latest_limit_trade_date") or "") == current_limit_date
                 for member in members
             ),
@@ -2157,6 +2340,26 @@ def _unique_tags(tags: Sequence[dict[str, Any]], tag_type: str) -> list[str]:
     return list(dict.fromkeys(str(item["tag"]) for item in ordered if item.get("tag")))
 
 
+def _high_confidence_theme_tags(tags: Sequence[dict[str, Any]]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            str(item["tag"])
+            for item in sorted(
+                tags,
+                key=lambda value: float(value.get("confidence") or 0),
+                reverse=True,
+            )
+            if str(item.get("tag_type") or "") == "theme"
+            and float(item.get("confidence") or 0) >= 0.9
+            and item.get("tag")
+        )
+    )[:12]
+
+
+def _is_chinext_code(code: str) -> bool:
+    return bool(re.match(r"^(300|301)\d{3}\.SZ$", str(code)))
+
+
 def _number(value: Any) -> float:
     try:
         return float(value or 0)
@@ -2189,6 +2392,12 @@ def _one_board_event_per_day(history: Sequence[dict[str, Any]]) -> list[dict[str
     for item in history:
         trade_date = str(item.get("trade_date") or "")
         existing = by_date.get(trade_date)
-        if not existing or item.get("board_tag") == "涨停":
+        if not existing or _board_signal_rank(item.get("board_tag")) < _board_signal_rank(
+            existing.get("board_tag")
+        ):
             by_date[trade_date] = item
     return list(by_date.values())
+
+
+def _board_signal_rank(value: Any) -> int:
+    return {"涨停": 0, "创业板涨幅超10%": 1, "炸板": 2}.get(str(value), 9)

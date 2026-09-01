@@ -17,7 +17,7 @@ const views = {
   candidates: {
     kicker: '早期观察',
     title: '已经形成市场共识，等待证据确认',
-    description: '四只股票按共同事件触板后才出现；未入池候选保留完整审查原因。'
+    description: '主板触板与创业板涨幅超10%按上涨原因聚合；未入池候选保留完整审查原因。'
   },
   confirmed: {
     kicker: '重点题材库',
@@ -332,7 +332,7 @@ function themeCard(theme, mode) {
     ${summaryMetric('当前平均', formatPct(summary.current_average_pct))}
     ${summaryMetric(`${returnLabel}平均`, formatPct(summary.confirmed_average_return))}
     ${summaryMetric('上涨家数', `${summary.up_count ?? 0}/${summary.member_count ?? activeMembers.length}`)}
-    ${summaryMetric('涨停 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
+    ${summaryMetric('涨停 / 创业板强势 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.chinext_growth_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
   </div>`;
   const stockKey = `theme-${theme.id}-stocks`;
   const newsKey = `theme-${theme.id}-news`;
@@ -369,7 +369,7 @@ function themeCard(theme, mode) {
 
 function memberRow(member, position, returnLabel, themeId, tracked) {
   const evidence = member.evidence || {};
-  const reasons = evidence.limit_reason || evidence.ai_reason || evidence.shared_tag || '同题材确定性证据';
+  const reasons = evidence.aggregated_reason || evidence.limit_reason || evidence.ai_reason || evidence.shared_tag || '同题材确定性证据';
   const current = Number(member.current_pct);
   const cumulative = member.confirmed_return;
   const leader = Number(member.leader_rank) === 1;
