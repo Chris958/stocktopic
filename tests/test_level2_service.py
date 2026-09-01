@@ -17,6 +17,7 @@ class Level2ProviderStub:
     def __init__(self, available_date: str | None):
         self.available_date = available_date
         self.trade_calls: list[str] = []
+        self.order_calls: list[str] = []
 
     def trade_history(self, symbol: str, trade_date: str):
         self.trade_calls.append(trade_date)
@@ -38,6 +39,7 @@ class Level2ProviderStub:
         ]
 
     def order_history(self, symbol: str, trade_date: str):
+        self.order_calls.append(trade_date)
         return []
 
 
@@ -79,6 +81,37 @@ class Level2ServiceTests(TestCase):
 
         self.assertEqual(report["trade_date"], "20260831")
         self.assertEqual(provider.trade_calls, ["20260901", "20260831"])
+
+    def test_completed_report_is_reused_without_provider_calls(self):
+        provider = Level2ProviderStub("20260831")
+        self.service.level2_provider = provider
+        now = datetime(2026, 9, 1, 17, 0, tzinfo=CN)
+        self.service.analyze_level2_stock("603269.SH", now=now)
+        cached_provider = Level2ProviderStub(None)
+        self.service.level2_provider = cached_provider
+
+        report = self.service.analyze_level2_stock("603269.SH", now=now)
+
+        self.assertTrue(report["cache_hit"])
+        self.assertEqual(report["trade_date"], "20260831")
+        self.assertEqual(cached_provider.trade_calls, [])
+        self.assertEqual(cached_provider.order_calls, [])
+
+    def test_force_refresh_bypasses_completed_report(self):
+        provider = Level2ProviderStub("20260831")
+        self.service.level2_provider = provider
+        now = datetime(2026, 9, 1, 10, 0, tzinfo=CN)
+        self.service.analyze_level2_stock("603269.SH", now=now)
+        provider.trade_calls.clear()
+        provider.order_calls.clear()
+
+        report = self.service.analyze_level2_stock(
+            "603269.SH", now=now, force_refresh=True
+        )
+
+        self.assertFalse(report["cache_hit"])
+        self.assertEqual(provider.trade_calls, ["20260831"])
+        self.assertEqual(provider.order_calls, ["20260831"])
 
     def test_intraday_skips_current_unsettled_date(self):
         provider = Level2ProviderStub("20260831")

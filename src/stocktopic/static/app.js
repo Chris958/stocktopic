@@ -9,6 +9,7 @@ const state = {
   themeFilter: 'active',
   backtestFilter: 'all',
   level2Report: null,
+  level2Context: null,
   sheet: null,
   lastFocus: null,
   expanded: savedSections
@@ -396,15 +397,16 @@ function memberRow(member, position, returnLabel, themeId, tracked) {
   </div>`;
 }
 
-async function analyzeLevel2(theme, code, button) {
+async function analyzeLevel2(theme, code, button, forceRefresh = false) {
   const member = (theme.members || []).find(item => item.code === code) || {};
   openLevel2(member.name || code);
+  state.level2Context = { theme, code };
   button.disabled = true;
   const original = button.textContent;
   button.textContent = '分析中';
   try {
     const result = await api('/api/v1/level2/analyze', {
-      method: 'POST', body: JSON.stringify({ code })
+      method: 'POST', body: JSON.stringify({ code, force_refresh: forceRefresh })
     });
     state.level2Report = result.report;
     renderLevel2Report(result.report);
@@ -452,6 +454,7 @@ function renderLevel2Report(report) {
   const profile = report.raw_profile || {};
   $('#level2Content').innerHTML = `
     ${report.partial ? '<div class="partial-note">盘中数据 · 收盘前结果仍会变化</div>' : ''}
+    ${report.cache_hit ? '<div class="cache-note">已读取本地完整报告 · 无需重复下载近10万条明细</div>' : ''}
     <div class="flow-tiers">${thresholds}</div>
     <div class="flow-net-grid">
       ${flowNet('大单净主动流入', tierMap['50W+']?.net_inflow)}
@@ -460,7 +463,12 @@ function renderLevel2Report(report) {
     <div class="coverage-note"><strong>计算可信度</strong><span>主动方向覆盖 ${Number(coverage.directional_amount_coverage_pct || 0).toFixed(1)}% · 委托号覆盖 ${Number(coverage.order_id_amount_coverage_pct || 0).toFixed(1)}%</span><small>${coverage.grouped_trade_count || 0}笔成交已归并为${coverage.active_order_count || 0}个主动委托</small></div>
     <details class="flow-events" open><summary>50万以上主动委托明细 <span>${(report.events || []).length}</span></summary><ol>${events || '<li class="no-flow-event">没有达到50万元的可识别主动委托</li>'}</ol></details>
     <details class="raw-profile"><summary>原始字段映射审计</summary><pre>${escapeHtml(JSON.stringify(profile, null, 2))}</pre></details>
-    <p class="level2-limit">${escapeHtml((report.limitations || []).join('；'))}</p>`;
+    <p class="level2-limit">${escapeHtml((report.limitations || []).join('；'))}</p>
+    <button id="level2ForceRefresh" class="secondary-button pressable">重新下载最新数据</button>`;
+  $('#level2ForceRefresh').addEventListener('click', event => {
+    const context = state.level2Context;
+    if (context) analyzeLevel2(context.theme, context.code, event.currentTarget, true);
+  });
 }
 
 function flowNet(label, value) {

@@ -55,6 +55,7 @@ class LoginRequest(BaseModel):
 class Level2AnalysisRequest(BaseModel):
     code: str = Field(min_length=6, max_length=16)
     trade_date: str | None = Field(default=None, min_length=8, max_length=10)
+    force_refresh: bool = False
 
 
 SESSION_COOKIE = "stocktopic_session"
@@ -76,7 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.10.1",
+        version="0.10.2",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -197,6 +198,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 service.analyze_level2_stock,
                 request.code,
                 request.trade_date,
+                None,
+                request.force_refresh,
             )
         except NumcatError as error:
             raise HTTPException(status_code=502, detail=_safe_integration_error(error)) from error

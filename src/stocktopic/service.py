@@ -249,6 +249,7 @@ class StockTopicService:
         code: str,
         trade_date: str | None = None,
         now: datetime | None = None,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
         if not self.level2_provider.enabled:
             raise RuntimeError("猫爪数据尚未配置，请先运行configure_integrations.sh")
@@ -275,18 +276,58 @@ class StockTopicService:
             candidate_dates = candidate_dates[:5]
             if not candidate_dates:
                 raise RuntimeError("交易日历尚未就绪，无法确定Level-2分析日期")
+        if not force_refresh:
+            preferred_cache_count = 1 if explicit_date or now.time() < time(16, 0) else 2
+            for cache_date in candidate_dates[:preferred_cache_count]:
+                cached = self.database.get_level2_report(normalized_code, cache_date)
+                if cached and not cached.get("partial"):
+                    cached["cache_hit"] = True
+                    return cached
         short_code = normalized_code.split(".", 1)[0]
         attempted_dates: list[str] = []
         last_no_data_error: NumcatError | None = None
         trades: list[dict[str, Any]] = []
+        orders: list[dict[str, Any]] | None = None
+        order_error = ""
         compact_date = ""
         for candidate_date in candidate_dates:
             attempted_dates.append(candidate_date)
-            try:
-                candidate_trades = self.level2_provider.trade_history(
-                    short_code, candidate_date
-                )
-            except NumcatError as error:
+            if not force_refresh:
+                cached = self.database.get_level2_report(normalized_code, candidate_date)
+                if cached and not cached.get("partial"):
+                    cached["cache_hit"] = True
+                    return cached
+            trade_error: NumcatError | None = None
+            candidate_orders: list[dict[str, Any]] | None = None
+            candidate_order_error = ""
+            if candidate_date != compact:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    trade_future = executor.submit(
+                        self.level2_provider.trade_history, short_code, candidate_date
+                    )
+                    order_future = executor.submit(
+                        self.level2_provider.order_history, short_code, candidate_date
+                    )
+                    try:
+                        candidate_trades = trade_future.result()
+                    except NumcatError as error:
+                        candidate_trades = []
+                        trade_error = error
+                    try:
+                        candidate_orders = order_future.result()
+                    except NumcatError as error:
+                        candidate_orders = []
+                        candidate_order_error = _safe_error(error)
+            else:
+                try:
+                    candidate_trades = self.level2_provider.trade_history(
+                        short_code, candidate_date
+                    )
+                except NumcatError as error:
+                    candidate_trades = []
+                    trade_error = error
+            if trade_error:
+                error = trade_error
                 if not _is_numcat_no_data(error):
                     raise
                 last_no_data_error = error
@@ -295,6 +336,8 @@ class StockTopicService:
                 continue
             compact_date = candidate_date
             trades = candidate_trades
+            orders = candidate_orders
+            order_error = candidate_order_error
             break
         if not trades:
             provider_result = (
@@ -317,12 +360,12 @@ class StockTopicService:
                 "和历史数据起始日期。"
             )
         partial = compact_date == compact and now.time() < time(15, 5)
-        order_error = ""
-        try:
-            orders = self.level2_provider.order_history(short_code, compact_date)
-        except NumcatError as error:
-            orders = []
-            order_error = _safe_error(error)
+        if orders is None:
+            try:
+                orders = self.level2_provider.order_history(short_code, compact_date)
+            except NumcatError as error:
+                orders = []
+                order_error = _safe_error(error)
         date_key = datetime.strptime(compact_date, "%Y%m%d").date().isoformat()
         upper_limit = self.database.daily_limit_map(date_key).get(normalized_code, (None, None))[0]
         report = analyze_level2_orders(
@@ -335,6 +378,7 @@ class StockTopicService:
             generated_at=now.isoformat(timespec="seconds"),
             partial=partial,
         )
+        report["cache_hit"] = False
         if order_error:
             report["raw_profile"]["order_history_error"] = order_error
             report["limitations"].append(
