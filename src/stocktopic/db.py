@@ -2008,7 +2008,7 @@ class Database:
                     UNION
                     SELECT COALESCE(exit_attempt_date, planned_exit_date) AS trade_date
                     FROM test_pool_entries
-                    WHERE status='awaiting_exit'
+                    WHERE status IN ('awaiting_exit', 'awaiting_settlement')
                 )
                 WHERE trade_date IS NOT NULL AND trade_date<=?
                 ORDER BY trade_date
@@ -2035,7 +2035,8 @@ class Database:
             "unfilled_count": sum(item["status"] == "unfilled" for item in entries),
             "invalid_count": sum(item["status"] == "invalid" for item in entries),
             "pending_count": sum(
-                item["status"] in {"awaiting_buy", "awaiting_exit"} for item in entries
+                item["status"] in {"awaiting_buy", "awaiting_exit", "awaiting_settlement"}
+                for item in entries
             ),
             "success_rate": round(success_count / directional_count * 100.0, 2)
             if directional_count

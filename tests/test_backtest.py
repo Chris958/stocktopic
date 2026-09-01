@@ -107,7 +107,17 @@ class TestPoolTrackerTests(TestCase):
         )
         entry = self.db.list_test_pool_entries()[0]
 
-        self.assertEqual(result, {"bought": 1, "marked": 1, "limit_pending": 0})
+        self.assertEqual(
+            result,
+            {
+                "bought": 1,
+                "marked": 1,
+                "limit_pending": 0,
+                "sold": 0,
+                "exit_pending": 0,
+                "exit_marked": 0,
+            },
+        )
         self.assertEqual(entry["status"], "awaiting_exit")
         self.assertEqual(entry["buy_open"], 10)
         self.assertEqual(entry["buy_confirmation_source"], "realtime_rt_k")
@@ -161,6 +171,98 @@ class TestPoolTrackerTests(TestCase):
         entry = self.db.list_test_pool_entries()[0]
         self.assertEqual(entry["status"], "unfilled")
         self.assertEqual(entry["buy_confirmation_source"], "official_daily")
+
+    def test_realtime_quote_confirms_t_plus_two_open_exit(self):
+        self.tracker.add(self.theme_id, "600000.SH", self.now)
+        self._sync("20260827", open=10, high=10.5)
+        self.tracker.settle()
+        captured = datetime(2026, 8, 28, 9, 30, 5, tzinfo=CN)
+
+        result = self.tracker.update_realtime(
+            [self._quote(captured, pre_close=10.2, open=11, high=11.4, low=10.9, close=11.2)],
+            "20260828",
+        )
+        entry = self.db.list_test_pool_entries()[0]
+
+        self.assertEqual(result["sold"], 1)
+        self.assertEqual(entry["status"], "awaiting_settlement")
+        self.assertEqual(entry["exit_open"], 11)
+        self.assertEqual(entry["standard_return_pct"], 10.0)
+        self.assertEqual(entry["maximum_return_pct"], 14.0)
+        self.assertEqual(self.db.test_pool_summary()["pending_count"], 1)
+
+        later = datetime(2026, 8, 28, 14, 0, 5, tzinfo=CN)
+        update = self.tracker.update_realtime(
+            [self._quote(later, pre_close=10.2, open=11, high=12, low=10.9, close=11.5)],
+            "20260828",
+        )
+        entry = self.db.list_test_pool_entries()[0]
+        self.assertEqual(update["exit_marked"], 1)
+        self.assertEqual(entry["maximum_return_pct"], 20.0)
+
+    def test_realtime_one_price_limit_down_waits_for_price_range(self):
+        self.tracker.add(self.theme_id, "600000.SH", self.now)
+        self._sync("20260827", open=10)
+        self.tracker.settle()
+        captured = datetime(2026, 8, 28, 9, 30, 5, tzinfo=CN)
+
+        pending_result = self.tracker.update_realtime(
+            [self._quote(captured, pre_close=10, open=9, high=9, low=9, close=9)],
+            "20260828",
+            lower_limits={"600000.SH": 9},
+        )
+        pending = self.db.list_test_pool_entries()[0]
+        self.assertEqual(pending_result["exit_pending"], 1)
+        self.assertEqual(pending["status"], "awaiting_exit")
+
+        opened = datetime(2026, 8, 28, 10, 0, 5, tzinfo=CN)
+        sold_result = self.tracker.update_realtime(
+            [self._quote(opened, pre_close=10, open=9, high=9.2, low=9, close=9.1)],
+            "20260828",
+            lower_limits={"600000.SH": 9},
+        )
+        sold = self.db.list_test_pool_entries()[0]
+        self.assertEqual(sold_result["sold"], 1)
+        self.assertEqual(sold["status"], "awaiting_settlement")
+        self.assertEqual(sold["standard_return_pct"], -10.0)
+
+    def test_official_daily_finalizes_realtime_exit(self):
+        self.tracker.add(self.theme_id, "600000.SH", self.now)
+        self._sync("20260827", open=10)
+        self.tracker.settle()
+        captured = datetime(2026, 8, 28, 9, 30, 5, tzinfo=CN)
+        self.tracker.update_realtime(
+            [self._quote(captured, open=11, high=11.4, low=10.9, close=11.2)],
+            "20260828",
+        )
+        self._sync("20260828", open=11, high=12)
+
+        result = self.tracker.settle()
+        entry = self.db.list_test_pool_entries()[0]
+        self.assertEqual(result["settled"], 1)
+        self.assertEqual(entry["status"], "success")
+        self.assertEqual(entry["maximum_return_pct"], 20.0)
+
+    def test_official_daily_reverses_unexecutable_realtime_exit(self):
+        self.tracker.add(self.theme_id, "600000.SH", self.now)
+        self._sync("20260827", open=10)
+        self.tracker.settle()
+        captured = datetime(2026, 8, 28, 10, 0, 5, tzinfo=CN)
+        self.tracker.update_realtime(
+            [self._quote(captured, pre_close=10, open=9, high=9.1, low=9, close=9.05)],
+            "20260828",
+            lower_limits={"600000.SH": 9},
+        )
+        self._sync(
+            "20260828", open=9, high=9, low=9, close=9, pre_close=10, pct_chg=-10
+        )
+
+        result = self.tracker.settle()
+        entry = self.db.list_test_pool_entries()[0]
+        self.assertEqual(result["delayed"], 1)
+        self.assertEqual(entry["status"], "awaiting_exit")
+        self.assertEqual(entry["exit_attempt_date"], "20260831")
+        self.assertIsNone(entry["exit_open"])
 
     def test_same_stock_and_signal_date_merges_theme_sources(self):
         second_theme = self._theme("第二题材")

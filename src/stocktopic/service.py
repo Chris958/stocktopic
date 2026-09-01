@@ -514,6 +514,7 @@ class StockTopicService:
                     quotes,
                     compact,
                     {code: values[0] for code, values in limits.items()},
+                    {code: values[1] for code, values in limits.items()},
                 )
                 self.database.save_anomalies(anomalies)
                 self.database.set_metadata("last_quote_slot", slot_key)

@@ -249,7 +249,9 @@ function renderThemes(selector, items, mode) {
   root.classList.remove('skeleton-list');
   const audit = mode === 'audit';
   root.innerHTML = items.length
-    ? items.map(theme => themeCard(theme, mode)).join('')
+    ? items.map(theme => audit && theme.status === 'rejected'
+      ? rejectedThemeDisclosure(theme, mode)
+      : themeCard(theme, mode)).join('')
     : emptyState(
       audit ? '当前筛选下没有记录' : mode === 'archived' ? '没有已归档题材' : '暂无重点题材',
       audit
@@ -275,6 +277,15 @@ function renderThemes(selector, items, mode) {
       localStorage.setItem('stocktopicSections', JSON.stringify(state.expanded));
     });
   });
+}
+
+function rejectedThemeDisclosure(theme, mode) {
+  const title = theme.final_name || theme.suggested_name || theme.provisional_name || '未命名题材';
+  const collapseKey = `rejected-theme-${theme.id}`;
+  return `<details class="rejected-theme-disclosure" data-collapse-key="${collapseKey}" ${state.expanded[collapseKey] ? 'open' : ''}>
+    <summary><strong>${escapeHtml(title)}</strong><i aria-hidden="true">⌄</i></summary>
+    <div class="rejected-theme-content">${themeCard(theme, mode)}</div>
+  </details>`;
 }
 
 function themeCard(theme, mode) {
@@ -408,7 +419,7 @@ function renderBacktest() {
   ].join('');
   let entries = [...(backtest.entries || [])];
   if (state.backtestFilter === 'pending') {
-    entries = entries.filter(item => ['awaiting_buy', 'awaiting_exit'].includes(item.status));
+    entries = entries.filter(item => ['awaiting_buy', 'awaiting_exit', 'awaiting_settlement'].includes(item.status));
   } else if (state.backtestFilter === 'completed') {
     entries = entries.filter(item => ['success', 'failure', 'flat'].includes(item.status));
   } else if (state.backtestFilter === 'unfilled') {
@@ -430,6 +441,7 @@ function backtestRow(item) {
   const exitDate = item.actual_exit_date || item.exit_attempt_date || item.planned_exit_date;
   const delay = Number(item.exit_delay_trade_days || 0);
   const holding = item.status === 'awaiting_exit';
+  const soldPending = item.status === 'awaiting_settlement';
   const liveTime = item.live_updated_at ? `更新 ${formatTime(item.live_updated_at)}` : '等待实时行情';
   const standardValue = holding ? item.current_return_pct : item.standard_return_pct;
   const maximumValue = holding ? item.current_high_return_pct : item.maximum_return_pct;
@@ -440,19 +452,19 @@ function backtestRow(item) {
     <div class="backtest-stock"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.code)} · 信号 ${escapeHtml(formatDate(item.signal_trade_date))}</small><div>${sources}</div></div>
     <div class="backtest-step"><span>T+1 买入</span><strong>${escapeHtml(formatPrice(item.buy_open))}</strong><small>${escapeHtml(source)}</small></div>
     <div class="backtest-step"><span>${delay ? '顺延退出' : 'T+2 开盘'}</span><strong>${escapeHtml(formatPrice(item.exit_open))}</strong><small>${escapeHtml(formatDate(exitDate))}${delay ? ` · 延迟${delay}日` : ''}</small></div>
-    <div class="backtest-return ${valueClass(standardValue)}"><span>${holding ? '持仓涨跌' : '标准收益'}</span><strong>${escapeHtml(formatPct(standardValue))}</strong><small>${holding ? `${formatPrice(item.current_price)} · ${liveTime}` : '开盘卖出'}</small></div>
-    <div class="backtest-return ${valueClass(maximumValue)}"><span>${holding ? '持仓最高' : '最高可能'}</span><strong>${escapeHtml(formatPct(maximumValue))}</strong><small>${holding && item.current_high ? `最高 ¥${Number(item.current_high).toFixed(2)}` : item.exit_high ? `最高 ¥${Number(item.exit_high).toFixed(2)}` : '等待最高价'}</small></div>
+    <div class="backtest-return ${valueClass(standardValue)}"><span>${holding ? '持仓涨跌' : '标准收益'}</span><strong>${escapeHtml(formatPct(standardValue))}</strong><small>${holding ? `${formatPrice(item.current_price)} · ${liveTime}` : soldPending ? `盘中确认 · ${liveTime}` : '开盘卖出'}</small></div>
+    <div class="backtest-return ${valueClass(maximumValue)}"><span>${holding ? '持仓最高' : soldPending ? '当日最高' : '最高可能'}</span><strong>${escapeHtml(formatPct(maximumValue))}</strong><small>${holding && item.current_high ? `最高 ¥${Number(item.current_high).toFixed(2)}` : item.exit_high ? `最高 ¥${Number(item.exit_high).toFixed(2)}` : '等待最高价'}</small></div>
     <div class="backtest-outcome"><span class="outcome-badge ${escapeHtml(item.status)}">${escapeHtml(status)}</span><small>${escapeHtml(item.status_reason || backtestStatusDetail(item.status))}</small></div>
   </article>`;
 }
 
 function backtestStatus(status) {
-  return ({ awaiting_buy: '待买入', awaiting_exit: '持有中', success: '成功', failure: '失败',
+  return ({ awaiting_buy: '待买入', awaiting_exit: '持有中', awaiting_settlement: '已卖出·待校准', success: '成功', failure: '失败',
     flat: '持平', unfilled: '未成交', invalid: '数据无效' })[status] || '待处理';
 }
 
 function backtestStatusDetail(status) {
-  return ({ awaiting_buy: '等待T+1开盘行情', awaiting_exit: '盘中跟踪，等待退出日结算', success: '开盘卖出高于买入价',
+  return ({ awaiting_buy: '等待T+1开盘行情', awaiting_exit: '盘中跟踪，等待退出日结算', awaiting_settlement: 'T+2开盘已卖出，等待正式日线', success: '开盘卖出高于买入价',
     failure: '开盘卖出低于买入价', flat: '开盘卖出等于买入价', unfilled: '不计入统计' })[status] || '';
 }
 
@@ -601,7 +613,7 @@ function updateSectionCount() {
   if (state.view === 'alerts') count = alerts.length;
   if (state.view === 'backtest') {
     const entries = backtest.entries || [];
-    if (state.backtestFilter === 'pending') count = entries.filter(item => ['awaiting_buy', 'awaiting_exit'].includes(item.status)).length;
+    if (state.backtestFilter === 'pending') count = entries.filter(item => ['awaiting_buy', 'awaiting_exit', 'awaiting_settlement'].includes(item.status)).length;
     else if (state.backtestFilter === 'completed') count = entries.filter(item => ['success', 'failure', 'flat'].includes(item.status)).length;
     else if (state.backtestFilter === 'unfilled') count = entries.filter(item => ['unfilled', 'invalid'].includes(item.status)).length;
     else count = entries.length;

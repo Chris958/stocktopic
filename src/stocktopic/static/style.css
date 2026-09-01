@@ -265,6 +265,32 @@ h1 {
 .theme-card.pinned-theme { border-color: color-mix(in srgb, var(--blue), transparent 62%); box-shadow: 0 16px 44px rgba(0, 122, 255, 0.1); }
 .theme-card.stage-early_watch { border-color: color-mix(in srgb, var(--amber), transparent 58%); }
 .theme-card.stage-rejected { box-shadow: none; }
+.rejected-theme-disclosure {
+  overflow: hidden;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+}
+.rejected-theme-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 58px;
+  padding: 15px 19px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.rejected-theme-disclosure > summary::-webkit-details-marker { display: none; }
+.rejected-theme-disclosure > summary strong { overflow: hidden; font-size: 15px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.rejected-theme-disclosure > summary i { color: var(--secondary); font-size: 18px; font-style: normal; transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1); }
+.rejected-theme-disclosure[open] > summary i { transform: rotate(180deg); }
+.rejected-theme-disclosure > summary:focus-visible { outline: 2px solid var(--blue); outline-offset: -3px; }
+.rejected-theme-disclosure > summary:active { background: var(--surface-soft); }
+.rejected-theme-content { padding: 0 10px 10px; }
+.rejected-theme-content > .theme-card { border-radius: calc(var(--radius-card) - 7px); box-shadow: none; }
 .pin-mark { display: inline-block; margin-right: 8px; padding: 3px 6px; border-radius: 6px; background: var(--blue); color: #fff; font-size: 8px; font-weight: 650; vertical-align: 3px; }
 .theme-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
 .theme-title { margin-bottom: 5px; font-size: 20px; line-height: 1.2; letter-spacing: -0.02em; font-weight: 620; }
@@ -441,7 +467,7 @@ h1 {
 .outcome-badge { display: inline-block; padding: 4px 7px; border-radius: 7px; background: var(--surface-soft); color: var(--secondary); font-size: 9px; font-weight: 650; }
 .outcome-badge.success { color: var(--rise); background: var(--rise-soft); }
 .outcome-badge.failure, .outcome-badge.invalid { color: var(--fall); background: var(--fall-soft); }
-.outcome-badge.awaiting_buy, .outcome-badge.awaiting_exit { color: var(--blue); background: var(--blue-soft); }
+.outcome-badge.awaiting_buy, .outcome-badge.awaiting_exit, .outcome-badge.awaiting_settlement { color: var(--blue); background: var(--blue-soft); }
 .outcome-badge.unfilled, .outcome-badge.flat { color: var(--amber); background: var(--amber-soft); }
 .event-card {
   display: grid;
