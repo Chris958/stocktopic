@@ -4,6 +4,7 @@ import argparse
 
 from stocktopic.config import Settings
 from stocktopic.level2 import format_level2_report
+from stocktopic.providers import NumcatError
 from stocktopic.service import StockTopicService
 
 
@@ -16,7 +17,10 @@ def main() -> None:
     service = StockTopicService(settings)
     settings.ensure_directories()
     service.database.initialize()
-    report = service.analyze_level2_stock(args.code, args.date)
+    try:
+        report = service.analyze_level2_stock(args.code, args.date)
+    except (NumcatError, RuntimeError, ValueError) as error:
+        raise SystemExit(f"Level-2分析失败：{error}") from None
     print(format_level2_report(report))
     profile = report["raw_profile"]
     print(f"BS标志分布：{profile['bs_flag']}")

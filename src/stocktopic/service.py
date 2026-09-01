@@ -248,6 +248,7 @@ class StockTopicService:
         self,
         code: str,
         trade_date: str | None = None,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         if not self.level2_provider.enabled:
             raise RuntimeError("猫爪数据尚未配置，请先运行configure_integrations.sh")
@@ -256,26 +257,66 @@ class StockTopicService:
         stock = universe.get(normalized_code)
         if not stock:
             raise ValueError(f"股票不在当前监控名单：{normalized_code}")
-        now = self.clock.china_now()
+        now = self.clock.normalize(now or self.clock.china_now())
         compact = now.strftime("%Y%m%d")
+        explicit_date = bool(trade_date)
         if trade_date:
-            compact_date = trade_date.replace("-", "")
-            if not re.fullmatch(r"20\d{6}", compact_date):
+            requested_date = trade_date.replace("-", "")
+            if not re.fullmatch(r"20\d{6}", requested_date):
                 raise ValueError("交易日期必须是YYYYMMDD或YYYY-MM-DD")
+            candidate_dates = [requested_date]
         else:
-            today_open = self.database.calendar_status(compact)
-            if today_open and now.time() >= time(9, 30):
-                compact_date = compact
-            else:
-                recent = self.database.open_trade_dates(compact, 2)
-                compact_date = next((item for item in recent if item != compact), "")
-            if not compact_date:
+            candidate_dates = self.database.open_trade_dates(compact, 6)
+            # The history API does not document an intraday availability guarantee.
+            # Before 16:00, prefer completed sessions; after 16:00, try today first
+            # and fall back if the provider has not published it yet.
+            if now.time() < time(16, 0):
+                candidate_dates = [item for item in candidate_dates if item != compact]
+            candidate_dates = candidate_dates[:5]
+            if not candidate_dates:
                 raise RuntimeError("交易日历尚未就绪，无法确定Level-2分析日期")
-        partial = compact_date == compact and now.time() < time(15, 5)
         short_code = normalized_code.split(".", 1)[0]
-        trades = self.level2_provider.trade_history(short_code, compact_date)
+        attempted_dates: list[str] = []
+        last_no_data_error: NumcatError | None = None
+        trades: list[dict[str, Any]] = []
+        compact_date = ""
+        for candidate_date in candidate_dates:
+            attempted_dates.append(candidate_date)
+            try:
+                candidate_trades = self.level2_provider.trade_history(
+                    short_code, candidate_date
+                )
+            except NumcatError as error:
+                if not _is_numcat_no_data(error):
+                    raise
+                last_no_data_error = error
+                continue
+            if not candidate_trades:
+                continue
+            compact_date = candidate_date
+            trades = candidate_trades
+            break
         if not trades:
-            raise RuntimeError(f"猫爪数据未返回{normalized_code}在{compact_date}的逐笔成交")
+            provider_result = (
+                f"接口返回{last_no_data_error.code}：{last_no_data_error.message}"
+                if last_no_data_error
+                else "接口成功但逐笔成交为空"
+            )
+            dates = "、".join(attempted_dates)
+            if explicit_date:
+                raise RuntimeError(
+                    f"猫爪未返回{stock.get('name') or normalized_code}({normalized_code})"
+                    f"在{dates}的Level-2逐笔成交（{provider_result}）。"
+                    "请确认猫爪套餐包含level2_trade_history，且该日期在可用历史范围内；"
+                    "当天数据也可能尚未生成。"
+                )
+            raise RuntimeError(
+                f"猫爪未返回{stock.get('name') or normalized_code}({normalized_code})"
+                f"最近已完成交易日的Level-2逐笔成交；已尝试：{dates}"
+                f"（{provider_result}）。请在猫爪控制台确认level2_trade_history权限"
+                "和历史数据起始日期。"
+            )
+        partial = compact_date == compact and now.time() < time(15, 5)
         order_error = ""
         try:
             orders = self.level2_provider.order_history(short_code, compact_date)
@@ -1332,6 +1373,10 @@ def _normalize_stock_code(value: str) -> str:
     symbol, exchange = match.groups()
     exchange = exchange or ("SH" if symbol.startswith(("5", "6", "9")) else "SZ")
     return f"{symbol}.{exchange}"
+
+
+def _is_numcat_no_data(error: NumcatError) -> bool:
+    return str(error.code) == "1002" or "未找到 Level-2 数据" in error.message
 
 
 def _within_retry_cooldown(value: Any, now: datetime, *, minutes: int) -> bool:
