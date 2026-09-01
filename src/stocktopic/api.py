@@ -77,7 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.11.2",
+        version="0.11.3",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,

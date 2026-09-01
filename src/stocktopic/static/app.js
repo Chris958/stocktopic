@@ -350,7 +350,7 @@ function themeCard(theme, mode) {
   const stockDetails = `<details class="fold-section" data-collapse-key="${stockKey}" ${state.expanded[stockKey] ? 'open' : ''}>
     <summary><span><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
     <div class="member-table" role="table" aria-label="${escapeHtml(title)}股票行情">
-      <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span><span>操作</span></div>
+      <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span><span>资金 / 操作</span></div>
       <div class="member-table-body">${members}</div>
     </div>
   </details>`;
@@ -389,10 +389,7 @@ function memberRow(member, position, returnLabel, themeId, tracked) {
   const board = member.board_status || (member.latest_board_tag ? `近期${member.latest_board_tag}` : '—');
   const sequence = member.limit_sequence ? `第${member.limit_sequence}封板` : '';
   const follow = Number(member.follow_count_30m || 0);
-  const flow = member.fund_flow;
-  const flowState = flow
-    ? `<small class="member-flow-state ${escapeHtml(flow.status)}" title="${escapeHtml(flow.error || '')}">${escapeHtml(fundFlowStatusLabel(flow.status, true))}</small>`
-    : '';
+  const flowTrigger = memberFundFlowTrigger(member, themeId);
   return `<div class="member-row ${leader ? 'leader-row' : ''}" role="row" title="${escapeHtml(reasons)}">
     <div class="member-name" role="cell"><span class="member-rank">${position}</span><span><strong>${escapeHtml(member.name)}</strong><small>${escapeHtml(member.code)}</small></span>${leader ? '<b class="leader-badge">龙头候选</b>' : ''}</div>
     <div class="member-number ${valueClass(current)}" role="cell"><strong>${formatPct(current)}</strong><small>${escapeHtml(formatPrice(member.current_price))}</small></div>
@@ -400,8 +397,26 @@ function memberRow(member, position, returnLabel, themeId, tracked) {
     <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, timeLabel(member.first_limit_time)].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
     <div class="member-number neutral" role="cell"><strong>${formatMarketCap(member.circ_mv_billion)}</strong><small>${member.turnover_rate != null ? `换手 ${Number(member.turnover_rate).toFixed(1)}%` : '亿元'}</small></div>
     <div class="drive-cell" role="cell"><strong>${follow}</strong><small>30分钟跟随</small></div>
-    <div class="track-cell" role="cell"><div><button class="track-button level2-button pressable" data-action="level2-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}">资金</button><button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>${flowState}</div>
+    <div class="track-cell" role="cell">${flowTrigger}<button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>
   </div>`;
+}
+
+function memberFundFlowTrigger(member, themeId) {
+  const flow = member.fund_flow || { status: 'pending' };
+  const summary = flow.summary || {};
+  const large = summary.large_net_inflow;
+  const superLarge = summary.super_net_inflow;
+  const largeText = large == null ? '—' : formatFlowMoney(large, true);
+  const superText = superLarge == null ? '—' : formatFlowMoney(superLarge, true);
+  const status = flow.status || 'pending';
+  const statusText = fundFlowStatusLabel(status, true);
+  const title = flow.error || `${statusText} · 点击查看主动委托明细`;
+  const aria = `${member.name || member.code}资金明细，50万以上净流入${largeText}，100万以上净流入${superText}`;
+  return `<button class="flow-net-trigger pressable status-${escapeHtml(status)}" data-action="level2-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" title="${escapeHtml(title)}" aria-label="${escapeHtml(aria)}">
+    <span><small>50W+</small><strong class="${large == null ? 'empty' : valueClass(large)}">${escapeHtml(largeText)}</strong></span>
+    <span><small>100W+</small><strong class="${superLarge == null ? 'empty' : valueClass(superLarge)}">${escapeHtml(superText)}</strong></span>
+    <i>${escapeHtml(statusText)}</i>
+  </button>`;
 }
 
 function themeFundFlow(theme) {
@@ -415,9 +430,8 @@ function themeFundFlow(theme) {
     ? '题材已移除，不再更新池内股票'
     : `${slot} · TOP5 ${progress}${failed ? ` · ${failed}只暂未取得数据` : ''}`;
   const metrics = summary ? `<div class="fund-flow-metrics">
-    ${fundFlowMetric('50W+主动买入', summary.large?.buy_ratio_pct == null ? '—' : `${Number(summary.large.buy_ratio_pct).toFixed(0)}%`)}
-    ${fundFlowMetric('100W+主动买入', summary.super_large?.buy_ratio_pct == null ? '—' : `${Number(summary.super_large.buy_ratio_pct).toFixed(0)}%`)}
-    ${fundFlowMetric('TOP5大单净流入', formatFlowMoney(summary.large?.net_inflow, true), valueClass(summary.large?.net_inflow))}
+    ${fundFlowMetric('TOP5 · 50W+净流入', formatFlowMoney(summary.large?.net_inflow, true), valueClass(summary.large?.net_inflow))}
+    ${fundFlowMetric('TOP5 · 100W+净流入', formatFlowMoney(summary.super_large?.net_inflow, true), valueClass(summary.super_large?.net_inflow))}
   </div>` : '';
   return `<section class="theme-fund-flow status-${escapeHtml(flow.status)}" aria-live="polite">
     <div class="fund-flow-head"><span class="flow-status-dot" aria-hidden="true"></span><div><strong>${escapeHtml(fundFlowStatusLabel(flow.status))}</strong><small>${escapeHtml(detail)}</small></div></div>
@@ -441,8 +455,7 @@ async function analyzeLevel2(theme, code, button, forceRefresh = false) {
   openLevel2(member.name || code);
   state.level2Context = { theme, code };
   button.disabled = true;
-  const original = button.textContent;
-  button.textContent = '分析中';
+  button.setAttribute('aria-busy', 'true');
   try {
     const result = await api('/api/v1/level2/analyze', {
       method: 'POST', body: JSON.stringify({ code, force_refresh: forceRefresh })
@@ -454,7 +467,7 @@ async function analyzeLevel2(theme, code, button, forceRefresh = false) {
     toast(error.message, true);
   } finally {
     button.disabled = false;
-    button.textContent = original;
+    button.removeAttribute('aria-busy');
   }
 }
 

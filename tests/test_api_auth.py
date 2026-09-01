@@ -36,11 +36,13 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.11.2" in page.text
+        assert "app.js?v=0.11.3" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
         assert script.status_code == 200
+        assert "flow-net-trigger" in script.text
+        assert 'level2-button' not in script.text
         assert script.headers["cache-control"] == "no-store, must-revalidate"
         assert client.get("/static/manifest.webmanifest").status_code == 200
         icon = client.get("/static/app-icon-180.png")
