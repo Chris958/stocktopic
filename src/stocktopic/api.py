@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import Settings
+from .providers import NumcatError
 from .service import StockTopicService
 
 logger = logging.getLogger(__name__)
@@ -51,6 +52,11 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=500)
 
 
+class Level2AnalysisRequest(BaseModel):
+    code: str = Field(min_length=6, max_length=16)
+    trade_date: str | None = Field(default=None, min_length=8, max_length=10)
+
+
 SESSION_COOKIE = "stocktopic_session"
 
 
@@ -70,7 +76,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.9.0",
+        version="0.10.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -183,6 +189,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (ValueError, RuntimeError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {"ok": True, "created": created, "entry": entry}
+
+    @app.post("/api/v1/level2/analyze")
+    async def analyze_level2(request: Level2AnalysisRequest):
+        try:
+            report = await asyncio.to_thread(
+                service.analyze_level2_stock,
+                request.code,
+                request.trade_date,
+            )
+        except NumcatError as error:
+            raise HTTPException(status_code=502, detail=_safe_integration_error(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except RuntimeError as error:
+            status = 503 if "尚未配置" in str(error) else 422
+            raise HTTPException(status_code=status, detail=str(error)) from error
+        return {"ok": True, "report": report}
 
     @app.get("/api/v1/themes")
     async def themes(status: str | None = None):
@@ -401,4 +424,9 @@ def _safe_integration_error(error: Exception) -> str:
     message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)
+    message = re.sub(
+        r'(?i)(["\']?(?:apikey|NUMCAT_API_KEY)["\']?\s*[:=]\s*)[^,}\s]+',
+        r"\1***",
+        message,
+    )
     return message[:500] or type(error).__name__

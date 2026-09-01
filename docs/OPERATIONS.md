@@ -69,6 +69,26 @@ curl -u '你的管理用户名' \
 ./scripts/configure_integrations.sh
 ```
 
+同一脚本也用于配置猫爪数据API Key。Key只保存在本机`.env`：
+
+```dotenv
+NUMCAT_API_KEY=你的猫爪数据Key
+```
+
+不要把Key粘贴到聊天、日志或GitHub。配置完成后可先测试海鸥股份最近可用交易日：
+
+```bash
+.venv/bin/python scripts/analyze_level2.py --code 603269.SH
+```
+
+指定历史交易日：
+
+```bash
+.venv/bin/python scripts/analyze_level2.py --code 603269.SH --date 20260901
+```
+
+健康检查中的`integrations.numcat_level2=true`仅代表Key已配置；逐笔权限、日期覆盖及原始字段映射以这条真实请求结果为准。
+
 新版只需要企业微信群机器人生成的完整Webhook：
 
 ```dotenv

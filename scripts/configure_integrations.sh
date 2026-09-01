@@ -13,4 +13,5 @@ fi
 launchctl kickstart -k "gui/$(id -u)/com.chris958.stocktopic"
 
 echo "服务已重启。请运行：$APP_DIR/scripts/doctor.sh"
-echo "然后在网页预警页面点击“测试群机器人”。"
+echo "然后可运行Level-2测试：$PYTHON_BIN $APP_DIR/scripts/analyze_level2.py --code 603269.SH"
+echo "群机器人可在网页预警页面点击“测试群机器人”。"

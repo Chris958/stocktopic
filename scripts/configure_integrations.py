@@ -60,6 +60,11 @@ def main() -> None:
             values.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         ),
         "OPENAI_MODEL": prompt_value("OpenAI模型", values.get("OPENAI_MODEL", "gpt-5.5")),
+        "NUMCAT_API_KEY": prompt_value(
+            "猫爪数据 API Key",
+            values.get("NUMCAT_API_KEY", ""),
+            secret=True,
+        ),
         "WECOM_BOT_WEBHOOK": prompt_value(
             "企业微信群机器人完整Webhook",
             values.get("WECOM_BOT_WEBHOOK", ""),

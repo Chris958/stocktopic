@@ -47,6 +47,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   OPENAI_BASE_URL_INPUT="${OPENAI_BASE_URL_INPUT:-https://api.openai.com/v1}"
   read -r -p "OpenAI模型 [gpt-5.5]: " OPENAI_MODEL_INPUT
   OPENAI_MODEL_INPUT="${OPENAI_MODEL_INPUT:-gpt-5.5}"
+  read -r -s -p "猫爪数据 API Key（可留空后再配置）: " NUMCAT_API_KEY_INPUT; echo
   read -r -s -p "企业微信群机器人完整Webhook（可留空）: " WECOM_BOT_WEBHOOK_INPUT; echo
   validate_wecom_webhook "$WECOM_BOT_WEBHOOK_INPUT"
   read -r -p "管理用户名 [admin]: " ADMIN_USER_INPUT
@@ -63,6 +64,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     printf 'OPENAI_API_KEY=%s\n' "$OPENAI_KEY_INPUT"
     printf 'OPENAI_BASE_URL=%s\n' "$OPENAI_BASE_URL_INPUT"
     printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL_INPUT"
+    printf 'NUMCAT_API_KEY=%s\n' "$NUMCAT_API_KEY_INPUT"
     printf 'WECOM_BOT_WEBHOOK=%s\n' "$WECOM_BOT_WEBHOOK_INPUT"
     printf 'ADMIN_USERNAME=%s\n' "$ADMIN_USER_INPUT"
     printf 'ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD_INPUT"
@@ -100,6 +102,15 @@ append_default "NOVELTY_CONFIDENCE_THRESHOLD" "70"
 append_default "CATALYST_CONFIDENCE_THRESHOLD" "65"
 append_default "MINIMUM_EXPECTED_DURATION_DAYS" "3"
 append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
+
+if ! grep -q '^NUMCAT_API_KEY=' "$APP_DIR/.env"; then
+  NUMCAT_API_KEY_INPUT=""
+  echo "新版增加猫爪Level-2主动委托资金分析。"
+  if [[ -t 0 ]]; then
+    read -r -s -p "请输入猫爪数据 API Key（可留空后再配置）: " NUMCAT_API_KEY_INPUT; echo
+  fi
+  printf '\nNUMCAT_API_KEY=%s\n' "$NUMCAT_API_KEY_INPUT" >> "$APP_DIR/.env"
+fi
 
 if ! grep -q '^WECOM_BOT_WEBHOOK=' "$APP_DIR/.env"; then
   WECOM_BOT_WEBHOOK_INPUT=""

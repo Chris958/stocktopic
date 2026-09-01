@@ -18,8 +18,9 @@ from .backtest import PaperTradeTracker
 from .config import Settings
 from .db import Database
 from .domain import StockContext
+from .level2 import analyze_level2_orders
 from .market_clock import MarketClock
-from .providers import TushareClient
+from .providers import NumcatClient, NumcatError, TushareClient
 from .scoring import ThemeScorer
 from .themes import ThemeDiscovery
 from .wecom import WeComNotifier
@@ -32,6 +33,7 @@ class StockTopicService:
         self.settings = settings
         self.database = Database(settings.db_path, settings.archive_dir)
         self.provider = TushareClient(settings.tushare_token)
+        self.level2_provider = NumcatClient(settings.numcat_api_key)
         self.detector = AnomalyDetector()
         self.discovery = ThemeDiscovery(
             self.database,
@@ -241,6 +243,64 @@ class StockTopicService:
     ) -> tuple[dict[str, Any], bool]:
         current = self.clock.normalize(now or self.clock.china_now())
         return self.test_pool.add(theme_id, code, current)
+
+    def analyze_level2_stock(
+        self,
+        code: str,
+        trade_date: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.level2_provider.enabled:
+            raise RuntimeError("猫爪数据尚未配置，请先运行configure_integrations.sh")
+        normalized_code = _normalize_stock_code(code)
+        universe = self.database.active_stock_map()
+        stock = universe.get(normalized_code)
+        if not stock:
+            raise ValueError(f"股票不在当前监控名单：{normalized_code}")
+        now = self.clock.china_now()
+        compact = now.strftime("%Y%m%d")
+        if trade_date:
+            compact_date = trade_date.replace("-", "")
+            if not re.fullmatch(r"20\d{6}", compact_date):
+                raise ValueError("交易日期必须是YYYYMMDD或YYYY-MM-DD")
+        else:
+            today_open = self.database.calendar_status(compact)
+            if today_open and now.time() >= time(9, 30):
+                compact_date = compact
+            else:
+                recent = self.database.open_trade_dates(compact, 2)
+                compact_date = next((item for item in recent if item != compact), "")
+            if not compact_date:
+                raise RuntimeError("交易日历尚未就绪，无法确定Level-2分析日期")
+        partial = compact_date == compact and now.time() < time(15, 5)
+        short_code = normalized_code.split(".", 1)[0]
+        trades = self.level2_provider.trade_history(short_code, compact_date)
+        if not trades:
+            raise RuntimeError(f"猫爪数据未返回{normalized_code}在{compact_date}的逐笔成交")
+        order_error = ""
+        try:
+            orders = self.level2_provider.order_history(short_code, compact_date)
+        except NumcatError as error:
+            orders = []
+            order_error = _safe_error(error)
+        date_key = datetime.strptime(compact_date, "%Y%m%d").date().isoformat()
+        upper_limit = self.database.daily_limit_map(date_key).get(normalized_code, (None, None))[0]
+        report = analyze_level2_orders(
+            trades,
+            orders,
+            code=normalized_code,
+            name=str(stock.get("name") or normalized_code),
+            trade_date=compact_date,
+            upper_limit=upper_limit,
+            generated_at=now.isoformat(timespec="seconds"),
+            partial=partial,
+        )
+        if order_error:
+            report["raw_profile"]["order_history_error"] = order_error
+            report["limitations"].append(
+                "逐笔委托接口本次不可用；50W+/100W+成交聚合仍有效，撤单分析暂不可用"
+            )
+        self.database.save_level2_report(report)
+        return report
 
     def sync_kpl_events(self, trade_date: str) -> int:
         run_id = self.database.begin_run("sync_kpl_events")
@@ -1204,6 +1264,7 @@ class StockTopicService:
             "integrations": {
                 "tushare": True,
                 "openai": self.explainer.enabled,
+                "numcat_level2": self.level2_provider.enabled,
                 "wecom_group_robot": self.notifier.enabled,
                 "apns": False,
             },
@@ -1254,8 +1315,23 @@ def _safe_error(error: Exception) -> str:
     message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)
+    message = re.sub(
+        r'(?i)(["\']?(?:apikey|NUMCAT_API_KEY)["\']?\s*[:=]\s*)[^,}\s]+',
+        r"\1***",
+        message,
+    )
     message = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+", r"\1***", message)
     return (message or type(error).__name__)[:500]
+
+
+def _normalize_stock_code(value: str) -> str:
+    cleaned = value.strip().upper()
+    match = re.fullmatch(r"(\d{6})(?:\.(SH|SZ))?", cleaned)
+    if not match:
+        raise ValueError("股票代码必须是6位代码或带.SH/.SZ后缀")
+    symbol, exchange = match.groups()
+    exchange = exchange or ("SH" if symbol.startswith(("5", "6", "9")) else "SZ")
+    return f"{symbol}.{exchange}"
 
 
 def _within_retry_cooldown(value: Any, now: datetime, *, minutes: int) -> bool:

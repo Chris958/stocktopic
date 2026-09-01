@@ -2063,6 +2063,43 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def save_level2_report(self, report: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO level2_reports(
+                    code, trade_date, generated_at, is_partial, method, report_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(code, trade_date) DO UPDATE SET
+                    generated_at=excluded.generated_at,
+                    is_partial=excluded.is_partial,
+                    method=excluded.method,
+                    report_json=excluded.report_json
+                """,
+                (
+                    report["code"],
+                    report["trade_date"],
+                    report["generated_at"],
+                    int(bool(report.get("partial"))),
+                    report["method"],
+                    json.dumps(report, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+
+    def get_level2_report(self, code: str, trade_date: str | None = None) -> dict[str, Any] | None:
+        condition = "code=?"
+        params: list[Any] = [code]
+        if trade_date:
+            condition += " AND trade_date=?"
+            params.append(trade_date)
+        with self.connect() as connection:
+            row = connection.execute(
+                f"SELECT report_json FROM level2_reports WHERE {condition} "
+                "ORDER BY trade_date DESC LIMIT 1",
+                params,
+            ).fetchone()
+        return json.loads(row["report_json"]) if row else None
+
     def add_test_pool_entry(
         self,
         *,

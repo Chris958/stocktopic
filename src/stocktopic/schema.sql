@@ -371,3 +371,16 @@ ON test_pool_entries(status, planned_buy_date, planned_exit_date);
 
 CREATE INDEX IF NOT EXISTS idx_test_pool_created
 ON test_pool_entries(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS level2_reports (
+    code TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    is_partial INTEGER NOT NULL DEFAULT 0,
+    method TEXT NOT NULL,
+    report_json TEXT NOT NULL,
+    PRIMARY KEY(code, trade_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_level2_reports_generated
+ON level2_reports(generated_at DESC);

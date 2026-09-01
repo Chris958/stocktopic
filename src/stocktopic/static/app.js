@@ -8,6 +8,7 @@ const state = {
   candidateFilter: 'watching',
   themeFilter: 'active',
   backtestFilter: 'all',
+  level2Report: null,
   sheet: null,
   lastFocus: null,
   expanded: savedSections
@@ -151,9 +152,13 @@ $('#refresh').addEventListener('click', () => load(true));
 $('#accountButton').addEventListener('click', event => openSheet('logout', {}, event.currentTarget));
 $('#wecomTest').addEventListener('click', event => openSheet('wecom', {}, event.currentTarget));
 $('#sheetBackdrop').addEventListener('click', closeSheet);
+$('#level2Backdrop').addEventListener('click', closeLevel2);
 $$('[data-close-sheet]').forEach(button => button.addEventListener('click', closeSheet));
+$$('[data-close-level2]').forEach(button => button.addEventListener('click', closeLevel2));
 document.addEventListener('keydown', event => {
   const sheet = $('#actionSheet');
+  const level2Sheet = $('#level2Sheet');
+  if (event.key === 'Escape' && !level2Sheet.hidden) closeLevel2();
   if (event.key === 'Escape' && !sheet.hidden) closeSheet();
   if (event.key !== 'Tab' || sheet.hidden) return;
   const focusable = [...sheet.querySelectorAll('button:not([disabled]), input:not([disabled]), textarea:not([disabled])')];
@@ -264,6 +269,8 @@ function renderThemes(selector, items, mode) {
       if (!theme) return;
       if (button.dataset.action === 'track-stock') {
         await trackStock(theme, button.dataset.code, button);
+      } else if (button.dataset.action === 'level2-stock') {
+        await analyzeLevel2(theme, button.dataset.code, button);
       } else if (button.dataset.action === 'toggle-pin' || button.dataset.action === 'restore') {
         await immediateThemeAction(button.dataset.action, theme, button);
       } else {
@@ -339,7 +346,7 @@ function themeCard(theme, mode) {
   const stockDetails = `<details class="fold-section" data-collapse-key="${stockKey}" ${state.expanded[stockKey] ? 'open' : ''}>
     <summary><span><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
     <div class="member-table" role="table" aria-label="${escapeHtml(title)}股票行情">
-      <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span><span>测试</span></div>
+      <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span><span>操作</span></div>
       <div class="member-table-body">${members}</div>
     </div>
   </details>`;
@@ -385,8 +392,90 @@ function memberRow(member, position, returnLabel, themeId, tracked) {
     <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, timeLabel(member.first_limit_time)].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
     <div class="member-number neutral" role="cell"><strong>${formatMarketCap(member.circ_mv_billion)}</strong><small>${member.turnover_rate != null ? `换手 ${Number(member.turnover_rate).toFixed(1)}%` : '亿元'}</small></div>
     <div class="drive-cell" role="cell"><strong>${follow}</strong><small>30分钟跟随</small></div>
-    <div class="track-cell" role="cell"><button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>
+    <div class="track-cell" role="cell"><button class="track-button level2-button pressable" data-action="level2-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}">资金</button><button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>
   </div>`;
+}
+
+async function analyzeLevel2(theme, code, button) {
+  const member = (theme.members || []).find(item => item.code === code) || {};
+  openLevel2(member.name || code);
+  button.disabled = true;
+  const original = button.textContent;
+  button.textContent = '分析中';
+  try {
+    const result = await api('/api/v1/level2/analyze', {
+      method: 'POST', body: JSON.stringify({ code })
+    });
+    state.level2Report = result.report;
+    renderLevel2Report(result.report);
+  } catch (error) {
+    $('#level2Content').innerHTML = emptyState('Level-2分析失败', error.message);
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
+}
+
+function openLevel2(name) {
+  state.level2Report = null;
+  $('#level2Title').textContent = `${name} · 主动委托资金`;
+  $('#level2Content').innerHTML = '<div class="level2-loading"><span></span><strong>正在分页读取逐笔成交与委托…</strong><small>按主动方订单号合并，不按单笔成交金额筛选</small></div>';
+  $('#level2Backdrop').hidden = false;
+  $('#level2Sheet').hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLevel2() {
+  $('#level2Backdrop').hidden = true;
+  $('#level2Sheet').hidden = true;
+  document.body.style.overflow = '';
+}
+
+function renderLevel2Report(report) {
+  $('#level2Title').textContent = `${report.name} · ${formatDate(report.trade_date)}`;
+  const thresholds = (report.thresholds || []).map(item => {
+    const ratio = item.buy_ratio_pct;
+    const width = ratio == null ? 0 : Math.max(0, Math.min(100, Number(ratio)));
+    return `<article class="flow-tier">
+      <div><strong>${escapeHtml(item.label)}</strong><span>买入 ${ratio == null ? '—' : `${Number(ratio).toFixed(0)}%`}</span></div>
+      <div class="flow-bar"><i style="width:${width}%"></i></div>
+      <small>主动买 ${escapeHtml(formatFlowMoney(item.buy_amount))} / ${item.buy_order_count}单 · 主动卖 ${escapeHtml(formatFlowMoney(item.sell_amount))} / ${item.sell_order_count}单</small>
+    </article>`;
+  }).join('');
+  const tierMap = Object.fromEntries((report.thresholds || []).map(item => [item.label, item]));
+  const coverage = report.coverage || {};
+  const events = (report.events || []).slice(0, 12).map(item => `<li>
+    <span class="flow-event-side ${item.direction}">${item.direction === 'buy' ? '买' : '卖'}</span>
+    <div><strong>${escapeHtml(item.event_label)} · ${escapeHtml(formatFlowMoney(item.amount))}</strong><small>${escapeHtml(item.first_time || '时间未知')} · ${item.fill_count}笔成交 · 委托号 ${escapeHtml(item.order_id)}</small></div>
+  </li>`).join('');
+  const profile = report.raw_profile || {};
+  $('#level2Content').innerHTML = `
+    ${report.partial ? '<div class="partial-note">盘中数据 · 收盘前结果仍会变化</div>' : ''}
+    <div class="flow-tiers">${thresholds}</div>
+    <div class="flow-net-grid">
+      ${flowNet('大单净主动流入', tierMap['50W+']?.net_inflow)}
+      ${flowNet('超大单净主动流入', tierMap['100W+']?.net_inflow)}
+    </div>
+    <div class="coverage-note"><strong>计算可信度</strong><span>主动方向覆盖 ${Number(coverage.directional_amount_coverage_pct || 0).toFixed(1)}% · 委托号覆盖 ${Number(coverage.order_id_amount_coverage_pct || 0).toFixed(1)}%</span><small>${coverage.grouped_trade_count || 0}笔成交已归并为${coverage.active_order_count || 0}个主动委托</small></div>
+    <details class="flow-events" open><summary>50万以上主动委托明细 <span>${(report.events || []).length}</span></summary><ol>${events || '<li class="no-flow-event">没有达到50万元的可识别主动委托</li>'}</ol></details>
+    <details class="raw-profile"><summary>原始字段映射审计</summary><pre>${escapeHtml(JSON.stringify(profile, null, 2))}</pre></details>
+    <p class="level2-limit">${escapeHtml((report.limitations || []).join('；'))}</p>`;
+}
+
+function flowNet(label, value) {
+  const number = Number(value || 0);
+  return `<article><span>${escapeHtml(label)}</span><strong class="${valueClass(number)}">${escapeHtml(formatFlowMoney(number, true))}</strong></article>`;
+}
+
+function formatFlowMoney(value, signed = false) {
+  const number = Number(value || 0);
+  const sign = signed && number > 0 ? '+' : '';
+  const absolute = Math.abs(number);
+  const prefix = number < 0 ? '-' : sign;
+  if (absolute >= 1e8) return `${prefix}${(absolute / 1e8).toFixed(2)}亿`;
+  if (absolute >= 1e4) return `${prefix}${(absolute / 1e4).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}万`;
+  return `${prefix}${absolute.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}元`;
 }
 
 async function trackStock(theme, code, button) {

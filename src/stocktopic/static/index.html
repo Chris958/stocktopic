@@ -13,7 +13,7 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=0.9.0">
+  <link rel="stylesheet" href="/static/style.css?v=0.10.0">
 </head>
 <body>
   <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -23,7 +23,7 @@
     <div class="header-inner">
       <button class="brand pressable" data-view="candidates" aria-label="返回候选题材">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span><strong>StockTopic</strong><small>V9 · 群机器人推送</small></span>
+        <span><strong>StockTopic</strong><small>V10 · Level-2主动委托</small></span>
       </button>
       <nav class="desktop-nav" aria-label="主要页面">
         <button class="nav-item active pressable" data-view="candidates" aria-current="page">发现</button>
@@ -158,6 +158,16 @@
     </form>
   </section>
 
+  <div id="level2Backdrop" class="sheet-backdrop" hidden></div>
+  <section id="level2Sheet" class="level2-sheet" role="dialog" aria-modal="true" aria-labelledby="level2Title" hidden>
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <div><p class="section-kicker">猫爪 Level-2</p><h2 id="level2Title">主动委托资金</h2></div>
+      <button class="close-button pressable" data-close-level2 aria-label="关闭">×</button>
+    </div>
+    <div id="level2Content" class="level2-content" aria-live="polite"></div>
+  </section>
+
   <div id="loginBackdrop" class="login-backdrop">
     <section class="login-card" role="dialog" aria-modal="true" aria-labelledby="loginTitle">
       <div class="login-symbol" aria-hidden="true"><span></span><span></span><span></span></div>
@@ -174,6 +184,6 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
-  <script src="/static/app.js?v=0.9.0" defer></script>
+  <script src="/static/app.js?v=0.10.0" defer></script>
 </body>
 </html>

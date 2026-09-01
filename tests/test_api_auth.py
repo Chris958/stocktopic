@@ -36,7 +36,7 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.9.0" in page.text
+        assert "app.js?v=0.10.0" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
@@ -78,6 +78,13 @@ def test_api_auth_and_csrf_guard():
         basic = {"Authorization": f"Basic {basic_value}"}
         assert client.post("/api/v1/admin/run-once", headers=basic).status_code == 403
         basic["X-StockTopic-Request"] = "1"
+        level2 = client.post(
+            "/api/v1/level2/analyze",
+            json={"code": "603269.SH"},
+            headers=basic,
+        )
+        assert level2.status_code == 503
+        assert "猫爪数据尚未配置" in level2.json()["detail"]
         response = client.post("/api/v1/admin/run-once", headers=basic)
         assert response.status_code == 200
         assert response.json()["status"] == "idle"
