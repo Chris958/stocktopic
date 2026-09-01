@@ -44,12 +44,7 @@ class StockTopicService:
             settings.openai_model,
             settings.openai_base_url,
         )
-        self.notifier = WeComNotifier(
-            settings.wecom_corp_id,
-            settings.wecom_agent_id,
-            settings.wecom_secret,
-            settings.wecom_to_user,
-        )
+        self.notifier = WeComNotifier(settings.wecom_bot_webhook)
         self.clock = MarketClock()
         self._collector_lock = threading.Lock()
         self._discovery_lock = threading.Lock()
@@ -1209,7 +1204,7 @@ class StockTopicService:
             "integrations": {
                 "tushare": True,
                 "openai": self.explainer.enabled,
-                "wecom": self.notifier.enabled,
+                "wecom_group_robot": self.notifier.enabled,
                 "apns": False,
             },
             "latest_catalyst_refresh_at": self.database.get_metadata("last_catalyst_refresh_at"),
@@ -1258,6 +1253,7 @@ def _safe_error(error: Exception) -> str:
     message = str(error)
     message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
+    message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~-]+", r"\1***", message)
     return (message or type(error).__name__)[:500]
 

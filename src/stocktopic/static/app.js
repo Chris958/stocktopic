@@ -32,7 +32,7 @@ const views = {
   alerts: {
     kicker: '系统预警',
     title: '重要机会与数据故障',
-    description: '新题材、风险和数据拉取异常会记录企业微信送达状态。'
+    description: '新题材、风险和数据拉取异常会记录企业微信群机器人送达状态。'
   }
 };
 
@@ -530,7 +530,7 @@ function sheetContent(action, title) {
       hint: '题材会从当前列表移除，历史数据保留，可在“已归档”中恢复。'
     },
     wecom: {
-      kicker: '通知通道', title: '测试企业微信', submit: '发送测试消息',
+      kicker: '通知通道', title: '测试企业微信群机器人', submit: '发送测试消息',
       hint: '失败时会显示取Token、可信IP、接收账号或网络阶段的具体errcode。'
     },
     logout: {
@@ -569,7 +569,7 @@ $('#sheetForm').addEventListener('submit', async event => {
     }
     closeSheet();
     await load();
-    toast(action === 'wecom' ? '企业微信测试消息已送达' : '操作已完成');
+    toast(action === 'wecom' ? '群机器人测试消息已送达' : '操作已完成');
   } catch (error) {
     $('#sheetHint').textContent = error.message;
     toast(error.message, true);
@@ -582,9 +582,9 @@ $('#sheetForm').addEventListener('submit', async event => {
 function renderAlerts(items) {
   $('#alertList').innerHTML = items.length ? items.map(item => {
     const delivery = item.pushed_wecom
-      ? '<span class="delivery-ok">微信已送达</span>'
+      ? '<span class="delivery-ok">群机器人已送达</span>'
       : item.push_error
-        ? `<span class="delivery-failed" title="${escapeHtml(item.push_error)}">微信失败</span>`
+        ? `<span class="delivery-failed" title="${escapeHtml(item.push_error)}">群机器人失败</span>`
         : '<span class="delivery-pending">未推送</span>';
     return `<article class="event-card">
       <time class="event-time">${escapeHtml(formatDataTime(item.created_at))}</time>

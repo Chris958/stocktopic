@@ -13,7 +13,7 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=0.8.0">
+  <link rel="stylesheet" href="/static/style.css?v=0.9.0">
 </head>
 <body>
   <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -23,7 +23,7 @@
     <div class="header-inner">
       <button class="brand pressable" data-view="candidates" aria-label="返回候选题材">
         <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span><strong>StockTopic</strong><small>V8 · 原因聚合 · 创业板</small></span>
+        <span><strong>StockTopic</strong><small>V9 · 群机器人推送</small></span>
       </button>
       <nav class="desktop-nav" aria-label="主要页面">
         <button class="nav-item active pressable" data-view="candidates" aria-current="page">发现</button>
@@ -112,8 +112,8 @@
       </section>
       <section id="alerts" class="view-panel" aria-label="预警">
         <div class="inline-action">
-          <p>高价值机会、接盘风险和数据异常会同步推送企业微信。</p>
-          <button id="wecomTest" class="secondary-button pressable">测试企业微信</button>
+          <p>高价值机会、接盘风险和数据异常会同步推送企业微信群机器人。</p>
+          <button id="wecomTest" class="secondary-button pressable">测试群机器人</button>
         </div>
         <div id="alertList" class="event-list"></div>
       </section>
@@ -174,6 +174,6 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
-  <script src="/static/app.js?v=0.8.0" defer></script>
+  <script src="/static/app.js?v=0.9.0" defer></script>
 </body>
 </html>

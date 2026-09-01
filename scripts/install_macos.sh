@@ -26,6 +26,14 @@ LOG_DIR="$APP_DIR/logs"
 DATA_DIR="$APP_DIR/data"
 VENV_DIR="$APP_DIR/.venv"
 
+validate_wecom_webhook() {
+  local value="$1"
+  if [[ -n "$value" && ! "$value" =~ ^https://qyapi\.weixin\.qq\.com(:443)?/cgi-bin/webhook/send\?key=[^[:space:]\&]+$ ]]; then
+    echo "企业微信群机器人Webhook格式无效，请复制机器人生成的完整HTTPS地址。"
+    exit 1
+  fi
+}
+
 mkdir -p "$LAUNCH_DIR" "$LOG_DIR" "$DATA_DIR"
 "$PYTHON_BIN" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
@@ -39,11 +47,8 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   OPENAI_BASE_URL_INPUT="${OPENAI_BASE_URL_INPUT:-https://api.openai.com/v1}"
   read -r -p "OpenAI模型 [gpt-5.5]: " OPENAI_MODEL_INPUT
   OPENAI_MODEL_INPUT="${OPENAI_MODEL_INPUT:-gpt-5.5}"
-  read -r -p "企业微信 CorpID: " WECOM_CORP_INPUT
-  read -r -p "企业微信 AgentID: " WECOM_AGENT_INPUT
-  read -r -s -p "企业微信 Secret: " WECOM_SECRET_INPUT; echo
-  read -r -p "企业微信接收UserID [@all]: " WECOM_USER_INPUT
-  WECOM_USER_INPUT="${WECOM_USER_INPUT:-@all}"
+  read -r -s -p "企业微信群机器人完整Webhook（可留空）: " WECOM_BOT_WEBHOOK_INPUT; echo
+  validate_wecom_webhook "$WECOM_BOT_WEBHOOK_INPUT"
   read -r -p "管理用户名 [admin]: " ADMIN_USER_INPUT
   ADMIN_USER_INPUT="${ADMIN_USER_INPUT:-admin}"
   read -r -s -p "设置管理密码: " ADMIN_PASSWORD_INPUT; echo
@@ -58,10 +63,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     printf 'OPENAI_API_KEY=%s\n' "$OPENAI_KEY_INPUT"
     printf 'OPENAI_BASE_URL=%s\n' "$OPENAI_BASE_URL_INPUT"
     printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL_INPUT"
-    printf 'WECOM_CORP_ID=%s\n' "$WECOM_CORP_INPUT"
-    printf 'WECOM_AGENT_ID=%s\n' "$WECOM_AGENT_INPUT"
-    printf 'WECOM_SECRET=%s\n' "$WECOM_SECRET_INPUT"
-    printf 'WECOM_TO_USER=%s\n' "$WECOM_USER_INPUT"
+    printf 'WECOM_BOT_WEBHOOK=%s\n' "$WECOM_BOT_WEBHOOK_INPUT"
     printf 'ADMIN_USERNAME=%s\n' "$ADMIN_USER_INPUT"
     printf 'ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD_INPUT"
     printf 'APP_API_TOKEN=%s\n' "$APP_TOKEN"
@@ -98,6 +100,16 @@ append_default "NOVELTY_CONFIDENCE_THRESHOLD" "70"
 append_default "CATALYST_CONFIDENCE_THRESHOLD" "65"
 append_default "MINIMUM_EXPECTED_DURATION_DAYS" "3"
 append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
+
+if ! grep -q '^WECOM_BOT_WEBHOOK=' "$APP_DIR/.env"; then
+  WECOM_BOT_WEBHOOK_INPUT=""
+  echo "新版推送已改为企业微信群机器人，不再使用CorpID/AgentID/Secret/UserID。"
+  if [[ -t 0 ]]; then
+    read -r -s -p "请粘贴企业微信群机器人完整Webhook（可留空后再配置）: " WECOM_BOT_WEBHOOK_INPUT; echo
+  fi
+  validate_wecom_webhook "$WECOM_BOT_WEBHOOK_INPUT"
+  printf '\nWECOM_BOT_WEBHOOK=%s\n' "$WECOM_BOT_WEBHOOK_INPUT" >> "$APP_DIR/.env"
+fi
 
 if grep -q '^MAXIMUM_CANDIDATES_PER_RUN=4$' "$APP_DIR/.env"; then
   sed -i '' 's/^MAXIMUM_CANDIDATES_PER_RUN=4$/MAXIMUM_CANDIDATES_PER_RUN=0/' "$APP_DIR/.env"

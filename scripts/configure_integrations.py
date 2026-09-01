@@ -5,7 +5,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 APP_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = APP_DIR / ".env"
@@ -60,18 +60,34 @@ def main() -> None:
             values.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         ),
         "OPENAI_MODEL": prompt_value("OpenAI模型", values.get("OPENAI_MODEL", "gpt-5.5")),
-        "WECOM_CORP_ID": prompt_value("企业微信 CorpID", values.get("WECOM_CORP_ID", "")),
-        "WECOM_AGENT_ID": prompt_value("企业微信 AgentID", values.get("WECOM_AGENT_ID", "")),
-        "WECOM_SECRET": prompt_value(
-            "企业微信 Secret", values.get("WECOM_SECRET", ""), secret=True
+        "WECOM_BOT_WEBHOOK": prompt_value(
+            "企业微信群机器人完整Webhook",
+            values.get("WECOM_BOT_WEBHOOK", ""),
+            secret=True,
         ),
-        "WECOM_TO_USER": prompt_value("企业微信接收 UserID", values.get("WECOM_TO_USER", "@all")),
     }
     base = urlsplit(updates["OPENAI_BASE_URL"])
     if updates["OPENAI_API_KEY"] and (base.scheme not in {"http", "https"} or not base.netloc):
         raise SystemExit("OpenAI Base URL必须是完整的http(s)地址。")
-    if updates["WECOM_AGENT_ID"] and not updates["WECOM_AGENT_ID"].isdigit():
-        raise SystemExit("企业微信AgentID必须为数字。")
+    webhook = urlsplit(updates["WECOM_BOT_WEBHOOK"])
+    webhook_query = parse_qs(webhook.query, keep_blank_values=True)
+    try:
+        webhook_port = webhook.port
+    except ValueError:
+        webhook_port = -1
+    if updates["WECOM_BOT_WEBHOOK"] and not (
+        webhook.scheme == "https"
+        and webhook.hostname == "qyapi.weixin.qq.com"
+        and webhook_port in {None, 443}
+        and webhook.username is None
+        and webhook.password is None
+        and not webhook.fragment
+        and webhook.path == "/cgi-bin/webhook/send"
+        and set(webhook_query) == {"key"}
+        and len(webhook_query["key"]) == 1
+        and webhook_query["key"][0].strip()
+    ):
+        raise SystemExit("企业微信群机器人Webhook格式无效，请复制机器人生成的完整HTTPS地址。")
     if any("\n" in value or "\r" in value for value in updates.values()):
         raise SystemExit("配置值不能包含换行。")
 

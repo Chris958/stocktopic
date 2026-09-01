@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from .http import open_url
 
@@ -19,63 +18,32 @@ class WeComDeliveryError(RuntimeError):
         self.retryable = retryable
         guidance = _guidance(errcode)
         suffix = f"；处理建议：{guidance}" if guidance else ""
-        super().__init__(f"企业微信{stage}失败（errcode={errcode}）：{errmsg}{suffix}")
+        super().__init__(f"企业微信群机器人{stage}失败（errcode={errcode}）：{errmsg}{suffix}")
 
 
 class WeComNotifier:
-    def __init__(
-        self,
-        corp_id: str,
-        agent_id: str,
-        secret: str,
-        to_user: str = "@all",
-        timeout: float = 20.0,
-    ):
-        self.corp_id = corp_id.strip()
-        self.agent_id = agent_id.strip()
-        self.secret = secret.strip()
-        self.to_user = to_user.strip() or "@all"
+    """Send outbound-only notifications through a WeCom group robot webhook."""
+
+    def __init__(self, webhook_url: str, timeout: float = 20.0):
+        self.webhook_url = webhook_url.strip()
         self.timeout = timeout
-        self._token = ""
-        self._expires_at = 0.0
-        self._lock = threading.Lock()
+        if self.webhook_url:
+            _validate_webhook_url(self.webhook_url)
 
     @property
     def enabled(self) -> bool:
-        return bool(self.corp_id and self.agent_id and self.secret)
+        return bool(self.webhook_url)
 
     def send_text(self, title: str, body: str) -> None:
         if not self.enabled:
-            raise WeComDeliveryError("配置", "not_configured", "CorpID/AgentID/Secret不完整")
-        try:
-            agent_id = int(self.agent_id)
-        except ValueError as error:
-            raise WeComDeliveryError("配置", "invalid_agentid", "AgentID必须是数字") from error
-        content = f"{title}\n\n{body}"[:2000]
-        payload = {
-            "touser": self.to_user,
-            "msgtype": "text",
-            "agentid": agent_id,
-            "text": {"content": content},
-            "safe": 0,
-            "enable_duplicate_check": 1,
-            "duplicate_check_interval": 1800,
-        }
-        token = self._access_token()
-        token_refreshed = False
+            raise WeComDeliveryError("配置", "not_configured", "缺少WECOM_BOT_WEBHOOK")
+        content = _truncate_utf8(f"{title}\n\n{body}", 2000)
+        payload = {"msgtype": "text", "text": {"content": content}}
         for attempt in range(3):
-            result = self._post(
-                f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={token}",
-                payload,
-            )
-            code = int(result.get("errcode", -1))
+            result = self._post(payload)
+            code = _integer(result.get("errcode"), -1)
             if code == 0:
                 return
-            if code in {40014, 42001} and not token_refreshed:
-                self._expires_at = 0
-                token = self._access_token()
-                token_refreshed = True
-                continue
             if code in {-1, 45009} and attempt < 2:
                 time.sleep(0.5 * (2**attempt))
                 continue
@@ -86,41 +54,21 @@ class WeComNotifier:
                 retryable=code in {-1, 45009},
             )
 
-    def _access_token(self) -> str:
-        with self._lock:
-            if self._token and time.time() < self._expires_at:
-                return self._token
-            query = urllib.parse.urlencode({"corpid": self.corp_id, "corpsecret": self.secret})
-            result = self._get_json(
-                f"https://qyapi.weixin.qq.com/cgi-bin/gettoken?{query}", "获取Token"
-            )
-            code = int(result.get("errcode", -1))
-            if code != 0:
-                raise WeComDeliveryError(
-                    "获取Token", code, str(result.get("errmsg") or "unknown error")
-                )
-            self._token = str(result["access_token"])
-            self._expires_at = time.time() + int(result.get("expires_in", 7200)) - 300
-            return self._token
-
-    def _get_json(self, url: str, stage: str) -> dict[str, Any]:
-        return self._open_json(url, stage)
-
-    def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
-            url,
+            self.webhook_url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
-        return self._open_json(request, "发送消息")
-
-    def _open_json(self, request: str | urllib.request.Request, stage: str) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(3):
             try:
                 with open_url(request, timeout=self.timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    result = json.loads(response.read().decode("utf-8"))
+                if isinstance(result, dict):
+                    return result
+                last_error = ValueError("response is not a JSON object")
             except urllib.error.HTTPError as error:
                 last_error = error
                 if error.code < 500 and error.code != 429:
@@ -130,17 +78,55 @@ class WeComNotifier:
             if attempt < 2:
                 time.sleep(0.5 * (2**attempt))
         message = str(last_error or "unknown network error")
-        raise WeComDeliveryError(stage, "network", message, retryable=True) from last_error
+        raise WeComDeliveryError("发送消息", "network", message, retryable=True) from last_error
+
+
+def _validate_webhook_url(value: str) -> None:
+    parsed = urlsplit(value)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    try:
+        port = parsed.port
+    except ValueError:
+        port = -1
+    valid = bool(
+        parsed.scheme == "https"
+        and parsed.hostname == "qyapi.weixin.qq.com"
+        and port in {None, 443}
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.fragment == ""
+        and parsed.path == "/cgi-bin/webhook/send"
+        and set(query) == {"key"}
+        and len(query.get("key", [])) == 1
+        and query["key"][0].strip()
+    )
+    if not valid:
+        raise WeComDeliveryError(
+            "配置",
+            "invalid_webhook",
+            "Webhook必须是企业微信群机器人生成的完整HTTPS地址",
+        )
+
+
+def _truncate_utf8(value: str, maximum_bytes: int) -> str:
+    encoded = value.encode("utf-8")
+    if len(encoded) <= maximum_bytes:
+        return value
+    suffix = "…".encode()
+    return encoded[: maximum_bytes - len(suffix)].decode("utf-8", "ignore") + "…"
+
+
+def _integer(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _guidance(errcode: int | str) -> str:
     return {
-        60020: "将Mac mini当前公网IPv4加入该自建应用的企业可信IP",
-        40013: "检查CorpID是否属于当前企业",
-        40001: "检查自建应用Secret，必要时在企业微信后台重置",
-        40003: "检查接收UserID是否为通讯录中的账号ID",
-        81013: "接收账号不在应用可见范围，请调整应用可见范围",
-        40014: "access_token无效，系统已自动刷新一次",
-        42001: "access_token已过期，系统已自动刷新一次",
-        45009: "企业微信接口调用频率超限，稍后重试",
+        "not_configured": "运行configure_integrations.sh并填写群机器人Webhook",
+        "invalid_webhook": "在企业微信群中重新添加机器人并复制完整Webhook地址",
+        93000: "Webhook地址或机器人Key无效，请在群机器人设置中重新复制",
+        45009: "企业微信群机器人调用频率超限，系统稍后重试",
     }.get(errcode, "")

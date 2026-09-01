@@ -15,7 +15,7 @@ curl http://127.0.0.1:8765/health
 - `calendar_unknown_fail_closed`：交易日历同步失败，系统主动停止实时采集。
 - `coverage abnormal`：Tushare返回的有效主板与创业板行情低于当前股票池80%（且至少2000只），本周期不参与计算。
 - `data_stale`：全市场累计成交量和成交额没有变化，本周期信号熔断。
-- `latest_wecom_error`：最近一次企业微信失败的阶段、errcode和处理建议；空字符串表示最近一次发送成功。
+- `latest_wecom_error`：最近一次企业微信群机器人失败的阶段、errcode和处理建议；空字符串表示最近一次发送成功。
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
 - `admission_policy`：当前生效的共同事件4只强势股票、主板涨停/炸板与创业板涨幅超过10%、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
 - `test_pool`：测试票池记录数量和最近一次Tushare正式日线同步任务。
@@ -62,32 +62,25 @@ curl -u '你的管理用户名' \
 
 停止服务，编辑 `.env`，再重新启动。不要把 `.env` 内容发到聊天、Issue或GitHub。
 
-需要重新配置OpenAI或企业微信时，推荐使用交互脚本，秘密字段输入时不会回显，直接回车会
+需要重新配置OpenAI或企业微信群机器人时，推荐使用交互脚本，秘密字段输入时不会回显，直接回车会
 保留原值：
 
 ```bash
 ./scripts/configure_integrations.sh
 ```
 
-企业微信自建应用需要 `CorpID`、`AgentID`、应用 `Secret` 和接收成员的 `UserID`。同时确认：
+新版只需要企业微信群机器人生成的完整Webhook：
 
-1. 接收成员位于该自建应用的可见范围内；
-2. 应用管理页如果要求“企业可信IP”，已加入Mac mini当前公网出口IPv4；
-3. 修改配置并重启后，在网页“预警”页点击“测试企业微信”；
-4. 若家庭宽带公网IP发生变化，需要同步更新企业可信IP。
+```dotenv
+WECOM_BOT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的机器人Key
+```
 
-网页测试若返回企业微信错误，系统会区分“获取Token”和“发送消息”，保留上游 `errcode`、
-记录最近成功/失败状态并隐藏 `access_token`。网络错误和企业微信5xx会短暂重试，配置类错误不会无效重试。常见排查顺序：
+在目标企业微信群中添加机器人、复制完整Webhook，然后运行配置脚本并在网页“预警”页点击
+“测试群机器人”。系统不再读取旧版 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET`、
+`WECOM_TO_USER`，也不调用获取Token和自建应用消息接口，因此不需要企业可信IP。
 
-1. 可信IP或出口IP；
-2. CorpID和应用Secret是否属于同一企业与同一应用；
-3. AgentID是否为该自建应用的数字ID；
-4. UserID是否为通讯录账号而不是姓名/手机号；
-5. 接收成员是否位于应用可见范围。
-
-常见错误：`60020`为企业可信IP，`40013`为CorpID，`40001`为Secret，`40003`为UserID，
-`81013`为应用可见范围。HTTP 502只是StockTopic对上游发送失败的包装，具体原因以页面中的
-`errcode`为准。
+Webhook中的Key等同密码：只能放在权限为600的`.env`中，不要发送到聊天、日志、Issue或GitHub。
+系统只接受`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...`格式，错误信息在进入页面或日志前会隐藏Key。网络错误、429和上游5xx会短暂重试；`93000`通常表示Webhook或机器人Key无效。
 
 若旧版本出现 `CERTIFICATE_VERIFY_FAILED`，先更新项目并重新运行安装脚本。系统统一使用随项目
 安装的 `certifi` 根证书库，并保持主机名与证书链校验开启；不要使用关闭SSL校验的代码绕过。

@@ -70,7 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.8.0",
+        version="0.9.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -308,12 +308,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/admin/wecom-test")
     async def wecom_test():
         if not service.notifier.enabled:
-            raise HTTPException(status_code=503, detail="WeCom not configured")
+            raise HTTPException(status_code=503, detail="WeCom group robot not configured")
         try:
             await asyncio.to_thread(
                 service.notifier.send_text,
                 "StockTopic连接测试",
-                "Mac mini题材情绪系统已成功连接企业微信。",
+                "Mac mini题材情绪系统已成功连接企业微信群机器人。",
             )
         except Exception as error:
             safe = _safe_integration_error(error)
@@ -321,7 +321,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.warning("WeCom connection test failed: %s", safe)
             raise HTTPException(
                 status_code=502,
-                detail=f"企业微信发送失败：{safe}",
+                detail=f"企业微信群机器人发送失败：{safe}",
             ) from error
         service.database.set_metadata("last_wecom_error", "")
         service.database.set_metadata(
@@ -400,4 +400,5 @@ def _safe_integration_error(error: Exception) -> str:
     message = str(error)
     message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
+    message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)
     return message[:500] or type(error).__name__

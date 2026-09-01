@@ -7,7 +7,6 @@ from fastapi.testclient import TestClient
 
 from stocktopic.api import create_app
 from stocktopic.config import Settings
-from stocktopic.wecom import WeComDeliveryError
 
 
 class FailingWeComNotifier:
@@ -15,7 +14,8 @@ class FailingWeComNotifier:
 
     def send_text(self, title, body):
         raise RuntimeError(
-            "request failed: access_token=sensitive-token&errcode=60020 not allowed from ip"
+            "request failed: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?"
+            "key=sensitive-bot-key&errcode=93000 invalid webhook url"
         )
 
 
@@ -36,7 +36,7 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.8.0" in page.text
+        assert "app.js?v=0.9.0" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
@@ -144,11 +144,5 @@ def test_api_auth_and_csrf_guard():
         app.state.service.notifier = FailingWeComNotifier()
         response = client.post("/api/v1/admin/wecom-test", headers=basic)
         assert response.status_code == 502
-        assert "errcode=60020" in response.json()["detail"]
-        assert "sensitive-token" not in response.text
-
-
-def test_wecom_trusted_ip_error_has_actionable_guidance():
-    error = WeComDeliveryError("获取Token", 60020, "not allow to access from your ip")
-    assert "errcode=60020" in str(error)
-    assert "企业可信IP" in str(error)
+        assert "errcode=93000" in response.json()["detail"]
+        assert "sensitive-bot-key" not in response.text

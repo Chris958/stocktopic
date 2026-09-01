@@ -51,10 +51,7 @@ class Settings:
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-5.5"
-    wecom_corp_id: str = ""
-    wecom_agent_id: str = ""
-    wecom_secret: str = ""
-    wecom_to_user: str = "@all"
+    wecom_bot_webhook: str = ""
     admin_username: str = "admin"
     admin_password: str = ""
     app_api_token: str = ""
@@ -98,10 +95,7 @@ class Settings:
                 or "https://api.openai.com/v1"
             ),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5").strip(),
-            wecom_corp_id=os.getenv("WECOM_CORP_ID", "").strip(),
-            wecom_agent_id=os.getenv("WECOM_AGENT_ID", "").strip(),
-            wecom_secret=os.getenv("WECOM_SECRET", "").strip(),
-            wecom_to_user=os.getenv("WECOM_TO_USER", "@all").strip(),
+            wecom_bot_webhook=os.getenv("WECOM_BOT_WEBHOOK", "").strip(),
             admin_username=os.getenv("ADMIN_USERNAME", "admin").strip(),
             admin_password=admin_password,
             app_api_token=app_api_token,
@@ -120,11 +114,8 @@ class Settings:
         warnings: list[str] = []
         if not self.openai_api_key:
             warnings.append("OPENAI_API_KEY missing: AI naming and news explanation disabled")
-        wecom = (self.wecom_corp_id, self.wecom_agent_id, self.wecom_secret)
-        if any(wecom) and not all(wecom):
-            warnings.append("WeCom configuration incomplete: push disabled")
-        elif not all(wecom):
-            warnings.append("WeCom not configured: push disabled")
+        if not self.wecom_bot_webhook:
+            warnings.append("WeCom group robot webhook not configured: push disabled")
         return warnings
 
 

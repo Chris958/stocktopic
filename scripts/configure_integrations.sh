@@ -13,4 +13,4 @@ fi
 launchctl kickstart -k "gui/$(id -u)/com.chris958.stocktopic"
 
 echo "服务已重启。请运行：$APP_DIR/scripts/doctor.sh"
-echo "然后在网页预警页面点击“测试企业微信”。"
+echo "然后在网页预警页面点击“测试群机器人”。"
