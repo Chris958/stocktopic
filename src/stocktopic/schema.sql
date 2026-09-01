@@ -384,3 +384,26 @@ CREATE TABLE IF NOT EXISTS level2_reports (
 
 CREATE INDEX IF NOT EXISTS idx_level2_reports_generated
 ON level2_reports(generated_at DESC);
+
+CREATE TABLE IF NOT EXISTS fund_flow_updates (
+    owner_type TEXT NOT NULL,
+    owner_id INTEGER NOT NULL,
+    code TEXT NOT NULL,
+    name TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    slot TEXT NOT NULL,
+    priority_rank INTEGER,
+    status TEXT NOT NULL DEFAULT 'pending',
+    started_at TEXT,
+    completed_at TEXT,
+    error TEXT,
+    report_json TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(owner_type, owner_id, code, trade_date, slot)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fund_flow_updates_owner
+ON fund_flow_updates(owner_type, owner_id, trade_date DESC, slot);
+
+CREATE INDEX IF NOT EXISTS idx_fund_flow_updates_status
+ON fund_flow_updates(trade_date, slot, status, code);

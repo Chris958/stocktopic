@@ -51,8 +51,10 @@ class StockTopicService:
         self._collector_lock = threading.Lock()
         self._discovery_lock = threading.Lock()
         self._ai_lock = threading.Lock()
+        self._fund_flow_lock = threading.Lock()
         self._ai_inflight: set[int] = set()
         self._discovery_inflight: set[str] = set()
+        self._fund_flow_inflight: set[str] = set()
         self._startup_backfill_pending = True
         self._stop_event = asyncio.Event()
 
@@ -250,6 +252,8 @@ class StockTopicService:
         trade_date: str | None = None,
         now: datetime | None = None,
         force_refresh: bool = False,
+        end_time: str | None = None,
+        include_order_history: bool = True,
     ) -> dict[str, Any]:
         if not self.level2_provider.enabled:
             raise RuntimeError("猫爪数据尚未配置，请先运行configure_integrations.sh")
@@ -287,7 +291,7 @@ class StockTopicService:
         attempted_dates: list[str] = []
         last_no_data_error: NumcatError | None = None
         trades: list[dict[str, Any]] = []
-        orders: list[dict[str, Any]] | None = None
+        orders: list[dict[str, Any]] | None = None if include_order_history else []
         order_error = ""
         compact_date = ""
         for candidate_date in candidate_dates:
@@ -298,15 +302,23 @@ class StockTopicService:
                     cached["cache_hit"] = True
                     return cached
             trade_error: NumcatError | None = None
-            candidate_orders: list[dict[str, Any]] | None = None
+            candidate_orders: list[dict[str, Any]] | None = (
+                None if include_order_history else []
+            )
             candidate_order_error = ""
-            if candidate_date != compact:
+            if candidate_date != compact and include_order_history:
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     trade_future = executor.submit(
-                        self.level2_provider.trade_history, short_code, candidate_date
+                        self.level2_provider.trade_history,
+                        short_code,
+                        candidate_date,
+                        end_time=end_time,
                     )
                     order_future = executor.submit(
-                        self.level2_provider.order_history, short_code, candidate_date
+                        self.level2_provider.order_history,
+                        short_code,
+                        candidate_date,
+                        end_time=end_time,
                     )
                     try:
                         candidate_trades = trade_future.result()
@@ -321,7 +333,7 @@ class StockTopicService:
             else:
                 try:
                     candidate_trades = self.level2_provider.trade_history(
-                        short_code, candidate_date
+                        short_code, candidate_date, end_time=end_time
                     )
                 except NumcatError as error:
                     candidate_trades = []
@@ -362,7 +374,9 @@ class StockTopicService:
         partial = compact_date == compact and now.time() < time(15, 5)
         if orders is None:
             try:
-                orders = self.level2_provider.order_history(short_code, compact_date)
+                orders = self.level2_provider.order_history(
+                    short_code, compact_date, end_time=end_time
+                )
             except NumcatError as error:
                 orders = []
                 order_error = _safe_error(error)
@@ -379,6 +393,11 @@ class StockTopicService:
             partial=partial,
         )
         report["cache_hit"] = False
+        report["window_end_time"] = end_time
+        if not include_order_history:
+            report["limitations"].append(
+                "定时批处理仅下载逐笔成交并按主动方委托号聚合，未重复下载逐笔委托审计表"
+            )
         if order_error:
             report["raw_profile"]["order_history_error"] = order_error
             report["limitations"].append(
@@ -386,6 +405,188 @@ class StockTopicService:
             )
         self.database.save_level2_report(report)
         return report
+
+    def refresh_fund_flows(
+        self,
+        slot: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if slot not in {"morning", "close"}:
+            raise ValueError("资金流向时段必须是morning或close")
+        current = self.clock.normalize(now or self.clock.china_now())
+        trade_date = current.strftime("%Y%m%d")
+        if self.database.calendar_status(trade_date) is not True:
+            return {"status": "idle", "reason": "not_open_trade_day", "slot": slot}
+        run_id = self.database.begin_run(f"fund_flow_{slot}")
+        with self._fund_flow_lock:
+            try:
+                targets = self._fund_flow_targets()
+                updated_at = current.isoformat(timespec="seconds")
+                self.database.prepare_fund_flow_updates(
+                    targets, trade_date, slot, updated_at
+                )
+                codes = sorted({str(item["code"]) for item in targets})
+                if not codes:
+                    self.database.finish_run(run_id, "success", 0, "no active targets")
+                    return {
+                        "status": "success",
+                        "slot": slot,
+                        "trade_date": trade_date,
+                        "target_count": 0,
+                        "stock_count": 0,
+                        "completed_count": 0,
+                        "failed_count": 0,
+                    }
+                self.database.mark_fund_flow_codes_running(
+                    codes, trade_date, slot, updated_at
+                )
+                completed = 0
+                failures: dict[str, str] = {}
+                end_time = "10:00:00" if slot == "morning" else None
+                if not self.level2_provider.enabled:
+                    error = "猫爪数据尚未配置"
+                    for code in codes:
+                        failures[code] = error
+                        self.database.finish_fund_flow_code(
+                            code,
+                            trade_date,
+                            slot,
+                            completed_at=updated_at,
+                            error=error,
+                        )
+                else:
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        futures = {
+                            executor.submit(
+                                self.analyze_level2_stock,
+                                code,
+                                trade_date,
+                                current,
+                                True,
+                                end_time,
+                                False,
+                            ): code
+                            for code in codes
+                        }
+                        for future in as_completed(futures):
+                            code = futures[future]
+                            finished_at = self.clock.china_now().isoformat(timespec="seconds")
+                            try:
+                                report = future.result()
+                            except Exception as error:
+                                message = _safe_error(error)
+                                failures[code] = message
+                                self.database.finish_fund_flow_code(
+                                    code,
+                                    trade_date,
+                                    slot,
+                                    completed_at=finished_at,
+                                    error=message,
+                                )
+                            else:
+                                completed += 1
+                                self.database.finish_fund_flow_code(
+                                    code,
+                                    trade_date,
+                                    slot,
+                                    completed_at=finished_at,
+                                    report=report,
+                                )
+                status = "success" if not failures else "degraded"
+                detail = json.dumps(
+                    {
+                        "slot": slot,
+                        "targets": len(targets),
+                        "unique_stocks": len(codes),
+                        "completed": completed,
+                        "failed": len(failures),
+                    },
+                    ensure_ascii=False,
+                )
+                self.database.finish_run(run_id, status, completed, detail)
+                return {
+                    "status": status,
+                    "slot": slot,
+                    "trade_date": trade_date,
+                    "target_count": len(targets),
+                    "stock_count": len(codes),
+                    "completed_count": completed,
+                    "failed_count": len(failures),
+                    "failures": failures,
+                }
+            except Exception as error:
+                self.database.finish_run(run_id, "failed", detail=_safe_error(error))
+                raise
+
+    def _fund_flow_targets(self) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        for theme in self.database.list_themes():
+            if str(theme.get("status")) not in {"watching", "confirmed"}:
+                continue
+            members = [
+                item for item in theme.get("members", []) if item.get("active", 1)
+            ]
+            members.sort(key=lambda item: int(item.get("leader_rank") or 9999))
+            for rank, member in enumerate(members[:5], 1):
+                targets.append(
+                    {
+                        "owner_type": "theme",
+                        "owner_id": int(theme["id"]),
+                        "code": str(member["code"]),
+                        "name": str(member.get("name") or member["code"]),
+                        "priority_rank": rank,
+                    }
+                )
+        for entry in self.database.list_test_pool_entries():
+            if str(entry.get("status")) not in {"awaiting_buy", "awaiting_exit"}:
+                continue
+            targets.append(
+                {
+                    "owner_type": "test_pool",
+                    "owner_id": int(entry["id"]),
+                    "code": str(entry["code"]),
+                    "name": str(entry.get("name") or entry["code"]),
+                    "priority_rank": None,
+                }
+            )
+        unique: dict[tuple[str, int, str], dict[str, Any]] = {}
+        for item in targets:
+            unique[(str(item["owner_type"]), int(item["owner_id"]), str(item["code"]))] = item
+        return list(unique.values())
+
+    def fund_flow_display_context(self, now: datetime | None = None) -> tuple[str, str]:
+        current = self.clock.normalize(now or self.clock.china_now())
+        compact = current.strftime("%Y%m%d")
+        dates = self.database.open_trade_dates(compact, 1)
+        trade_date = dates[0] if dates else compact
+        slot = (
+            "close"
+            if trade_date != compact or current.time() >= time(17, 10)
+            else "morning"
+        )
+        return trade_date, slot
+
+    @staticmethod
+    def _due_fund_flow_slots(now: datetime, is_open_day: bool | None) -> list[str]:
+        if is_open_day is not True:
+            return []
+        slots = []
+        if now.time() >= time(10, 0):
+            slots.append("morning")
+        if now.time() >= time(17, 10):
+            slots.append("close")
+        return slots
+
+    def _run_scheduled_fund_flow(
+        self, slot: str, now: datetime, schedule_key: str
+    ) -> None:
+        try:
+            result = self.refresh_fund_flows(slot, now)
+            self.database.set_metadata(schedule_key, json.dumps(result, ensure_ascii=False))
+        except Exception:
+            logger.exception("Scheduled fund-flow update failed: %s", slot)
+        finally:
+            self._fund_flow_inflight.discard(schedule_key)
 
     def sync_kpl_events(self, trade_date: str) -> int:
         run_id = self.database.begin_run("sync_kpl_events")
@@ -1319,6 +1520,25 @@ class StockTopicService:
                         asyncio.to_thread(self.refresh_test_pool_prices, now),
                         name=f"test-pool-refresh-{settlement_slot.replace(':', '')}",
                     )
+            if now.second < 25:
+                for fund_slot in self._due_fund_flow_slots(now, calendar):
+                    schedule_key = (
+                        f"fund_flow_refresh:{now.date().isoformat()}:{fund_slot}"
+                    )
+                    if (
+                        schedule_key not in self._fund_flow_inflight
+                        and not self.database.get_metadata(schedule_key)
+                    ):
+                        self._fund_flow_inflight.add(schedule_key)
+                        asyncio.create_task(
+                            asyncio.to_thread(
+                                self._run_scheduled_fund_flow,
+                                fund_slot,
+                                now,
+                                schedule_key,
+                            ),
+                            name=f"fund-flow-{fund_slot}-{now.strftime('%Y%m%d')}",
+                        )
             current = self.clock.china_now()
             delay = max(0.25, 10.0 - (current.second % 10) - current.microsecond / 1_000_000)
             try:
@@ -1357,6 +1577,12 @@ class StockTopicService:
             "test_pool": {
                 "total_count": self.database.test_pool_summary()["total_count"],
                 "latest_price_sync": self.database.latest_run("sync_daily_prices"),
+            },
+            "fund_flow": {
+                "schedule": ["10:00", "17:10"],
+                "theme_top_n": 5,
+                "latest_morning": self.database.latest_run("fund_flow_morning"),
+                "latest_close": self.database.latest_run("fund_flow_close"),
             },
             "latest_catalyst_refresh_started_at": self.database.get_metadata(
                 "last_catalyst_refresh_started_at"

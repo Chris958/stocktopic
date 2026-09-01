@@ -1,4 +1,5 @@
 let savedSections = {};
+let fundFlowPollTimer = null;
 try { savedSections = JSON.parse(localStorage.getItem('stocktopicSections') || '{}'); }
 catch (_) { savedSections = {}; }
 const state = {
@@ -218,6 +219,7 @@ function render() {
   renderBacktest();
   renderAlerts(alerts);
   updateSectionCount();
+  scheduleFundFlowPoll(themes, backtest.entries || []);
 }
 
 function renderCandidates() {
@@ -342,6 +344,7 @@ function themeCard(theme, mode) {
     ${summaryMetric('上涨家数', `${summary.up_count ?? 0}/${summary.member_count ?? activeMembers.length}`)}
     ${summaryMetric('涨停 / 创业板强势 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.chinext_growth_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
   </div>`;
+  const fundFlowHtml = themeFundFlow(theme);
   const stockKey = `theme-${theme.id}-stocks`;
   const newsKey = `theme-${theme.id}-news`;
   const stockDetails = `<details class="fold-section" data-collapse-key="${stockKey}" ${state.expanded[stockKey] ? 'open' : ''}>
@@ -369,7 +372,7 @@ function themeCard(theme, mode) {
   }
   return `<article class="theme-card ${theme.pinned ? 'pinned-theme' : ''} stage-${escapeHtml(theme.theme_level || theme.status)}">
     <div class="theme-head"><div><div class="theme-title">${theme.pinned ? '<span class="pin-mark">置顶</span>' : ''}${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
-    ${statusHtml}${scoreHtml}${reviewHtml}${decisionHtml}${summaryHtml}${stockDetails}
+    ${statusHtml}${scoreHtml}${reviewHtml}${decisionHtml}${summaryHtml}${fundFlowHtml}${stockDetails}
     <p class="theme-footnote">Day 1 ${escapeHtml(theme.day1_date)} · 行情 ${escapeHtml(formatDataTime(summary.market_data_at))} · 市值 ${escapeHtml(formatDate(summary.metric_trade_date))}</p>
     ${newsDetails}${actions}
   </article>`;
@@ -386,6 +389,10 @@ function memberRow(member, position, returnLabel, themeId, tracked) {
   const board = member.board_status || (member.latest_board_tag ? `近期${member.latest_board_tag}` : '—');
   const sequence = member.limit_sequence ? `第${member.limit_sequence}封板` : '';
   const follow = Number(member.follow_count_30m || 0);
+  const flow = member.fund_flow;
+  const flowState = flow
+    ? `<small class="member-flow-state ${escapeHtml(flow.status)}" title="${escapeHtml(flow.error || '')}">${escapeHtml(fundFlowStatusLabel(flow.status, true))}</small>`
+    : '';
   return `<div class="member-row ${leader ? 'leader-row' : ''}" role="row" title="${escapeHtml(reasons)}">
     <div class="member-name" role="cell"><span class="member-rank">${position}</span><span><strong>${escapeHtml(member.name)}</strong><small>${escapeHtml(member.code)}</small></span>${leader ? '<b class="leader-badge">龙头候选</b>' : ''}</div>
     <div class="member-number ${valueClass(current)}" role="cell"><strong>${formatPct(current)}</strong><small>${escapeHtml(formatPrice(member.current_price))}</small></div>
@@ -393,8 +400,40 @@ function memberRow(member, position, returnLabel, themeId, tracked) {
     <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, timeLabel(member.first_limit_time)].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
     <div class="member-number neutral" role="cell"><strong>${formatMarketCap(member.circ_mv_billion)}</strong><small>${member.turnover_rate != null ? `换手 ${Number(member.turnover_rate).toFixed(1)}%` : '亿元'}</small></div>
     <div class="drive-cell" role="cell"><strong>${follow}</strong><small>30分钟跟随</small></div>
-    <div class="track-cell" role="cell"><button class="track-button level2-button pressable" data-action="level2-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}">资金</button><button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>
+    <div class="track-cell" role="cell"><div><button class="track-button level2-button pressable" data-action="level2-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}">资金</button><button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>${flowState}</div>
   </div>`;
+}
+
+function themeFundFlow(theme) {
+  const flow = theme.fund_flow;
+  if (!flow || !['watching', 'confirmed', 'archived'].includes(theme.status)) return '';
+  const summary = flow.summary;
+  const progress = `${flow.completed_count || 0}/${flow.target_count || 0}`;
+  const slot = flow.slot === 'close' ? '收盘后' : '10:00';
+  const failed = Number(flow.failed_count || 0);
+  const detail = flow.status === 'stopped'
+    ? '题材已移除，不再更新池内股票'
+    : `${slot} · TOP5 ${progress}${failed ? ` · ${failed}只暂未取得数据` : ''}`;
+  const metrics = summary ? `<div class="fund-flow-metrics">
+    ${fundFlowMetric('50W+主动买入', summary.large?.buy_ratio_pct == null ? '—' : `${Number(summary.large.buy_ratio_pct).toFixed(0)}%`)}
+    ${fundFlowMetric('100W+主动买入', summary.super_large?.buy_ratio_pct == null ? '—' : `${Number(summary.super_large.buy_ratio_pct).toFixed(0)}%`)}
+    ${fundFlowMetric('TOP5大单净流入', formatFlowMoney(summary.large?.net_inflow, true), valueClass(summary.large?.net_inflow))}
+  </div>` : '';
+  return `<section class="theme-fund-flow status-${escapeHtml(flow.status)}" aria-live="polite">
+    <div class="fund-flow-head"><span class="flow-status-dot" aria-hidden="true"></span><div><strong>${escapeHtml(fundFlowStatusLabel(flow.status))}</strong><small>${escapeHtml(detail)}</small></div></div>
+    ${metrics}
+  </section>`;
+}
+
+function fundFlowMetric(label, value, className = '') {
+  return `<div class="${escapeHtml(className)}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function fundFlowStatusLabel(status, short = false) {
+  if (status === 'running') return short ? '资金更新中' : '资金流向更新中';
+  if (status === 'completed') return short ? '资金已更新' : '资金流向已更新';
+  if (status === 'stopped') return short ? '资金已停止' : '资金流向已停止';
+  return short ? '资金未更新' : '资金流向未更新';
 }
 
 async function analyzeLevel2(theme, code, button, forceRefresh = false) {
@@ -545,8 +584,13 @@ function backtestRow(item) {
   const source = item.buy_confirmation_source === 'realtime_rt_k'
     ? '盘中确认 · 待日线校准'
     : item.buy_confirmation_source === 'official_daily' ? '正式日线已确认' : formatDate(item.planned_buy_date);
+  const flow = item.fund_flow || { status: 'pending' };
+  const flowSummary = flow.summary;
+  const flowDetail = flowSummary
+    ? `50W+买入 ${flowSummary.large_buy_ratio_pct == null ? '—' : `${Number(flowSummary.large_buy_ratio_pct).toFixed(0)}%`} · 净 ${formatFlowMoney(flowSummary.large_net_inflow, true)}`
+    : flow.status === 'stopped' ? '已卖出或未成交，不再更新' : flow.error || (flow.slot === 'close' ? '等待收盘后任务' : '等待10:00任务');
   return `<article class="backtest-row status-${escapeHtml(item.status)}">
-    <div class="backtest-stock"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.code)} · 信号 ${escapeHtml(formatDate(item.signal_trade_date))}</small><div>${sources}</div></div>
+    <div class="backtest-stock"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.code)} · 信号 ${escapeHtml(formatDate(item.signal_trade_date))}</small><div>${sources}</div><p class="backtest-flow-state ${escapeHtml(flow.status)}"><span></span>${escapeHtml(fundFlowStatusLabel(flow.status))}<small>${escapeHtml(flowDetail)}</small></p></div>
     <div class="backtest-step"><span>T+1 买入</span><strong>${escapeHtml(formatPrice(item.buy_open))}</strong><small>${escapeHtml(source)}</small></div>
     <div class="backtest-step"><span>${delay ? '顺延退出' : 'T+2 开盘'}</span><strong>${escapeHtml(formatPrice(item.exit_open))}</strong><small>${escapeHtml(formatDate(exitDate))}${delay ? ` · 延迟${delay}日` : ''}</small></div>
     <div class="backtest-return ${valueClass(standardValue)}"><span>${holding ? '持仓涨跌' : '标准收益'}</span><strong>${escapeHtml(formatPct(standardValue))}</strong><small>${holding ? `${formatPrice(item.current_price)} · ${liveTime}` : soldPending ? `盘中确认 · ${liveTime}` : '开盘卖出'}</small></div>
@@ -563,6 +607,13 @@ function backtestStatus(status) {
 function backtestStatusDetail(status) {
   return ({ awaiting_buy: '等待T+1开盘行情', awaiting_exit: '盘中跟踪，等待退出日结算', awaiting_settlement: 'T+2开盘已卖出，等待正式日线', success: '开盘卖出高于买入价',
     failure: '开盘卖出低于买入价', flat: '开盘卖出等于买入价', unfilled: '不计入统计' })[status] || '';
+}
+
+function scheduleFundFlowPoll(themes, entries) {
+  if (fundFlowPollTimer) clearTimeout(fundFlowPollTimer);
+  const updating = themes.some(theme => theme.fund_flow?.status === 'running')
+    || entries.some(item => item.fund_flow?.status === 'running');
+  if (updating) fundFlowPollTimer = setTimeout(() => load(), 15000);
 }
 
 function catalystContent(items, explanation) {

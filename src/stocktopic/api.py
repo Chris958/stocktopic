@@ -77,7 +77,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="StockTopic API",
-        version="0.10.2",
+        version="0.11.0",
         docs_url=None,
         redoc_url=None,
         lifespan=lifespan,
@@ -170,11 +170,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/v1/dashboard")
     async def dashboard():
+        now = service.clock.china_now()
+        flow_date, flow_slot = service.fund_flow_display_context(now)
+        themes = service.database.list_themes()
+        service.database.attach_theme_fund_flows(themes, flow_date, flow_slot)
         return {
             "health": await asyncio.to_thread(service.health),
-            "themes": service.database.list_themes(),
+            "themes": themes,
             "alerts": service.database.recent_alerts(100),
-            "backtest": service.test_pool.dashboard(service.clock.china_now()),
+            "backtest": service.test_pool.dashboard(now),
         }
 
     @app.get("/api/v1/test-pool")
@@ -316,6 +320,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/v1/admin/refresh-test-pool")
     async def refresh_test_pool():
         return await asyncio.to_thread(service.refresh_test_pool_prices)
+
+    @app.post("/api/v1/admin/refresh-fund-flow/{slot}")
+    async def refresh_fund_flow(slot: str):
+        if slot not in {"morning", "close"}:
+            raise HTTPException(status_code=400, detail="slot必须是morning或close")
+        return await asyncio.to_thread(service.refresh_fund_flows, slot)
 
     @app.post("/api/v1/admin/run-once")
     async def run_once():

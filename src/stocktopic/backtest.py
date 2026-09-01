@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from typing import Any
 
 from .db import Database, utc_now_iso
@@ -346,9 +346,17 @@ class PaperTradeTracker:
     def dashboard(self, now: datetime) -> dict[str, Any]:
         compact = now.strftime("%Y%m%d")
         dates = self.database.open_trade_dates(compact, 1)
+        flow_date = dates[0] if dates else compact
+        flow_slot = (
+            "close"
+            if flow_date != compact or now.time() >= time(17, 10)
+            else "morning"
+        )
+        entries = self.database.list_test_pool_entries()
+        self.database.attach_test_pool_fund_flows(entries, flow_date, flow_slot)
         return {
             "current_signal_trade_date": dates[0] if dates else None,
-            "entries": self.database.list_test_pool_entries(),
+            "entries": entries,
             "summary": self.database.test_pool_summary(),
             "rules": {
                 "buy": "信号日后首个交易日开盘买入",

@@ -356,6 +356,22 @@ h1 {
 .market-summary span, .market-summary strong { display: block; }
 .market-summary span { color: var(--secondary); font-size: 9px; }
 .market-summary strong { margin-top: 4px; overflow: hidden; font-size: 17px; font-weight: 590; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.theme-fund-flow { display: grid; gap: 11px; margin-top: 12px; padding: 12px 13px; border-radius: 14px; background: var(--surface-soft); }
+.fund-flow-head { display: flex; align-items: center; gap: 9px; }
+.fund-flow-head > div { display: grid; gap: 2px; min-width: 0; }
+.fund-flow-head strong { font-size: 11px; font-weight: 620; }
+.fund-flow-head small { overflow: hidden; color: var(--secondary); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.flow-status-dot, .backtest-flow-state > span { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--tertiary); }
+.status-running .flow-status-dot, .backtest-flow-state.running > span { background: var(--blue); animation: status-pulse 1.4s ease-in-out infinite; }
+.status-completed .flow-status-dot, .backtest-flow-state.completed > span { background: var(--fall); }
+.status-stopped .flow-status-dot, .backtest-flow-state.stopped > span { background: var(--tertiary); }
+.fund-flow-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+.fund-flow-metrics > div { min-width: 0; padding: 9px 10px; border-radius: 11px; background: var(--surface); }
+.fund-flow-metrics span, .fund-flow-metrics strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fund-flow-metrics span { color: var(--secondary); font-size: 8px; }
+.fund-flow-metrics strong { margin-top: 3px; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.fund-flow-metrics .rise strong { color: var(--rise); }
+.fund-flow-metrics .fall strong { color: var(--fall); }
 .member-section-head, .catalyst-head { display: flex; align-items: end; justify-content: space-between; gap: 14px; margin-top: 21px; }
 .member-section-head > div, .catalyst-head > div { display: grid; gap: 2px; }
 .member-section-head strong, .catalyst-head strong { font-size: 13px; font-weight: 620; }
@@ -379,7 +395,8 @@ h1 {
 .member-number.fall strong { color: var(--fall); }
 .member-number.neutral strong { color: var(--text); }
 .drive-cell strong { color: var(--blue); }
-.track-cell { display: flex; justify-content: end; gap: 5px; }
+.track-cell { display: grid; justify-items: end; gap: 4px; }
+.track-cell > div { display: flex; justify-content: end; gap: 5px; }
 .track-button {
   min-width: 58px;
   min-height: 32px;
@@ -392,6 +409,9 @@ h1 {
 }
 .track-button:disabled { cursor: default; opacity: .5; }
 .level2-button { color: var(--rise); background: var(--rise-soft); }
+.member-flow-state { color: var(--secondary); font-size: 8px; font-weight: 580; }
+.member-flow-state.running { color: var(--blue); }
+.member-flow-state.completed { color: var(--fall); }
 .catalyst-panel { margin-top: 17px; padding: 15px; border-radius: 15px; background: var(--surface-soft); }
 .fold-section { margin-top: 17px; border-radius: 15px; background: var(--surface-soft); }
 .fold-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 54px; padding: 11px 14px; cursor: pointer; list-style: none; border-radius: inherit; user-select: none; }
@@ -463,6 +483,10 @@ h1 {
 .backtest-stock > small, .backtest-step > span, .backtest-step > small, .backtest-return > span, .backtest-return > small, .backtest-outcome > small { display: block; margin-top: 3px; overflow: hidden; color: var(--secondary); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .backtest-stock > div { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .backtest-stock > div span { max-width: 120px; padding: 3px 6px; overflow: hidden; border-radius: 6px; background: var(--surface-soft); color: var(--secondary); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.backtest-flow-state { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; margin: 7px 0 0; color: var(--secondary); font-size: 9px; font-weight: 600; }
+.backtest-flow-state > small { flex-basis: 100%; margin-left: 12px; overflow: hidden; color: var(--secondary); font-size: 8px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
+.backtest-flow-state.running { color: var(--blue); }
+.backtest-flow-state.completed { color: var(--fall); }
 .backtest-return.rise strong { color: var(--rise); }
 .backtest-return.fall strong { color: var(--fall); }
 .outcome-badge { display: inline-block; padding: 4px 7px; border-radius: 7px; background: var(--surface-soft); color: var(--secondary); font-size: 9px; font-weight: 650; }
@@ -502,6 +526,8 @@ h1 {
 .inline-action p { margin: 0; color: var(--secondary); font-size: 12px; }
 .empty-state { grid-column: 1 / -1; padding: 64px 20px; border: 1px dashed var(--separator); border-radius: var(--radius-card); color: var(--secondary); text-align: center; }
 .empty-state strong { display: block; margin-bottom: 5px; color: var(--text); font-size: 15px; font-weight: 570; }
+
+@keyframes status-pulse { 0%, 100% { opacity: .45; transform: scale(.82); } 50% { opacity: 1; transform: scale(1); } }
 
 .skeleton-card { height: 290px; border-radius: var(--radius-card); background: linear-gradient(100deg, var(--surface-soft) 20%, var(--surface) 42%, var(--surface-soft) 64%); background-size: 200% 100%; animation: shimmer 1.4s infinite linear; }
 .mobile-tabbar { display: none; }
@@ -726,7 +752,9 @@ h1 {
   .member-rank { flex-basis: 20px; }
   .member-number strong, .board-cell strong, .drive-cell strong { font-size: 11px; }
   .track-cell { grid-column: 1 / -1; }
+  .track-cell, .track-cell > div { width: 100%; }
   .track-button { width: 50%; }
+  .fund-flow-metrics { grid-template-columns: 1fr; }
   .level2-sheet { left: 0; bottom: 0; width: 100%; max-height: calc(94vh - var(--safe-bottom)); padding: 18px 18px calc(18px + var(--safe-bottom)); transform: none; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 26px 26px 0 0; animation-name: mobile-sheet-in; }
   .backtest-summary { grid-template-columns: 1fr 1fr; }
   .backtest-summary article:last-child { grid-column: 1 / -1; }
