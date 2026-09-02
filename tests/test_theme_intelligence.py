@@ -38,9 +38,24 @@ def test_graph_first_grouping_prefers_structured_theme_membership():
     graph = ThemeKnowledgeGraph()
     graph.ingest_kpl_concept(
         [
-            {"ts_code": "000001.SZ", "con_code": "C1", "con_name": "商业航天"},
-            {"ts_code": "000002.SZ", "con_code": "C1", "con_name": "商业航天"},
-            {"ts_code": "000003.SZ", "con_code": "C1", "con_name": "商业航天"},
+            {
+                "ts_code": "C1",
+                "name": "商业航天",
+                "con_code": "000001.SZ",
+                "con_name": "股票1",
+            },
+            {
+                "ts_code": "C1",
+                "name": "商业航天",
+                "con_code": "000002.SZ",
+                "con_name": "股票2",
+            },
+            {
+                "ts_code": "C1",
+                "name": "商业航天",
+                "con_code": "000003.SZ",
+                "con_name": "股票3",
+            },
         ]
     )
     clusters = graph.common_nodes(["000001.SZ", "000002.SZ", "000003.SZ"], 2)
