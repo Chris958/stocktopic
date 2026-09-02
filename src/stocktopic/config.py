@@ -40,7 +40,9 @@ class Settings:
     anomaly_display_min_severity: float = 68.0
     anomaly_discovery_min_severity: float = 65.0
     maximum_candidates_per_run: int = 0
-    minimum_limit_touches: int = 4
+    # Kept for service compatibility: this is now the local early-discovery floor.
+    minimum_limit_touches: int = 2
+    formal_limit_touches: int = 4
     novelty_lookback_trade_days: int = 60
     novelty_confidence_threshold: float = 70.0
     catalyst_confidence_threshold: float = 65.0
@@ -72,6 +74,19 @@ class Settings:
         admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
         app_api_token = os.getenv("APP_API_TOKEN", "").strip()
         openai_model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip()
+        early_limit_touches = max(2, int(os.getenv("EARLY_LIMIT_TOUCHES", "2")))
+        # MINIMUM_LIMIT_TOUCHES=4 existed in previous installs. Preserve it as a
+        # backwards-compatible formal threshold instead of letting it block the new
+        # 2-3 stock observation layer.
+        formal_limit_touches = max(
+            4,
+            int(
+                os.getenv(
+                    "FORMAL_LIMIT_TOUCHES",
+                    os.getenv("MINIMUM_LIMIT_TOUCHES", "4"),
+                )
+            ),
+        )
         if require_secrets and not admin_password:
             raise RuntimeError("Missing required environment variable: ADMIN_PASSWORD")
         if require_secrets and not app_api_token:
@@ -85,7 +100,8 @@ class Settings:
             anomaly_display_min_severity=float(os.getenv("ANOMALY_DISPLAY_MIN_SEVERITY", "68")),
             anomaly_discovery_min_severity=float(os.getenv("ANOMALY_DISCOVERY_MIN_SEVERITY", "65")),
             maximum_candidates_per_run=int(os.getenv("MAXIMUM_CANDIDATES_PER_RUN", "0")),
-            minimum_limit_touches=int(os.getenv("MINIMUM_LIMIT_TOUCHES", "4")),
+            minimum_limit_touches=early_limit_touches,
+            formal_limit_touches=formal_limit_touches,
             novelty_lookback_trade_days=int(os.getenv("NOVELTY_LOOKBACK_TRADE_DAYS", "60")),
             novelty_confidence_threshold=float(os.getenv("NOVELTY_CONFIDENCE_THRESHOLD", "70")),
             catalyst_confidence_threshold=float(os.getenv("CATALYST_CONFIDENCE_THRESHOLD", "65")),
