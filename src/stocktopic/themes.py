@@ -6,18 +6,21 @@ from typing import Any
 
 from .db import Database
 from .domain import CandidateStatus
+from .theme_intelligence import cluster_metrics, discovery_stage
 
 
 class ThemeDiscovery:
-    """Discover only shared themes with enough same-day limit-up touches."""
+    """Discover early theme resonance while keeping four touches as formal gate."""
 
     def __init__(
         self,
         database: Database,
         minimum_limit_touches: int = 4,
+        minimum_early_touches: int = 2,
     ):
         self.database = database
         self.minimum_limit_touches = minimum_limit_touches
+        self.minimum_early_touches = minimum_early_touches
 
     def discover(self, now: datetime) -> list[int]:
         return self.discover_for_date(now.strftime("%Y%m%d"), now)
@@ -31,13 +34,29 @@ class ThemeDiscovery:
         eligible = semantic_clusters
         if eligible is None:
             eligible = self.database.kpl_theme_clusters(trade_date)
-        eligible = [
-            item
-            for item in eligible
-            if int(item.get("touch_count") or 0) >= self.minimum_limit_touches
-        ]
-        eligible.sort(
+
+        prepared: list[dict[str, Any]] = []
+        for raw in eligible:
+            item = dict(raw)
+            touch_count = int(item.get("touch_count") or 0)
+            if touch_count < self.minimum_early_touches:
+                continue
+            metrics = cluster_metrics(item)
+            stage = discovery_stage(
+                touch_count,
+                float(metrics["synchronization_score"]),
+                float(item.get("cluster_confidence") or 0),
+            )
+            if stage == "noise":
+                continue
+            item["intelligence_metrics"] = metrics
+            item["discovery_stage"] = stage
+            prepared.append(item)
+
+        prepared.sort(
             key=lambda item: (
+                1 if item.get("discovery_stage") == "formal_candidate" else 0,
+                float(item.get("intelligence_metrics", {}).get("synchronization_score") or 0),
                 float(item.get("cluster_confidence") or 0),
                 int(item.get("touch_count") or 0),
                 int(item.get("sealed_count") or 0),
@@ -47,15 +66,17 @@ class ThemeDiscovery:
         )
 
         candidate_ids: list[int] = []
-        for item in eligible:
+        for item in prepared:
             item["codes"] = {str(member["code"]) for member in item["members"]}
             tag = str(item["tag"])
             member_reasons = dict(item.get("member_reasons") or {})
+            metrics = dict(item.get("intelligence_metrics") or {})
+            stage = str(item.get("discovery_stage") or "early_observation")
+
+            # Keep the fingerprint stable while a 2-3 stock early cluster grows into
+            # a >=4-stock formal candidate on the same trading day.
             fingerprint = hashlib.sha256(
-                (
-                    f"event-cluster-v3|{trade_date}|{tag}|"
-                    + ",".join(sorted(item["codes"]))
-                ).encode()
+                f"event-cluster-v4|{trade_date}|{tag}".encode()
             ).hexdigest()
             ordered = sorted(
                 item["members"],
@@ -83,6 +104,10 @@ class ThemeDiscovery:
                         "trade_date": trade_date,
                         "cluster_method": item.get("cluster_method", "exact_tag"),
                         "common_logic": item.get("common_logic"),
+                        "discovery_stage": stage,
+                        "synchronization_score": metrics.get("synchronization_score"),
+                        "breadth_score": metrics.get("breadth_score"),
+                        "median_pct": metrics.get("median_pct"),
                     },
                 }
                 for member in ordered
@@ -92,12 +117,21 @@ class ThemeDiscovery:
             grouping_reason = (
                 "由涨停原因、题材标签、题材成分与新闻催化语义归并。"
                 if method == "semantic_event"
-                else "由开盘啦共同标签归并。"
+                else "由结构化题材标签优先归并，外部语义仅用于补全。"
+            )
+            stage_reason = (
+                "已达到4只触板正式确认门槛，进入AI准入审查。"
+                if stage == "formal_candidate"
+                else "当前为2-3只异常共振的早期观察层，暂不触发正式AI准入。"
             )
             reason = (
                 f"{trade_date}共同事件“{tag}”有{item['touch_count']}只股票形成强势共识；"
                 f"封板{item['sealed_count']}只、创业板涨幅超10%"
                 f"{int(item.get('growth_count') or 0)}只、炸板{item['failed_count']}只。"
+                f"共振度{float(metrics.get('synchronization_score') or 0):.1f}，"
+                f"广度{float(metrics.get('breadth_score') or 0):.1f}，"
+                f"中位数涨幅{float(metrics.get('median_pct') or 0):.2f}%。"
+                + stage_reason
                 + (f"共同逻辑：{common_logic}。" if common_logic else "")
                 + grouping_reason
             )
@@ -113,6 +147,9 @@ class ThemeDiscovery:
                     second=0,
                     microsecond=0,
                 )
+            admission_status = (
+                "awaiting_ai" if stage == "formal_candidate" else "early_observation"
+            )
             theme_id = self.database.upsert_candidate(
                 fingerprint=fingerprint,
                 provisional_name=f"{tag}待审",
@@ -122,7 +159,7 @@ class ThemeDiscovery:
                 day1_date=day1,
                 discovery_reason=reason,
                 members=members,
-                admission_status="awaiting_ai",
+                admission_status=admission_status,
                 cluster_method=method,
                 cluster_confidence=float(item.get("cluster_confidence") or 0),
                 cluster_aliases=item.get("aliases") or [tag],
@@ -171,7 +208,7 @@ def candidate_for_ai(theme: dict[str, Any]) -> dict[str, Any]:
         "theme_id": theme["id"],
         "provisional_name": theme["provisional_name"],
         "shared_tag": theme["shared_tag"],
-        "discovery_reason": str(theme["discovery_reason"])[:600],
+        "discovery_reason": str(theme["discovery_reason"])[:700],
         "stocks_read_only": [
             {
                 "code": member["code"],
@@ -190,6 +227,11 @@ def candidate_for_ai(theme: dict[str, Any]) -> dict[str, Any]:
                             member.get("evidence", {}).get("source_themes") or []
                         )[:8],
                         "trade_date": member.get("evidence", {}).get("trade_date"),
+                        "synchronization_score": member.get("evidence", {}).get(
+                            "synchronization_score"
+                        ),
+                        "breadth_score": member.get("evidence", {}).get("breadth_score"),
+                        "median_pct": member.get("evidence", {}).get("median_pct"),
                     }.items()
                     if value is not None and value != "" and value != [] and value != ()
                 },
