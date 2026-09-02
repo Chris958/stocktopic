@@ -147,6 +147,41 @@ class TushareClient:
             "ts_code,name,con_name,con_code,trade_date,desc,hot_num",
         )
 
+    def dc_concept_members(self, trade_date: str, ts_code: str = "") -> list[dict[str, Any]]:
+        """Daily concept-theme graph edges (available from 2026-02-03)."""
+        params: dict[str, Any] = {"trade_date": trade_date}
+        if ts_code:
+            params["ts_code"] = ts_code
+        return self.call(
+            "dc_concept_cons",
+            params,
+            "ts_code,trade_date,name,theme_code,industry_code,industry,reason,hot_num",
+        )
+
+    def tdx_members(self, trade_date: str, board_code: str = "") -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"trade_date": trade_date}
+        if board_code:
+            params["ts_code"] = board_code
+        return self.call(
+            "tdx_member",
+            params,
+            "ts_code,trade_date,con_code,con_name",
+        )
+
+    def sw_industry_members(self, ts_code: str) -> list[dict[str, Any]]:
+        return self.call(
+            "index_member_all",
+            {"ts_code": ts_code, "is_new": "Y"},
+            "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,is_new",
+        )
+
+    def citic_industry_members(self, ts_code: str) -> list[dict[str, Any]]:
+        return self.call(
+            "ci_index_member",
+            {"ts_code": ts_code, "is_new": "Y"},
+            "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,is_new",
+        )
+
 
 def _float(value: Any) -> float:
     try:
