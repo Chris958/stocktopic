@@ -6,6 +6,7 @@ from typing import Any
 
 from .db import Database
 from .domain import CandidateStatus
+from .theme_graph import install_graph_first_ai_clustering, structured_event_clusters
 from .theme_intelligence import cluster_metrics, discovery_stage
 
 
@@ -15,12 +16,16 @@ class ThemeDiscovery:
     def __init__(
         self,
         database: Database,
-        minimum_limit_touches: int = 4,
+        minimum_limit_touches: int = 2,
         minimum_early_touches: int = 2,
     ):
         self.database = database
-        self.minimum_limit_touches = minimum_limit_touches
-        self.minimum_early_touches = minimum_early_touches
+        # The service still passes this legacy setting as its discovery floor.
+        # Formal confirmation remains hard-coded at four touches in discovery_stage
+        # and in the graph-first AI verifier.
+        self.minimum_limit_touches = max(2, minimum_limit_touches)
+        self.minimum_early_touches = max(2, minimum_early_touches)
+        install_graph_first_ai_clustering()
 
     def discover(self, now: datetime) -> list[int]:
         return self.discover_for_date(now.strftime("%Y%m%d"), now)
@@ -33,7 +38,15 @@ class ThemeDiscovery:
     ) -> list[int]:
         eligible = semantic_clusters
         if eligible is None:
-            eligible = self.database.kpl_theme_clusters(trade_date)
+            # Even when AI is disabled/unavailable, use the persisted graph tags
+            # attached by Database.limit_touch_events before falling back to raw KPL tags.
+            graph_events = self.database.limit_touch_events(trade_date)
+            eligible = structured_event_clusters(
+                graph_events,
+                minimum_members=self.minimum_early_touches,
+            )
+            if not eligible:
+                eligible = self.database.kpl_theme_clusters(trade_date)
 
         prepared: list[dict[str, Any]] = []
         for raw in eligible:
@@ -74,7 +87,8 @@ class ThemeDiscovery:
             stage = str(item.get("discovery_stage") or "early_observation")
 
             # Keep the fingerprint stable while a 2-3 stock early cluster grows into
-            # a >=4-stock formal candidate on the same trading day.
+            # a >=4-stock formal candidate on the same trading day. Formal AI output
+            # preserves this graph anchor tag and only refines canonical_name/logic.
             fingerprint = hashlib.sha256(
                 f"event-cluster-v4|{trade_date}|{tag}".encode()
             ).hexdigest()
@@ -115,14 +129,14 @@ class ThemeDiscovery:
             common_logic = str(item.get("common_logic") or "").strip()
             method = str(item.get("cluster_method") or "exact_tag")
             grouping_reason = (
-                "由涨停原因、题材标签、题材成分与新闻催化语义归并。"
+                "先由结构化题材图谱聚合，再由外部新闻验证共同事件。"
                 if method == "semantic_event"
-                else "由结构化题材标签优先归并，外部语义仅用于补全。"
+                else "由结构化题材知识图谱确定性归并，未使用外部搜索创造成员。"
             )
             stage_reason = (
                 "已达到4只触板正式确认门槛，进入AI准入审查。"
                 if stage == "formal_candidate"
-                else "当前为2-3只异常共振的早期观察层，暂不触发正式AI准入。"
+                else "当前为2-3只异常共振的早期观察层，不调用联网AI准入。"
             )
             reason = (
                 f"{trade_date}共同事件“{tag}”有{item['touch_count']}只股票形成强势共识；"
