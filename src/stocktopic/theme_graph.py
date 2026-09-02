@@ -17,18 +17,26 @@ SOURCE_PRIORITY = {
     "external_search": 35,
 }
 
-# These labels are too broad to create a two-stock early theme by themselves.
-# They can still appear as aliases/context once a more specific graph node exists.
-BROAD_EARLY_TAGS = {
+# These labels are parent taxonomies, not investable event-level themes. They may
+# remain as aliases/context, but cannot directly become early or formal nodes.
+BROAD_PARENT_TAGS = {
     "AI",
+    "AI应用",
     "国企",
     "央企",
+    "地方国资",
     "并购",
     "并购重组",
+    "农业",
+    "医药",
+    "零售",
+    "食品饮料",
+    "消费电子",
     "化工",
     "科技",
     "消费",
     "金融",
+    "金融概念",
 }
 
 
@@ -201,7 +209,10 @@ class ThemeKnowledgeGraph:
 
 
 def structured_event_clusters(
-    events: Iterable[dict[str, Any]], minimum_members: int = 2
+    events: Iterable[dict[str, Any]],
+    minimum_members: int = 2,
+    *,
+    include_broad_parents: bool = False,
 ) -> list[dict[str, Any]]:
     """Group strong stocks by deterministic structured graph nodes.
 
@@ -252,18 +263,26 @@ def structured_event_clusters(
                 reasons[tag][code] = reason[:300]
 
     result: list[dict[str, Any]] = []
-    broad_early_tags = {item.upper() for item in BROAD_EARLY_TAGS}
+    broad_memberships = {
+        tag: set(member_weights)
+        for tag, member_weights in memberships.items()
+        if is_broad_parent_tag(tag)
+    }
     for tag, member_weights in memberships.items():
         member_codes = list(member_weights)
         if len(member_codes) < minimum_members:
             continue
         strongest = max(member_weights.values(), default=0.0)
-        # A broad label cannot create a two-stock alert by itself. Three or more
-        # simultaneous stocks may still use it as a provisional observation node.
-        if len(member_codes) == 2 and tag.upper() in broad_early_tags:
+        parent_only = is_broad_parent_tag(tag)
+        if parent_only and not include_broad_parents:
             continue
         if len(member_codes) == 2 and strongest < 88:
             continue
+        parent_tags = sorted(
+            parent
+            for parent, parent_codes in broad_memberships.items()
+            if parent == tag or set(member_codes).issubset(parent_codes)
+        )
         members = [by_code[code] for code in member_codes if code in by_code]
         sealed = sum(item.get("board_tag") == "涨停" for item in members)
         growth = sum(item.get("board_tag") == "创业板涨幅超10%" for item in members)
@@ -280,7 +299,13 @@ def structured_event_clusters(
                 "growth_count": growth,
                 "failed_count": failed,
                 "common_logic": f"结构化题材知识图谱共同节点“{tag}”，等待外部催化验证。",
-                "aliases": [tag, *sorted(aliases.get(tag, set()))[:6]],
+                "aliases": list(
+                    dict.fromkeys(
+                        [tag, *parent_tags, *sorted(aliases.get(tag, set()))[:6]]
+                    )
+                ),
+                "parent_tags": parent_tags,
+                "parent_only": parent_only,
                 "cluster_confidence": confidence,
                 "cluster_method": "knowledge_graph",
                 "catalysts": [],
@@ -329,13 +354,17 @@ def _graph_first_cluster_limit_events(
     if not self.enabled:
         raise RuntimeError("OpenAI API is not configured")
 
-    local_clusters = structured_event_clusters(events, minimum_members=max(2, minimum_members))
     allowed_codes = {
         str(item.get("code") or "").strip()
         for item in events
         if str(item.get("code") or "").strip()
     }
     formal_minimum = 4
+    local_clusters = structured_event_clusters(
+        events,
+        minimum_members=max(2, minimum_members),
+        include_broad_parents=len(allowed_codes) >= formal_minimum,
+    )
     if len(allowed_codes) < formal_minimum:
         # Critical cost-control rule: never invoke web_search/LLM for the 2-3 stock layer.
         return local_clusters
@@ -374,6 +403,7 @@ def _graph_first_cluster_limit_events(
             "member_codes": item["member_codes"],
             "cluster_confidence": item["cluster_confidence"],
             "member_reasons": item.get("member_reasons", {}),
+            "parent_only": bool(item.get("parent_only")),
         }
         for item in graph_candidates
     ]
@@ -390,6 +420,8 @@ def _graph_first_cluster_limit_events(
    它用于保证2-3只观察层升级到4只时题材ID稳定。
 2. member_codes只能来自输入股票，且至少{formal_minimum}只；不得为了凑数加入宽泛行业相关股。
 3. canonical_name可以把anchor_tag优化成更具体的新事件名，但不能改变anchor_tag。
+   如果图谱候选标记为parent_only，canonical_name必须是不同于anchor_tag的具体事件/产业逻辑；
+   农业、医药、零售、食品饮料、消费电子、地方国资、AI应用、金融概念等父级标签本身无效。
 4. 必须逐只核查涨停原因/公司业务与共同事件关系；找不到关系的股票不得纳入。
 5. 新闻只负责验证和补全图谱，不负责创造初始股票集合。
 6. 没有合格正式题材就返回空数组。
@@ -458,6 +490,12 @@ def _graph_first_cluster_limit_events(
             continue
         seen.add(signature)
         canonical_name = str(cluster.get("canonical_name") or anchor).strip()
+        anchor_is_parent = is_broad_parent_tag(anchor)
+        if anchor_is_parent and (
+            canonical_name == anchor or is_broad_parent_tag(canonical_name)
+        ):
+            continue
+        candidate_tag = canonical_name if anchor_is_parent else anchor
         logic = str(cluster.get("common_logic") or "").strip()
         if not logic:
             continue
@@ -475,12 +513,13 @@ def _graph_first_cluster_limit_events(
         ]
         result.append(
             {
-                "tag": anchor,
+                "tag": candidate_tag,
                 "canonical_name": canonical_name,
                 "common_logic": logic[:1000],
                 "member_codes": codes,
                 "member_reasons": member_reasons,
                 "aliases": list(dict.fromkeys([anchor, canonical_name, *aliases])),
+                "parent_tags": [anchor] if anchor_is_parent else [],
                 "cluster_confidence": ai_module._bounded_number(
                     cluster.get("cluster_confidence")
                 ),
@@ -501,6 +540,13 @@ def _normalize_tag(value: Any) -> str:
     if len(tag) < 2 or len(tag) > 50:
         return ""
     return tag
+
+
+def is_broad_parent_tag(value: Any) -> bool:
+    tag = _normalize_tag(value)
+    return bool(tag) and tag.casefold() in {
+        item.casefold() for item in BROAD_PARENT_TAGS
+    }
 
 
 def _number(value: Any) -> float:

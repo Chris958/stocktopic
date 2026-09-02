@@ -40,8 +40,31 @@ def test_two_stock_structured_graph_cluster_is_available_without_ai():
     assert clusters[0]["touch_count"] == 2
 
 
-def test_broad_two_stock_label_does_not_create_early_theme():
-    assert structured_event_clusters(_events(2, "AI"), minimum_members=2) == []
+def test_broad_parent_labels_never_create_local_early_or_formal_nodes():
+    broad_labels = (
+        "农业",
+        "医药",
+        "零售",
+        "食品饮料",
+        "消费电子",
+        "地方国资",
+        "AI应用",
+        "金融概念",
+    )
+    for label in broad_labels:
+        for count in (2, 3, 4):
+            assert structured_event_clusters(_events(count, label), minimum_members=2) == []
+
+
+def test_broad_parent_is_kept_as_context_for_a_specific_cluster():
+    events = _events(3, "种业审定")
+    for event in events:
+        event["themes"] = ["农业", "种业审定"]
+    clusters = structured_event_clusters(events, minimum_members=2)
+    assert len(clusters) == 1
+    assert clusters[0]["tag"] == "种业审定"
+    assert clusters[0]["parent_tags"] == ["农业"]
+    assert "农业" in clusters[0]["aliases"]
 
 
 def test_three_stock_early_layer_never_calls_web_ai():
@@ -96,6 +119,43 @@ def test_four_stock_layer_calls_ai_but_preserves_graph_anchor():
     assert clusters[0]["tag"] == "固态电池"
     assert clusters[0]["canonical_name"] == "固态电池量产提速"
     assert len(clusters[0]["member_codes"]) == 4
+
+
+def test_four_stock_broad_parent_requires_specific_ai_logic():
+    install_graph_first_ai_clustering()
+    client = OpenAIThemeExplainer("test-key", "test-model")
+    member_codes = [item["code"] for item in _events(4, "农业")]
+    canonical_name = "农业"
+
+    def fake_call(*args, **kwargs):
+        return (
+            {},
+            {
+                "clusters": [
+                    {
+                        "anchor_tag": "农业",
+                        "canonical_name": canonical_name,
+                        "common_logic": "新品种审定提速带动种业公司共同受益",
+                        "member_codes": member_codes,
+                        "member_reasons": [],
+                        "aliases": [],
+                        "cluster_confidence": 90,
+                        "catalysts": [],
+                    }
+                ]
+            },
+            [],
+        )
+
+    client._call_prompt = fake_call  # type: ignore[method-assign]
+    assert client.cluster_limit_events("20260902", _events(4, "农业"), 2) == []
+
+    canonical_name = "转基因种业审定提速"
+    clusters = client.cluster_limit_events("20260902", _events(4, "农业"), 2)
+    assert len(clusters) == 1
+    assert clusters[0]["tag"] == "转基因种业审定提速"
+    assert clusters[0]["parent_tags"] == ["农业"]
+    assert "农业" in clusters[0]["aliases"]
 
 
 def test_existing_minimum_limit_env_is_formal_only(monkeypatch):

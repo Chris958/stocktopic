@@ -6,7 +6,11 @@ from typing import Any
 
 from .db import Database
 from .domain import CandidateStatus
-from .theme_graph import install_graph_first_ai_clustering, structured_event_clusters
+from .theme_graph import (
+    install_graph_first_ai_clustering,
+    is_broad_parent_tag,
+    structured_event_clusters,
+)
 from .theme_intelligence import cluster_metrics, discovery_stage
 
 
@@ -51,6 +55,8 @@ class ThemeDiscovery:
         prepared: list[dict[str, Any]] = []
         for raw in eligible:
             item = dict(raw)
+            if is_broad_parent_tag(item.get("tag")):
+                continue
             touch_count = int(item.get("touch_count") or 0)
             if touch_count < self.minimum_early_touches:
                 continue
