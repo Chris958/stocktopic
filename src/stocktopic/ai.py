@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .http import open_url
+from .theme_graph import is_broad_parent_tag
 from .themes import candidate_for_ai
 
 logger = logging.getLogger(__name__)
@@ -227,7 +228,7 @@ class OpenAIThemeExplainer:
             )
         return {
             "model": self.model_for_task("admission_analysis"),
-            "suggested_name": str(parsed.get("suggested_name") or theme["provisional_name"]),
+            "suggested_name": _concrete_suggested_name(parsed, theme),
             "is_new_theme": _boolean(parsed.get("is_new_theme")),
             "novelty_confidence": _bounded_number(parsed.get("novelty_confidence")),
             "novelty_reason": str(parsed.get("novelty_reason") or "未提供新颖性依据"),
@@ -494,8 +495,10 @@ class OpenAIThemeExplainer:
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
+                "Accept": "application/json",
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
+                "User-Agent": "StockTopic/0.12 (+https://github.com/Chris958/stocktopic)",
             },
         )
         return self._request_json_with_retry(request)
@@ -718,6 +721,18 @@ def _boolean(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"true", "1", "yes"}
+
+
+def _concrete_suggested_name(
+    parsed: dict[str, Any], theme: dict[str, Any]
+) -> str:
+    suggested = str(parsed.get("suggested_name") or "").strip()
+    if suggested and not is_broad_parent_tag(suggested):
+        return suggested
+    shared_tag = str(theme.get("shared_tag") or "").strip()
+    if shared_tag and not is_broad_parent_tag(shared_tag):
+        return shared_tag
+    return str(theme.get("provisional_name") or shared_tag or suggested).strip()
 
 
 def _compact_evidence(value: Any) -> dict[str, Any]:

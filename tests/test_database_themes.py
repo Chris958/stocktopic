@@ -41,6 +41,34 @@ class ThemeDatabaseTests(TestCase):
         self.assertEqual(theme["status"], "pending")
         self.assertIsNone(theme["score"])
 
+    def test_broad_parent_semantic_cluster_cannot_bypass_discovery_guard(self):
+        members = [
+            {
+                "code": f"60000{i}.SH",
+                "name": f"股票{i}",
+                "board_tag": "涨停",
+                "status": "首板",
+            }
+            for i in range(4)
+        ]
+        ids = ThemeDiscovery(self.db).discover_for_date(
+            "20260902",
+            datetime(2026, 9, 2, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+            [
+                {
+                    "tag": "农业",
+                    "members": members,
+                    "touch_count": 4,
+                    "sealed_count": 4,
+                    "failed_count": 0,
+                    "cluster_confidence": 95,
+                    "cluster_method": "semantic_event",
+                }
+            ],
+        )
+        self.assertEqual(ids, [])
+        self.assertEqual(self.db.list_themes(), [])
+
     def test_ai_usage_is_aggregated_by_task_without_estimating_missing_usage(self):
         self.db.record_ai_usage(
             {

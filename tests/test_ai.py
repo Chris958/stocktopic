@@ -2,7 +2,8 @@ import urllib.error
 from unittest import TestCase
 from unittest.mock import patch
 
-from stocktopic.ai import OpenAIThemeExplainer
+from stocktopic.ai import OpenAIThemeExplainer, _concrete_suggested_name
+from stocktopic.theme_graph import install_graph_first_ai_clustering
 
 
 class JsonResponse:
@@ -42,6 +43,29 @@ class OpenAIEndpointTests(TestCase):
         with self.assertRaisesRegex(ValueError, "must not contain credentials"):
             OpenAIThemeExplainer("key", "model", "https://user:pass@provider.example/v1")
 
+    def test_openai_request_sends_json_accept_and_explicit_user_agent(self):
+        client = OpenAIThemeExplainer("key", "model", "https://relay.example/v1")
+        with patch.object(
+            client, "_request_json_with_retry", return_value={"output": []}
+        ) as sender:
+            client._request_payload({"model": "model", "input": "test"})
+
+        request = sender.call_args.args[0]
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(
+            request.get_header("User-agent"),
+            "StockTopic/0.12 (+https://github.com/Chris958/stocktopic)",
+        )
+
+    def test_broad_admission_name_falls_back_to_concrete_shared_tag(self):
+        self.assertEqual(
+            _concrete_suggested_name(
+                {"suggested_name": "医药"},
+                {"shared_tag": "创新药出海授权", "provisional_name": "创新药待审"},
+            ),
+            "创新药出海授权",
+        )
+
     def test_transient_dns_failure_is_retried_before_ai_request_fails(self):
         client = OpenAIThemeExplainer("key", "model", "https://relay.example/v1")
         error = urllib.error.URLError(OSError(8, "nodename nor servname provided"))
@@ -67,12 +91,14 @@ class OpenAIEndpointTests(TestCase):
         self.assertEqual(sleeper.call_count, 2)
 
     def test_semantic_cluster_only_accepts_input_codes_and_actual_search_urls(self):
+        install_graph_first_ai_clustering()
         client = OpenAIThemeExplainer("key", "model")
         client._call_prompt = lambda prompt, reasoning_effort, **kwargs: (
             {"output": []},
             {
                 "clusters": [
                     {
+                        "anchor_tag": "PTFE",
                         "canonical_name": "英伟达PTFE正交背板",
                         "common_logic": "Rubin Ultra背板材料升级",
                         "member_codes": [
@@ -109,11 +135,17 @@ class OpenAIEndpointTests(TestCase):
             [{"url": "https://example.com/real", "title": "真实来源"}],
         )
         events = [
-            {"code": f"60000{i}.SH", "name": f"股票{i}", "themes": [], "concept_tags": []}
+            {
+                "code": f"60000{i}.SH",
+                "name": f"股票{i}",
+                "themes": ["PTFE"],
+                "concept_tags": [],
+            }
             for i in range(4)
         ]
         clusters = client.cluster_limit_events("20260827", events, 4)
         self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["tag"], "PTFE")
         self.assertEqual(len(clusters[0]["member_codes"]), 4)
         self.assertEqual(
             clusters[0]["member_reasons"],

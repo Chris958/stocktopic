@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -9,6 +10,8 @@ from typing import Any
 
 from ..domain import Quote
 from ..http import open_url
+
+logger = logging.getLogger(__name__)
 
 
 class TushareError(RuntimeError):
@@ -141,11 +144,195 @@ class TushareClient:
         )
 
     def kpl_concept_members(self, trade_date: str) -> list[dict[str, Any]]:
-        return self.call(
+        """Return a normalized multi-source concept graph for one trading day.
+
+        The service already syncs this method once per reference day. We therefore
+        reuse that existing job to persist KPL + Eastmoney + TDX concept relations
+        into stock_tags/kpl_concept_memberships without adding a new scheduler.
+        Optional graph sources degrade independently so KPL remains the baseline.
+        """
+        rows = self._paged_call(
             "kpl_concept_cons",
             {"trade_date": trade_date},
             "ts_code,name,con_name,con_code,trade_date,desc,hot_num",
+            page_size=3000,
+            max_pages=8,
         )
+        normalized = [dict(row) for row in rows]
+
+        for loader_name, loader in (
+            ("dc_concept", self._normalized_dc_concepts),
+            ("tdx_concept", self._normalized_tdx_concepts),
+        ):
+            try:
+                normalized.extend(loader(trade_date))
+            except TushareError as error:
+                logger.warning("Optional theme graph source %s degraded: %s", loader_name, error)
+
+        return _dedupe_graph_rows(normalized)
+
+    def dc_concept_members(self, trade_date: str, ts_code: str = "") -> list[dict[str, Any]]:
+        """Daily Eastmoney concept-theme edges, available from 2026-02-03."""
+        params: dict[str, Any] = {"trade_date": trade_date}
+        if ts_code:
+            params["ts_code"] = ts_code
+        return self._paged_call(
+            "dc_concept_cons",
+            params,
+            "ts_code,trade_date,name,theme_code,industry_code,industry,reason,hot_num",
+            page_size=3000,
+            max_pages=8,
+        )
+
+    def tdx_members(self, trade_date: str, board_code: str = "") -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"trade_date": trade_date}
+        if board_code:
+            params["ts_code"] = board_code
+        return self._paged_call(
+            "tdx_member",
+            params,
+            "ts_code,trade_date,con_code,con_name",
+            page_size=3000,
+            max_pages=12,
+        )
+
+    def sw_industry_members(self, ts_code: str) -> list[dict[str, Any]]:
+        return self.call(
+            "index_member_all",
+            {"ts_code": ts_code, "is_new": "Y"},
+            "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,is_new",
+        )
+
+    def citic_industry_members(self, ts_code: str) -> list[dict[str, Any]]:
+        return self.call(
+            "ci_index_member",
+            {"ts_code": ts_code, "is_new": "Y"},
+            "l1_code,l1_name,l2_code,l2_name,l3_code,l3_name,ts_code,name,is_new",
+        )
+
+    def _normalized_dc_concepts(self, trade_date: str) -> list[dict[str, Any]]:
+        concept_rows = self._paged_call(
+            "dc_concept",
+            {"trade_date": trade_date},
+            "theme_code,trade_date,name",
+            page_size=2000,
+            max_pages=4,
+        )
+        names = {
+            str(row.get("theme_code") or "").strip(): str(row.get("name") or "").strip()
+            for row in concept_rows
+            if str(row.get("theme_code") or "").strip()
+        }
+        member_rows = self.dc_concept_members(trade_date)
+        result = []
+        for row in member_rows:
+            stock_code = str(row.get("ts_code") or "").strip()
+            theme_code = str(row.get("theme_code") or "").strip()
+            if not stock_code or not theme_code:
+                continue
+            theme_name = names.get(theme_code) or str(row.get("industry") or "").strip()
+            if not theme_name:
+                theme_name = theme_code
+            result.append(
+                {
+                    "ts_code": f"DC:{theme_code}",
+                    "name": theme_name,
+                    "con_name": str(row.get("name") or stock_code),
+                    "con_code": stock_code,
+                    "trade_date": str(row.get("trade_date") or trade_date),
+                    "desc": str(row.get("reason") or "")[:800],
+                    "hot_num": _int(row.get("hot_num")),
+                    "graph_source": "dc_concept",
+                }
+            )
+        return result
+
+    def _normalized_tdx_concepts(self, trade_date: str) -> list[dict[str, Any]]:
+        board_rows = self._paged_call(
+            "tdx_index",
+            {"trade_date": trade_date},
+            "ts_code,trade_date,name,idx_type,idx_count",
+            page_size=1000,
+            max_pages=4,
+        )
+        concept_names = {
+            str(row.get("ts_code") or "").strip(): str(row.get("name") or "").strip()
+            for row in board_rows
+            if str(row.get("ts_code") or "").strip()
+            and "概念" in str(row.get("idx_type") or "")
+        }
+        if not concept_names:
+            return []
+        member_rows = self.tdx_members(trade_date)
+        result = []
+        for row in member_rows:
+            board_code = str(row.get("ts_code") or "").strip()
+            stock_code = str(row.get("con_code") or "").strip()
+            if board_code not in concept_names or not stock_code:
+                continue
+            result.append(
+                {
+                    "ts_code": f"TDX:{board_code}",
+                    "name": concept_names[board_code],
+                    "con_name": str(row.get("con_name") or stock_code),
+                    "con_code": stock_code,
+                    "trade_date": str(row.get("trade_date") or trade_date),
+                    "desc": "通达信概念板块结构化成分",
+                    "hot_num": 0,
+                    "graph_source": "tdx_concept",
+                }
+            )
+        return result
+
+    def _paged_call(
+        self,
+        api_name: str,
+        params: Mapping[str, Any],
+        fields: str,
+        *,
+        page_size: int,
+        max_pages: int,
+    ) -> list[dict[str, Any]]:
+        """Page Tushare list APIs while safely handling endpoints that ignore offset."""
+        rows: list[dict[str, Any]] = []
+        previous_signature: tuple[str, str, int] | None = None
+        offset = 0
+        for _ in range(max_pages):
+            page_params = dict(params)
+            page_params["limit"] = page_size
+            page_params["offset"] = offset
+            page = self.call(api_name, page_params, fields)
+            if not page:
+                break
+            signature = (
+                json.dumps(page[0], sort_keys=True, ensure_ascii=False, default=str),
+                json.dumps(page[-1], sort_keys=True, ensure_ascii=False, default=str),
+                len(page),
+            )
+            if signature == previous_signature:
+                break
+            previous_signature = signature
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += len(page)
+        return rows
+
+
+def _dedupe_graph_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in rows:
+        key = (
+            str(row.get("trade_date") or ""),
+            str(row.get("ts_code") or ""),
+            str(row.get("con_code") or ""),
+        )
+        if not key[1] or not key[2] or key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
 
 
 def _float(value: Any) -> float:
