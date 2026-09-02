@@ -10,8 +10,8 @@ from .theme_intelligence import (
     core_stock_structure,
     counter_evidence,
     lifecycle_stage,
-    market_regime as classify_market_regime,
 )
+from .theme_intelligence import market_regime as classify_market_regime
 
 
 def clamp(value: float) -> float:
@@ -45,7 +45,9 @@ class ThemeScorer:
         pct = [float(quote["pct_change"]) for quote in quotes]
         leader = max(quotes, key=lambda quote: float(quote["pct_change"]))
         leader_pct = float(leader["pct_change"])
-        follower_pct = [float(q["pct_change"]) for q in quotes if q["code"] != leader["code"]]
+        follower_pct = [
+            float(q["pct_change"]) for q in quotes if q["code"] != leader["code"]
+        ]
         follower_average = mean(follower_pct) if follower_pct else 0.0
         median_pct = median(pct)
         strong_count = sum(value >= 5.0 for value in pct)
@@ -55,7 +57,9 @@ class ThemeScorer:
         breadth_ratio = up_count / len(pct)
         strong_ratio = strong_count / len(pct)
         negative_ratio = negative_count / len(pct)
-        concentration = max(0.0, leader_pct) / max(1.0, sum(max(0.0, value) for value in pct))
+        concentration = max(0.0, leader_pct) / max(
+            1.0, sum(max(0.0, value) for value in pct)
+        )
 
         trade_date = now.strftime("%Y%m%d")
         recent = self.database.recent_anomalies(now - timedelta(minutes=45))
@@ -78,7 +82,8 @@ class ThemeScorer:
             (_board_height(event.get("status")) for event in kpl_events), default=0
         )
         hard_positive = sum(
-            event["direction"] == "positive" and event["is_hard_event"] for event in member_events
+            event["direction"] == "positive" and event["is_hard_event"]
+            for event in member_events
         )
         divergence = leader_pct >= 8.0 and median_pct <= 1.5
 
@@ -90,7 +95,9 @@ class ThemeScorer:
         )
         legacy_catalyst_strength = float(theme.get("catalyst_strength") or 0.0)
         catalyst_score = self._catalyst_score(theme)
-        effective_catalyst_strength = max(legacy_catalyst_strength, catalyst_score["score"])
+        effective_catalyst_strength = max(
+            legacy_catalyst_strength, catalyst_score["score"]
+        )
         cohort_stats = self.database.cohort_stats(int(theme["id"]))
         avg_next_day_return = float(cohort_stats.get("avg_next_day_return") or 0.0)
         cohort_loss_ratio = float(cohort_stats.get("loss_ratio") or 0.0)
@@ -102,8 +109,6 @@ class ThemeScorer:
         ]
         synchronization_score = max(sync_values, default=50.0)
 
-        # Median return is the central breadth statistic. This prevents one or two
-        # limit-up stocks from making a weak theme look broad and healthy.
         breadth_score = clamp(
             breadth_ratio * 45
             + strong_ratio * 30
@@ -142,9 +147,13 @@ class ThemeScorer:
 
         market_environment = self._market_environment(trade_date)
         market_label = str(market_environment.get("label") or "震荡")
-        market_penalty = {"主升": -6, "修复": -2, "震荡": 0, "退潮": 10, "冰点": 18}.get(
-            market_label, 0
-        )
+        market_penalty = {
+            "主升": -6,
+            "修复": -2,
+            "震荡": 0,
+            "退潮": 10,
+            "冰点": 18,
+        }.get(market_label, 0)
         age_risk = min(20.0, max(0, day_number - 1) * 4.0)
         climax_risk = max(0.0, heat - 70.0) * 0.5
         negative = counter_evidence(
@@ -212,8 +221,10 @@ class ThemeScorer:
             "cohort_avg_next_day_return": round(avg_next_day_return, 3),
             "cohort_loss_ratio": round(cohort_loss_ratio, 3),
             "score_limitations": [
-                "市场环境V1使用当日涨停/炸板/跌停与连板结构，昨日涨停收益和晋级率待日线复盘层补齐",
-                "催化新颖度目前主要依据首次催化/强化催化标签，后续由准入AI补充90日历史新颖度",
+                "市场环境V1使用当日涨停/炸板/跌停与连板结构，"
+                "昨日涨停收益和晋级率待日线复盘层补齐",
+                "催化新颖度目前主要依据首次催化/强化催化标签，"
+                "后续由准入AI补充90日历史新颖度",
             ],
         }
         return {
@@ -251,12 +262,25 @@ class ThemeScorer:
             catalyst_type = str(catalyst.get("catalyst_type") or "")
             source_kind = str(catalyst.get("source_kind") or "")
             evidence = str(catalyst.get("evidence_level") or "")
+            novelty_score = (
+                88
+                if catalyst_type == "首次催化"
+                else 68
+                if catalyst_type == "强化催化"
+                else 35
+            )
+            impact_score = (
+                75
+                if source_kind
+                in {"official", "company_disclosure", "industry_primary"}
+                else 58
+            )
             items.append(
                 {
                     "source_tier": source_map.get(source_kind, "industry_media"),
                     "truth_score": truth_map.get(evidence, 55),
-                    "novelty_score": 88 if catalyst_type == "首次催化" else 68 if catalyst_type == "强化催化" else 35,
-                    "impact_score": 75 if source_kind in {"official", "company_disclosure", "industry_primary"} else 58,
+                    "novelty_score": novelty_score,
+                    "impact_score": impact_score,
                     "duration_score": _duration_score(theme.get("catalyst_duration")),
                 }
             )
@@ -303,7 +327,11 @@ class ThemeScorer:
             "yesterday_limit_return": 0.0,
             "failed_rate": failed_rate,
         }
-        return {**classify_market_regime(metrics), **metrics, "version": "v1-kpl-intraday"}
+        return {
+            **classify_market_regime(metrics),
+            **metrics,
+            "version": "v1-kpl-intraday",
+        }
 
 
 def _duration_score(value: Any) -> float:
