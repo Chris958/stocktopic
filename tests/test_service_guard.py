@@ -6,7 +6,11 @@ from zoneinfo import ZoneInfo
 
 from stocktopic.config import Settings
 from stocktopic.domain import Quote
-from stocktopic.service import StockTopicService, _admission_candidate_due
+from stocktopic.service import (
+    StockTopicService,
+    _admission_candidate_due,
+    _semantic_event_signature,
+)
 
 CN = ZoneInfo("Asia/Shanghai")
 
@@ -96,8 +100,68 @@ class ServiceGuardTests(TestCase):
         )
         self.assertEqual(
             self.service._catalyst_refresh_slot(datetime(2026, 8, 26, 14, 10, tzinfo=CN)),
-            "13:30",
+            "08:40",
         )
+
+    def test_catalyst_refresh_skips_pending_and_reassesses_only_new_watching_evidence(self):
+        def create(fingerprint, status):
+            theme_id = self.service.database.upsert_candidate(
+                fingerprint=fingerprint,
+                provisional_name=f"{fingerprint}待审",
+                shared_tag=fingerprint,
+                direction="positive",
+                discovered_at="2026-08-26T10:00:00+08:00",
+                day1_date="2026-08-26",
+                discovery_reason="4只共同强势股票",
+                members=[],
+            )
+            if status != "pending":
+                self.service.database.set_theme_status(theme_id, status, fingerprint)
+            return theme_id
+
+        watching_id = create("watching", "watching")
+        confirmed_id = create("confirmed", "confirmed")
+        pending_id = create("pending", "pending")
+        calls = []
+
+        class Explainer:
+            enabled = True
+
+            def explain(self, theme, names, existing):
+                calls.append(int(theme["id"]))
+                return {
+                    "model": "test",
+                    "suggested_name": theme["shared_tag"],
+                    "explanation": "测试",
+                    "catalyst_summary": "测试催化",
+                    "catalyst_duration": "数日",
+                    "merge_suggestions": [],
+                    "sources": [],
+                    "catalysts": [
+                        {
+                            "title": "同一催化",
+                            "summary": "同一证据不应重复触发准入",
+                            "url": "https://example.com/catalyst",
+                        }
+                    ],
+                    "raw": {},
+                }
+
+        self.service.explainer = Explainer()
+        reassessed = []
+        self.service._assess_and_admit_candidates = lambda ids: reassessed.extend(ids)
+
+        first = self.service.refresh_theme_catalysts(slot="08:40")
+        second = self.service.refresh_theme_catalysts(slot="08:40")
+        close = self.service.refresh_theme_catalysts(slot="15:30")
+
+        self.assertEqual(first["new_catalysts"], 1)
+        self.assertEqual(second["new_catalysts"], 0)
+        self.assertEqual(reassessed, [watching_id])
+        self.assertEqual(calls.count(watching_id), 3)
+        self.assertEqual(calls.count(confirmed_id), 1)
+        self.assertNotIn(pending_id, calls)
+        self.assertEqual(close["reassessed"], 0)
 
     def test_failed_ai_candidate_retries_only_after_thirty_minute_cooldown(self):
         now = datetime(2026, 8, 29, 10, 0, tzinfo=CN)
@@ -121,6 +185,32 @@ class ServiceGuardTests(TestCase):
                 },
                 now,
             )
+        )
+
+    def test_semantic_cache_ignores_board_open_close_but_not_new_reason_or_stock(self):
+        base = [
+            {
+                "code": "600000.SH",
+                "market": "主板",
+                "board_tag": "涨停",
+                "status": "首板",
+                "themes": ["PTFE"],
+                "limit_reason": "背板材料升级",
+                "concept_tags": [{"tag": "英伟达"}],
+            }
+        ]
+        changed_board = [{**base[0], "board_tag": "炸板", "status": "炸板"}]
+        changed_reason = [{**base[0], "limit_reason": "新的独立事件"}]
+        new_stock = [*base, {**base[0], "code": "600001.SH"}]
+
+        self.assertEqual(
+            _semantic_event_signature(base), _semantic_event_signature(changed_board)
+        )
+        self.assertNotEqual(
+            _semantic_event_signature(base), _semantic_event_signature(changed_reason)
+        )
+        self.assertNotEqual(
+            _semantic_event_signature(base), _semantic_event_signature(new_stock)
         )
 
     def test_auction_zero_prices_are_skipped_without_minus_one_hundred_events(self):

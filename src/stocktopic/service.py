@@ -45,6 +45,12 @@ class StockTopicService:
             settings.openai_api_key,
             settings.openai_model,
             settings.openai_base_url,
+            usage_callback=self.database.record_ai_usage,
+            task_models={
+                "catalyst_refresh": settings.openai_catalyst_model,
+                "admission_analysis": settings.openai_admission_model,
+                "semantic_event_clustering": settings.openai_cluster_model,
+            },
         )
         self.notifier = WeComNotifier(settings.wecom_bot_webhook)
         self.clock = MarketClock()
@@ -57,6 +63,12 @@ class StockTopicService:
         self._fund_flow_inflight: set[str] = set()
         self._startup_backfill_pending = True
         self._stop_event = asyncio.Event()
+
+    def _ai_model_for_task(self, task_type: str) -> str:
+        resolver = getattr(self.explainer, "model_for_task", None)
+        if callable(resolver):
+            return str(resolver(task_type))
+        return self.settings.openai_model
 
     def initialize(self) -> None:
         self.settings.ensure_directories()
@@ -638,23 +650,7 @@ class StockTopicService:
             events = self.database.limit_touch_events(trade_date)
             if len(events) < self.settings.minimum_limit_touches:
                 return []
-            signature_payload = [
-                {
-                    "code": event.get("code"),
-                    "market": event.get("market"),
-                    "board_tag": event.get("board_tag"),
-                    "status": event.get("status"),
-                    "themes": event.get("themes", []),
-                    "limit_reason": event.get("limit_reason"),
-                    "concept_tags": [
-                        item.get("tag") for item in event.get("concept_tags", [])
-                    ],
-                }
-                for event in events
-            ]
-            input_signature = hashlib.sha256(
-                json.dumps(signature_payload, ensure_ascii=False, sort_keys=True).encode()
-            ).hexdigest()
+            input_signature = _semantic_event_signature(events)
             cached = self.database.semantic_cluster_run(trade_date, input_signature)
             semantic_clusters: list[dict[str, Any]] | None = None
             if cached and cached.get("status") == "success":
@@ -674,7 +670,7 @@ class StockTopicService:
                     self.database.save_semantic_cluster_run(
                         trade_date,
                         input_signature,
-                        self.settings.openai_model,
+                        self._ai_model_for_task("semantic_event_clustering"),
                         "success",
                         semantic_clusters,
                     )
@@ -683,7 +679,7 @@ class StockTopicService:
                     self.database.save_semantic_cluster_run(
                         trade_date,
                         input_signature,
-                        self.settings.openai_model,
+                        self._ai_model_for_task("semantic_event_clustering"),
                         "failed",
                         [],
                         safe,
@@ -978,7 +974,7 @@ class StockTopicService:
                     )
                     aliases = list(theme.get("cluster_aliases") or [])
                     aliases.append(str(theme["shared_tag"]))
-                    stock_pool = self.database.eligible_members_for_tags(aliases)
+                    stock_pool = self.database.eligible_members_for_tags(aliases, limit=80)
                     item = self.explainer.assess_for_admission(theme, history, stock_pool)
                     valid_history_ids = {int(match["id"]) for match in history}
                     cited_history_ids = {
@@ -1157,14 +1153,33 @@ class StockTopicService:
             with self._ai_lock:
                 self._ai_inflight.difference_update(selected)
 
-    def refresh_theme_catalysts(self, limit: int = 8) -> dict[str, Any]:
+    def refresh_theme_catalysts(
+        self, limit: int = 8, slot: str | None = None
+    ) -> dict[str, Any]:
         if not self.explainer.enabled:
             return {"status": "disabled", "updated": 0, "new_catalysts": 0}
         themes = [
             item
             for item in self.database.list_themes()
-            if item.get("status") in {"confirmed", "watching", "pending"}
+            if item.get("status") in {"confirmed", "watching"}
         ]
+        configured_slots = sorted(
+            value.strip()
+            for value in self.settings.catalyst_refresh_hours.split(",")
+            if value.strip()
+        )
+        if slot and configured_slots:
+            first_slot = configured_slots[0]
+            last_slot = configured_slots[-1]
+            themes = [
+                item
+                for item in themes
+                if (
+                    item.get("status") == "watching"
+                    and slot in {first_slot, last_slot}
+                )
+                or (item.get("status") == "confirmed" and slot == last_slot)
+            ]
         themes.sort(
             key=lambda item: (
                 item.get("status") in {"watching", "confirmed"},
@@ -1205,6 +1220,8 @@ class StockTopicService:
         updated = 0
         inserted = 0
         failures = 0
+        reassess_ids: list[int] = []
+        selected_by_id = {int(theme["id"]): theme for theme in selected}
         try:
             with ThreadPoolExecutor(max_workers=min(3, max(1, len(selected)))) as executor:
                 futures = {
@@ -1216,6 +1233,11 @@ class StockTopicService:
                         _, inserted_count = future.result()
                         inserted += inserted_count
                         updated += 1
+                        if (
+                            inserted_count > 0
+                            and selected_by_id[theme_id].get("status") == "watching"
+                        ):
+                            reassess_ids.append(theme_id)
                     except Exception as error:
                         failures += 1
                         self._data_pull_failure("refresh_theme_catalysts", error)
@@ -1223,11 +1245,8 @@ class StockTopicService:
         finally:
             with self._ai_lock:
                 self._ai_inflight.difference_update(int(theme["id"]) for theme in selected)
-        watching_ids = [
-            int(theme["id"]) for theme in selected if theme.get("status") == "watching"
-        ]
-        if watching_ids:
-            self._assess_and_admit_candidates(watching_ids)
+        if reassess_ids:
+            self._assess_and_admit_candidates(reassess_ids)
         completed_at = self.clock.china_now().isoformat()
         self.database.set_metadata("last_catalyst_refresh_at", completed_at)
         self.database.set_metadata(
@@ -1235,10 +1254,12 @@ class StockTopicService:
             f"updated={updated},new={inserted},failed={failures}",
         )
         return {
-            "status": "success" if updated else "degraded",
+            "status": "success" if updated else ("skipped" if not selected else "degraded"),
             "updated": updated,
             "new_catalysts": inserted,
             "failed": failures,
+            "reassessed": len(reassess_ids),
+            "slot": slot,
         }
 
     def _catalyst_refresh_slot(self, now: datetime) -> str | None:
@@ -1512,7 +1533,7 @@ class StockTopicService:
                 if not self.database.get_metadata(refresh_key):
                     self.database.set_metadata(refresh_key, now.isoformat())
                     asyncio.create_task(
-                        asyncio.to_thread(self.refresh_theme_catalysts),
+                        asyncio.to_thread(self.refresh_theme_catalysts, 8, catalyst_slot),
                         name=f"catalyst-refresh-{catalyst_slot.replace(':', '')}",
                     )
             settlement_slot = now.strftime("%H:%M")
@@ -1594,6 +1615,30 @@ class StockTopicService:
             "latest_catalyst_refresh_result": self.database.get_metadata(
                 "last_catalyst_refresh_result"
             ),
+            "ai_usage": {
+                "last_24h": self.database.ai_usage_summary(
+                    (now - timedelta(days=1)).isoformat(timespec="seconds")
+                ),
+                "last_7d": self.database.ai_usage_summary(
+                    (now - timedelta(days=7)).isoformat(timespec="seconds")
+                ),
+                "policy": {
+                    "semantic_cluster_cache": "trade_date+input_signature",
+                    "watching_catalyst_refreshes_per_day": 2,
+                    "confirmed_catalyst_refreshes_per_day": 1,
+                    "pending_separate_catalyst_refresh": False,
+                    "reassess_only_when_new_catalyst": True,
+                    "models": {
+                        "catalyst_refresh": self._ai_model_for_task("catalyst_refresh"),
+                        "admission_analysis": self._ai_model_for_task(
+                            "admission_analysis"
+                        ),
+                        "semantic_event_clustering": self._ai_model_for_task(
+                            "semantic_event_clustering"
+                        ),
+                    },
+                },
+            },
             "daily_metrics_trade_date": self.database.get_metadata("daily_metrics_synced_date"),
             "latest_wecom_error": self.database.get_metadata("last_wecom_error"),
             "latest_discovery_backfill": self.database.get_metadata(
@@ -1623,6 +1668,30 @@ def _parse_board_height(status: Any) -> int:
         return 1
     digits = "".join(character for character in value if character.isdigit())
     return int(digits) if digits else 0
+
+
+def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
+    """Cache semantic membership while allowing live board status to update separately."""
+    payload = sorted(
+        (
+            {
+                "code": event.get("code"),
+                "market": event.get("market"),
+                "themes": sorted(str(value) for value in event.get("themes", []) if value),
+                "limit_reason": str(event.get("limit_reason") or "")[:240],
+                "concept_tags": sorted(
+                    str(item.get("tag"))
+                    for item in event.get("concept_tags", [])
+                    if item.get("tag")
+                ),
+            }
+            for event in events
+        ),
+        key=lambda item: str(item.get("code") or ""),
+    )
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
 
 
 def _safe_error(error: Exception) -> str:

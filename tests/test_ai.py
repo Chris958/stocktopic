@@ -25,6 +25,15 @@ class OpenAIEndpointTests(TestCase):
         client = OpenAIThemeExplainer("key", "model", "https://provider.example/openai/v1/")
         self.assertEqual(client.endpoint, "https://provider.example/openai/v1/responses")
 
+    def test_task_model_can_be_cheaper_without_lowering_admission_model(self):
+        client = OpenAIThemeExplainer(
+            "key",
+            "strong-model",
+            task_models={"catalyst_refresh": "economy-model"},
+        )
+        self.assertEqual(client.model_for_task("catalyst_refresh"), "economy-model")
+        self.assertEqual(client.model_for_task("admission_analysis"), "strong-model")
+
     def test_complete_responses_endpoint_is_not_duplicated(self):
         client = OpenAIThemeExplainer("key", "model", "https://provider.example/v1/responses/")
         self.assertEqual(client.endpoint, "https://provider.example/v1/responses")
@@ -59,7 +68,7 @@ class OpenAIEndpointTests(TestCase):
 
     def test_semantic_cluster_only_accepts_input_codes_and_actual_search_urls(self):
         client = OpenAIThemeExplainer("key", "model")
-        client._call_prompt = lambda prompt, reasoning_effort: (
+        client._call_prompt = lambda prompt, reasoning_effort, **kwargs: (
             {"output": []},
             {
                 "clusters": [
@@ -117,7 +126,7 @@ class OpenAIEndpointTests(TestCase):
         client = OpenAIThemeExplainer("key", "model")
         captured = {}
 
-        def answer(prompt, reasoning_effort):
+        def answer(prompt, reasoning_effort, **kwargs):
             captured["prompt"] = prompt
             return (
                 {"output": []},
@@ -156,3 +165,73 @@ class OpenAIEndpointTests(TestCase):
         self.assertFalse(result["is_new_theme"])
         self.assertEqual(result["within_window_match_ids"], [])
         self.assertIn("更早历史只能作为产业背景", captured["prompt"])
+
+    def test_responses_request_has_task_specific_token_controls_and_usage_recording(self):
+        recorded = []
+        client = OpenAIThemeExplainer("key", "model", usage_callback=recorded.append)
+        payloads = []
+
+        def respond(payload):
+            payloads.append(payload)
+            return {
+                "output": [
+                    {"type": "web_search_call", "action": {"sources": []}},
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "{}"}],
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 1200,
+                    "input_tokens_details": {"cached_tokens": 800},
+                    "output_tokens": 300,
+                    "output_tokens_details": {"reasoning_tokens": 120},
+                    "total_tokens": 1500,
+                },
+            }
+
+        client._request_payload = respond
+        client._call_prompt(
+            "stable prompt",
+            reasoning_effort="low",
+            task_type="catalyst_refresh",
+            subject_id="7",
+            search_context_size="low",
+            max_output_tokens=3500,
+            max_tool_calls=3,
+        )
+        self.assertEqual(payloads[0]["max_output_tokens"], 3500)
+        self.assertEqual(payloads[0]["max_tool_calls"], 3)
+        self.assertEqual(payloads[0]["prompt_cache_key"], "stocktopic:catalyst_refresh:v1")
+        self.assertEqual(payloads[0]["tools"][0]["search_context_size"], "low")
+        self.assertEqual(recorded[0]["cached_input_tokens"], 800)
+        self.assertEqual(recorded[0]["reasoning_tokens"], 120)
+        self.assertEqual(recorded[0]["web_search_calls"], 1)
+
+    def test_unsupported_optional_controls_are_negotiated_once(self):
+        client = OpenAIThemeExplainer("key", "model")
+        payloads = []
+
+        def respond(payload):
+            payloads.append(payload)
+            if len(payloads) == 1:
+                raise RuntimeError("OpenAI HTTP 400: unsupported prompt_cache_key")
+            return {"output": []}
+
+        client._request_payload = respond
+        client._call_prompt(
+            "prompt",
+            reasoning_effort="low",
+            task_type="catalyst_refresh",
+        )
+        self.assertEqual(client._request_controls_mode, "bounded")
+        self.assertNotIn("prompt_cache_key", payloads[1])
+        self.assertIn("max_output_tokens", payloads[1])
+
+        client._call_prompt(
+            "next prompt",
+            reasoning_effort="low",
+            task_type="catalyst_refresh",
+        )
+        self.assertEqual(len(payloads), 3)
+        self.assertNotIn("prompt_cache_key", payloads[2])

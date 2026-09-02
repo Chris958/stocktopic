@@ -41,6 +41,39 @@ class ThemeDatabaseTests(TestCase):
         self.assertEqual(theme["status"], "pending")
         self.assertIsNone(theme["score"])
 
+    def test_ai_usage_is_aggregated_by_task_without_estimating_missing_usage(self):
+        self.db.record_ai_usage(
+            {
+                "task_type": "catalyst_refresh",
+                "subject_id": "1",
+                "model": "test-model",
+                "prompt_chars": 1200,
+                "input_tokens": 900,
+                "cached_input_tokens": 500,
+                "output_tokens": 200,
+                "reasoning_tokens": 50,
+                "total_tokens": 1100,
+                "web_search_calls": 1,
+                "usage_reported": 1,
+                "request_controls_mode": "full",
+            }
+        )
+        self.db.record_ai_usage(
+            {
+                "task_type": "semantic_event_clustering",
+                "model": "relay-model",
+                "prompt_chars": 3000,
+                "usage_reported": 0,
+                "request_controls_mode": "legacy",
+            }
+        )
+        summary = self.db.ai_usage_summary("2000-01-01T00:00:00+00:00")
+        self.assertEqual(summary["calls"], 2)
+        self.assertEqual(summary["reported_calls"], 1)
+        self.assertEqual(summary["total_tokens"], 1100)
+        self.assertEqual(summary["prompt_chars"], 4200)
+        self.assertFalse(summary["usage_complete"])
+
     def test_confirmation_preserves_day_one(self):
         theme_id = self.create_candidate()
         discovery = ThemeDiscovery(self.db)

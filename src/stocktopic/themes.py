@@ -166,17 +166,33 @@ class ThemeDiscovery:
 
 
 def candidate_for_ai(theme: dict[str, Any]) -> dict[str, Any]:
-    """Expose existing members as immutable context to the news explainer."""
+    """Expose only decision-relevant immutable context to the news explainer."""
     return {
         "theme_id": theme["id"],
         "provisional_name": theme["provisional_name"],
         "shared_tag": theme["shared_tag"],
-        "discovery_reason": theme["discovery_reason"],
+        "discovery_reason": str(theme["discovery_reason"])[:600],
         "stocks_read_only": [
             {
                 "code": member["code"],
                 "name": member["name"],
-                "evidence": member["evidence"],
+                "evidence": {
+                    key: value
+                    for key, value in {
+                        "board_tag": member.get("evidence", {}).get("board_tag"),
+                        "limit_reason": str(
+                            member.get("evidence", {}).get("limit_reason") or ""
+                        )[:240],
+                        "aggregated_reason": str(
+                            member.get("evidence", {}).get("aggregated_reason") or ""
+                        )[:300],
+                        "source_themes": list(
+                            member.get("evidence", {}).get("source_themes") or []
+                        )[:8],
+                        "trade_date": member.get("evidence", {}).get("trade_date"),
+                    }.items()
+                    if value is not None and value != "" and value != [] and value != ()
+                },
             }
             for member in theme.get("members", [])
             if member.get("active", 1)

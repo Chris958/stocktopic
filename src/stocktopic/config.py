@@ -46,11 +46,14 @@ class Settings:
     catalyst_confidence_threshold: float = 65.0
     minimum_expected_duration_days: int = 3
     leader_upside_threshold_pct: float = 30.0
-    catalyst_refresh_hours: str = "08:40,10:30,13:30,15:30"
+    catalyst_refresh_hours: str = "08:40,15:30"
     stale_after_seconds: int = 120
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-5.5"
+    openai_catalyst_model: str = ""
+    openai_admission_model: str = ""
+    openai_cluster_model: str = ""
     numcat_api_key: str = ""
     wecom_bot_webhook: str = ""
     admin_username: str = "admin"
@@ -68,6 +71,7 @@ class Settings:
         archive_dir = Path(os.getenv("STOCKTOPIC_ARCHIVE_DIR", "./data/archive"))
         admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
         app_api_token = os.getenv("APP_API_TOKEN", "").strip()
+        openai_model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip()
         if require_secrets and not admin_password:
             raise RuntimeError("Missing required environment variable: ADMIN_PASSWORD")
         if require_secrets and not app_api_token:
@@ -88,14 +92,23 @@ class Settings:
             minimum_expected_duration_days=int(os.getenv("MINIMUM_EXPECTED_DURATION_DAYS", "3")),
             leader_upside_threshold_pct=float(os.getenv("LEADER_UPSIDE_THRESHOLD_PCT", "30")),
             catalyst_refresh_hours=os.getenv(
-                "CATALYST_REFRESH_HOURS", "08:40,10:30,13:30,15:30"
+                "CATALYST_REFRESH_HOURS", "08:40,15:30"
             ).strip(),
             openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
             openai_base_url=(
                 os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
                 or "https://api.openai.com/v1"
             ),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5").strip(),
+            openai_model=openai_model,
+            openai_catalyst_model=(
+                os.getenv("OPENAI_CATALYST_MODEL", "").strip() or openai_model
+            ),
+            openai_admission_model=(
+                os.getenv("OPENAI_ADMISSION_MODEL", "").strip() or openai_model
+            ),
+            openai_cluster_model=(
+                os.getenv("OPENAI_CLUSTER_MODEL", "").strip() or openai_model
+            ),
             numcat_api_key=os.getenv("NUMCAT_API_KEY", "").strip(),
             wecom_bot_webhook=os.getenv("WECOM_BOT_WEBHOOK", "").strip(),
             admin_username=os.getenv("ADMIN_USERNAME", "admin").strip(),

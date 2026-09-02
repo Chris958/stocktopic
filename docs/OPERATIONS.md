@@ -19,6 +19,8 @@ curl http://127.0.0.1:8765/health
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
 - `admission_policy`：当前生效的共同事件4只强势股票、主板涨停/炸板与创业板涨幅超过10%、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
 - `test_pool`：测试票池记录数量和最近一次Tushare正式日线同步任务。
+- `ai_usage`：近24小时和7天的AI调用、输入/缓存/输出/推理Token及联网搜索次数；
+  `usage_complete=false`表示中转服务没有为全部请求返回usage，不能把当前总数当作完整账单。
 
 ## 更新
 
@@ -123,3 +125,5 @@ launchctl kickstart -k gui/$(id -u)/com.chris958.stocktopic
 
 AI请求遇到DNS瞬断、连接超时、HTTP 429或上游5xx时，会按1秒、2秒间隔最多尝试3次。
 若仍失败，候选保持在“AI分析失败”状态，后台每30分钟重新审查，不需要重新创建候选。
+
+AI任务用量、预算上限、已实施降耗和分任务模型配置见[AI Token用量说明](AI_TOKEN_USAGE.md)。

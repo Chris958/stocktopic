@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from typing import Any
 
 from .http import open_url
 from .themes import candidate_for_ai
+
+logger = logging.getLogger(__name__)
 
 
 class OpenAIThemeExplainer:
@@ -21,16 +26,29 @@ class OpenAIThemeExplainer:
         model: str,
         base_url: str = default_base_url,
         timeout: float = 90.0,
+        usage_callback: Callable[[dict[str, Any]], None] | None = None,
+        task_models: dict[str, str] | None = None,
     ):
         self.api_key = api_key.strip()
         self.model = model
         self.base_url = (base_url or self.default_base_url).strip().rstrip("/")
         self.endpoint = _responses_endpoint(self.base_url)
         self.timeout = timeout
+        self.usage_callback = usage_callback
+        self.task_models = {
+            str(key): str(value).strip()
+            for key, value in (task_models or {}).items()
+            if str(value).strip()
+        }
+        self._request_controls_mode: str | None = None
+        self._request_controls_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
         return bool(self.api_key)
+
+    def model_for_task(self, task_type: str) -> str:
+        return self.task_models.get(task_type, self.model)
 
     def explain(
         self,
@@ -44,15 +62,6 @@ class OpenAIThemeExplainer:
         prompt = f"""
 你是A股题材解释引擎，不是选股模型。市场已经通过确定性规则选出了股票成员。
 禁止增加、删除、替换或决定任何股票成员，也不得输出交易建议。
-
-候选题材：
-{json.dumps(immutable_candidate, ensure_ascii=False)}
-
-系统中其他题材名称：
-{json.dumps(other_theme_names, ensure_ascii=False)}
-
-已经收录的催化（不得重复）：
-{json.dumps(existing_catalysts or [], ensure_ascii=False)}
 
 请持续搜索最近72小时、特别是最近24小时内能够解释这些股票共同异动的公开信息，
 同时覆盖海外隔夜事件。优先监管机构、政府、交易所、上市公司公告和权威媒体。
@@ -77,8 +86,21 @@ class OpenAIThemeExplainer:
     }}
   ]
 }}
+
+任务输入（只使用下列数据）：
+候选题材：{json.dumps(immutable_candidate, ensure_ascii=False)}
+其他题材名称：{json.dumps(other_theme_names[:20], ensure_ascii=False)}
+已经收录的催化（不得重复）：{json.dumps((existing_catalysts or [])[:6], ensure_ascii=False)}
 """.strip()
-        raw, parsed, sources = self._call_prompt(prompt, reasoning_effort="low")
+        raw, parsed, sources = self._call_prompt(
+            prompt,
+            reasoning_effort="low",
+            task_type="catalyst_refresh",
+            subject_id=str(theme.get("id") or ""),
+            search_context_size="low",
+            max_output_tokens=3500,
+            max_tool_calls=3,
+        )
         catalysts = _normalize_catalysts(parsed.get("catalysts"), sources)
         if not catalysts and sources:
             summary = str(parsed.get("catalyst_summary") or "公开信息可能与题材异动相关")
@@ -95,7 +117,7 @@ class OpenAIThemeExplainer:
                 for source in sources[:5]
             ]
         return {
-            "model": self.model,
+            "model": self.model_for_task("catalyst_refresh"),
             "suggested_name": str(parsed.get("suggested_name") or theme["provisional_name"]),
             "explanation": str(parsed.get("explanation") or "未生成解释"),
             "catalyst_summary": str(parsed.get("catalyst_summary") or "未找到明确催化"),
@@ -118,28 +140,26 @@ class OpenAIThemeExplainer:
             {
                 "code": member["code"],
                 "name": member["name"],
-                "evidence": member.get("evidence", {}),
+                "evidence": _compact_evidence(member.get("evidence", {})),
             }
             for member in theme.get("members", [])
             if member.get("active", 1)
+        ]
+        compact_history = [_compact_history(item) for item in historical_matches[:20]]
+        compact_stock_pool = [
+            {
+                "code": item.get("code"),
+                "name": item.get("name"),
+                "matched_tags": list(item.get("matched_tags") or [])[:8],
+            }
+            for item in eligible_stock_pool[:80]
         ]
         prompt = f"""
 你是A股“新重点题材准入审查器”。目标是排除小异动、旧题材复炒和缺乏持续性的噪声，
 不是为了尽可能多地产生题材。必须使用web_search核查最近催化及过去60个交易日的历史发酵。
 
-确定性触发证据（已经满足当日至少4只股票形成共同强势信号；主板涨停/炸板及创业板
-盘中涨幅超过10%均按规则计入）：
-{json.dumps(trigger_members, ensure_ascii=False)}
-
-候选最小共同逻辑：{json.dumps(theme.get("shared_tag"), ensure_ascii=False)}
-系统保存的60交易日历史相似题材：
-{json.dumps(historical_matches, ensure_ascii=False)}
-
-允许提议加入的股票白名单（只能从中选择，不能自行创造代码）：
-{json.dumps(eligible_stock_pool, ensure_ascii=False)}
-
 “新题材”指新的最小共同炒作逻辑或首次形成广泛资金共识；旧题材出现一条新新闻、换名、
-反复轮动，不算新题材。只有上方“系统保存的60交易日历史相似题材”可以作为窗口内复炒的
+反复轮动，不算新题材。只有下方“系统保存的60交易日历史相似题材”可以作为窗口内复炒的
 否决证据；web_search发现的更早历史只能作为产业背景，不能单独把is_new_theme判为false。
 大类概念过去出现过，但本次存在新的具体事件且首次形成当期广泛共识时，仍应判为新题材。
 持续性与30%空间必须是有催化路径的情景判断，不得伪装成确定预测。
@@ -153,7 +173,7 @@ class OpenAIThemeExplainer:
   "is_new_theme": true,
   "novelty_confidence": 0,
   "novelty_reason": "与60交易日历史的区别，或为何属于复炒",
-  "within_window_match_ids": ["判为复炒时必须填写上方系统历史题材ID，否则为空数组"],
+  "within_window_match_ids": ["判为复炒时必须填写下方系统历史题材ID，否则为空数组"],
   "catalyst_summary": "当前催化链条",
   "catalyst_confidence": 0,
   "expected_duration_days": 0,
@@ -174,8 +194,23 @@ class OpenAIThemeExplainer:
     }}
   ]
 }}
+
+任务输入（只使用下列代码和系统历史）：
+确定性触发证据（已经满足当日至少4只共同强势信号；主板涨停/炸板及创业板盘中涨幅
+超过10%均按规则计入）：{json.dumps(trigger_members, ensure_ascii=False)}
+候选最小共同逻辑：{json.dumps(theme.get("shared_tag"), ensure_ascii=False)}
+系统保存的60交易日历史相似题材：{json.dumps(compact_history, ensure_ascii=False)}
+允许提议加入的股票白名单（只能从中选择）：{json.dumps(compact_stock_pool, ensure_ascii=False)}
         """.strip()
-        raw, parsed, sources = self._call_prompt(prompt, reasoning_effort="medium")
+        raw, parsed, sources = self._call_prompt(
+            prompt,
+            reasoning_effort="medium",
+            task_type="admission_analysis",
+            subject_id=str(theme.get("id") or ""),
+            search_context_size="medium",
+            max_output_tokens=6000,
+            max_tool_calls=5,
+        )
         required = {
             "suggested_name",
             "is_new_theme",
@@ -191,7 +226,7 @@ class OpenAIThemeExplainer:
                 "AI admission response missing required fields: " + ", ".join(missing)
             )
         return {
-            "model": self.model,
+            "model": self.model_for_task("admission_analysis"),
             "suggested_name": str(parsed.get("suggested_name") or theme["provisional_name"]),
             "is_new_theme": _boolean(parsed.get("is_new_theme")),
             "novelty_confidence": _bounded_number(parsed.get("novelty_confidence")),
@@ -243,17 +278,19 @@ class OpenAIThemeExplainer:
                     "market": event.get("market"),
                     "board_tag": event.get("board_tag"),
                     "status": event.get("status"),
-                    "limit_reason": event.get("limit_reason"),
-                    "source_themes": event.get("themes", []),
+                    "limit_reason": _trim(event.get("limit_reason"), 240),
+                    "source_themes": list(event.get("themes") or [])[:8],
                     "concept_tags": [
                         item.get("tag")
-                        for item in event.get("concept_tags", [])[:10]
+                        for item in event.get("concept_tags", [])[:8]
                         if item.get("tag")
                     ],
                 }
             )
+            if len(compact_events) >= 120:
+                break
         prompt = f"""
-你是A股涨停共同事件聚类器。交易日：{trade_date}。
+你是A股涨停共同事件聚类器。
 目标是发现“同一个具体催化事件/新增产业逻辑”驱动的股票组合，而不是按标签文字完全相同分组。
 必须使用web_search核查当日及隔夜新闻。综合涨停原因、开盘啦标签、题材成分和新闻催化。
 
@@ -268,9 +305,6 @@ class OpenAIThemeExplainer:
 6. 对创业板涨幅超10%但没有开盘啦涨停原因的股票，必须用公司业务关联和当日新闻补齐原因；
    找不到确定关联就不得纳入该组合。
 7. 同一组股票不要重复输出近义题材。没有合格组合就返回空数组。
-
-输入股票：
-{json.dumps(compact_events, ensure_ascii=False)}
 
 只返回JSON对象：
 {{
@@ -296,8 +330,20 @@ class OpenAIThemeExplainer:
     }}
   ]
 }}
+
+任务输入：
+交易日：{trade_date}
+输入股票：{json.dumps(compact_events, ensure_ascii=False)}
         """.strip()
-        raw, parsed, sources = self._call_prompt(prompt, reasoning_effort="medium")
+        raw, parsed, sources = self._call_prompt(
+            prompt,
+            reasoning_effort="medium",
+            task_type="semantic_event_clustering",
+            subject_id=trade_date,
+            search_context_size="medium",
+            max_output_tokens=8000,
+            max_tool_calls=6,
+        )
         clusters = parsed.get("clusters")
         if not isinstance(clusters, list):
             raise RuntimeError("AI semantic cluster response missing clusters array")
@@ -346,23 +392,103 @@ class OpenAIThemeExplainer:
                     "cluster_method": "semantic_event",
                     "catalysts": _normalize_catalysts(cluster.get("catalysts"), sources),
                     "sources": sources,
-                    "model": self.model,
+                    "model": self.model_for_task("semantic_event_clustering"),
                     "raw": raw,
                 }
             )
         return result
 
     def _call_prompt(
-        self, prompt: str, *, reasoning_effort: str
+        self,
+        prompt: str,
+        *,
+        reasoning_effort: str,
+        task_type: str,
+        subject_id: str = "",
+        search_context_size: str = "medium",
+        max_output_tokens: int = 6000,
+        max_tool_calls: int = 5,
     ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]:
-        payload = {
-            "model": self.model,
+        request_model = self.model_for_task(task_type)
+        base_payload = {
+            "model": request_model,
             "reasoning": {"effort": reasoning_effort},
-            "tools": [{"type": "web_search", "search_context_size": "medium"}],
+            "tools": [
+                {"type": "web_search", "search_context_size": search_context_size}
+            ],
             "tool_choice": "required",
             "include": ["web_search_call.action.sources"],
             "input": prompt,
         }
+        raw, controls_mode = self._request_with_compatible_controls(
+            base_payload,
+            task_type=task_type,
+            max_output_tokens=max_output_tokens,
+            max_tool_calls=max_tool_calls,
+        )
+        self._report_usage(
+            raw, prompt, task_type, subject_id, controls_mode, request_model
+        )
+        parsed = _parse_json_object(_output_text(raw))
+        sources = _sources(raw)
+        return raw, parsed, sources
+
+    def _request_with_compatible_controls(
+        self,
+        base_payload: dict[str, Any],
+        *,
+        task_type: str,
+        max_output_tokens: int,
+        max_tool_calls: int,
+    ) -> tuple[dict[str, Any], str]:
+        mode = self._request_controls_mode
+        if mode is None:
+            with self._request_controls_lock:
+                if self._request_controls_mode is None:
+                    for candidate_mode in ("full", "bounded", "legacy"):
+                        payload = self._payload_for_mode(
+                            base_payload,
+                            candidate_mode,
+                            task_type,
+                            max_output_tokens,
+                            max_tool_calls,
+                        )
+                        try:
+                            raw = self._request_payload(payload)
+                            self._request_controls_mode = candidate_mode
+                            return raw, candidate_mode
+                        except RuntimeError as error:
+                            if "OpenAI HTTP 400" not in str(error) or candidate_mode == "legacy":
+                                raise
+                            logger.warning(
+                                "AI upstream rejected %s request controls; "
+                                "trying compatibility mode",
+                                candidate_mode,
+                            )
+                mode = self._request_controls_mode
+        mode = mode or self._request_controls_mode or "legacy"
+        payload = self._payload_for_mode(
+            base_payload, mode, task_type, max_output_tokens, max_tool_calls
+        )
+        return self._request_payload(payload), mode
+
+    @staticmethod
+    def _payload_for_mode(
+        base_payload: dict[str, Any],
+        mode: str,
+        task_type: str,
+        max_output_tokens: int,
+        max_tool_calls: int,
+    ) -> dict[str, Any]:
+        payload = dict(base_payload)
+        if mode in {"full", "bounded"}:
+            payload["max_output_tokens"] = max_output_tokens
+        if mode == "full":
+            payload["max_tool_calls"] = max_tool_calls
+            payload["prompt_cache_key"] = f"stocktopic:{task_type}:v1"
+        return payload
+
+    def _request_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
             self.endpoint,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -372,10 +498,53 @@ class OpenAIThemeExplainer:
                 "Content-Type": "application/json",
             },
         )
-        raw = self._request_json_with_retry(request)
-        parsed = _parse_json_object(_output_text(raw))
-        sources = _sources(raw)
-        return raw, parsed, sources
+        return self._request_json_with_retry(request)
+
+    def _report_usage(
+        self,
+        response: dict[str, Any],
+        prompt: str,
+        task_type: str,
+        subject_id: str,
+        controls_mode: str,
+        request_model: str,
+    ) -> None:
+        if not self.usage_callback:
+            return
+        usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+        input_details = (
+            usage.get("input_tokens_details")
+            if isinstance(usage.get("input_tokens_details"), dict)
+            else {}
+        )
+        output_details = (
+            usage.get("output_tokens_details")
+            if isinstance(usage.get("output_tokens_details"), dict)
+            else {}
+        )
+        item = {
+            "task_type": task_type,
+            "subject_id": subject_id,
+            "model": request_model,
+            "prompt_chars": len(prompt),
+            "input_tokens": _integer(usage.get("input_tokens")),
+            "cached_input_tokens": _integer(input_details.get("cached_tokens")),
+            "cache_write_tokens": _integer(input_details.get("cache_write_tokens")),
+            "output_tokens": _integer(usage.get("output_tokens")),
+            "reasoning_tokens": _integer(output_details.get("reasoning_tokens")),
+            "total_tokens": _integer(usage.get("total_tokens")),
+            "web_search_calls": sum(
+                1
+                for value in response.get("output", [])
+                if value.get("type") == "web_search_call"
+            ),
+            "usage_reported": int(bool(usage)),
+            "request_controls_mode": controls_mode,
+        }
+        try:
+            self.usage_callback(item)
+        except Exception:
+            logger.exception("Failed to persist AI usage; analysis result remains valid")
 
     def _request_json_with_retry(
         self, request: urllib.request.Request, attempts: int = 3
@@ -549,3 +718,48 @@ def _boolean(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"true", "1", "yes"}
+
+
+def _compact_evidence(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    concept_tags = []
+    for item in value.get("concept_tags") or []:
+        tag = item.get("tag") if isinstance(item, dict) else item
+        if tag:
+            concept_tags.append(str(tag))
+    compact = {
+        "shared_tag": value.get("shared_tag"),
+        "source_themes": list(value.get("source_themes") or [])[:8],
+        "concept_tags": concept_tags[:8],
+        "board_tag": value.get("board_tag"),
+        "board_status": value.get("board_status"),
+        "limit_reason": _trim(value.get("limit_reason"), 240),
+        "aggregated_reason": _trim(value.get("aggregated_reason"), 300),
+        "trade_date": value.get("trade_date"),
+    }
+    return {
+        key: item
+        for key, item in compact.items()
+        if item is not None and item != "" and item != [] and item != ()
+    }
+
+
+def _compact_history(value: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "id",
+        "shared_tag",
+        "suggested_name",
+        "final_name",
+        "day1_date",
+        "status",
+        "admission_status",
+        "member_overlap",
+        "exact_tag_match",
+    )
+    return {key: value.get(key) for key in keys if value.get(key) not in {None, ""}}
+
+
+def _trim(value: Any, limit: int) -> str | None:
+    text = str(value or "").strip()
+    return text[:limit] if text else None

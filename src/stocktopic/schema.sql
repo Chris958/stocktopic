@@ -310,6 +310,27 @@ CREATE TABLE IF NOT EXISTS semantic_cluster_runs (
 CREATE INDEX IF NOT EXISTS idx_semantic_cluster_runs_date
 ON semantic_cluster_runs(trade_date, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS ai_usage_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    task_type TEXT NOT NULL,
+    subject_id TEXT,
+    model TEXT NOT NULL,
+    prompt_chars INTEGER NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
+    web_search_calls INTEGER NOT NULL DEFAULT 0,
+    usage_reported INTEGER NOT NULL DEFAULT 0,
+    request_controls_mode TEXT NOT NULL DEFAULT 'legacy'
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_usage_events_time
+ON ai_usage_events(created_at DESC, task_type);
+
 CREATE TABLE IF NOT EXISTS alerts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     dedupe_key TEXT NOT NULL UNIQUE,

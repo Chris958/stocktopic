@@ -81,6 +81,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     printf 'CATALYST_CONFIDENCE_THRESHOLD=65\n'
     printf 'MINIMUM_EXPECTED_DURATION_DAYS=3\n'
     printf 'LEADER_UPSIDE_THRESHOLD_PCT=30\n'
+    printf 'CATALYST_REFRESH_HOURS=08:40,15:30\n'
     printf 'LOG_LEVEL=INFO\n'
   } > "$APP_DIR/.env"
   chmod 600 "$APP_DIR/.env"
@@ -102,6 +103,7 @@ append_default "NOVELTY_CONFIDENCE_THRESHOLD" "70"
 append_default "CATALYST_CONFIDENCE_THRESHOLD" "65"
 append_default "MINIMUM_EXPECTED_DURATION_DAYS" "3"
 append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
+append_default "CATALYST_REFRESH_HOURS" "08:40,15:30"
 
 if ! grep -q '^NUMCAT_API_KEY=' "$APP_DIR/.env"; then
   NUMCAT_API_KEY_INPUT=""
@@ -125,6 +127,12 @@ fi
 if grep -q '^MAXIMUM_CANDIDATES_PER_RUN=4$' "$APP_DIR/.env"; then
   sed -i '' 's/^MAXIMUM_CANDIDATES_PER_RUN=4$/MAXIMUM_CANDIDATES_PER_RUN=0/' "$APP_DIR/.env"
   echo "已取消旧版每轮4个候选上限；所有达到硬门槛的候选都会保留审查记录。"
+fi
+if grep -q '^CATALYST_REFRESH_HOURS=08:40,10:30,13:30,15:30$' "$APP_DIR/.env"; then
+  sed -i '' \
+    's/^CATALYST_REFRESH_HOURS=08:40,10:30,13:30,15:30$/CATALYST_REFRESH_HOURS=08:40,15:30/' \
+    "$APP_DIR/.env"
+  echo "已将题材催化刷新从每日4次调整为早盘前和收盘后2次；正式题材仅在收盘后刷新。"
 fi
 chmod 600 "$APP_DIR/.env"
 

@@ -1037,6 +1037,77 @@ class Database:
                 ),
             )
 
+    def record_ai_usage(self, item: dict[str, Any]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO ai_usage_events(
+                    created_at, task_type, subject_id, model, prompt_chars,
+                    input_tokens, cached_input_tokens, cache_write_tokens,
+                    output_tokens, reasoning_tokens, total_tokens,
+                    web_search_calls, usage_reported, request_controls_mode
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    utc_now_iso(),
+                    str(item.get("task_type") or "unknown")[:80],
+                    str(item.get("subject_id") or "")[:120] or None,
+                    str(item.get("model") or "unknown")[:120],
+                    max(0, int(item.get("prompt_chars") or 0)),
+                    max(0, int(item.get("input_tokens") or 0)),
+                    max(0, int(item.get("cached_input_tokens") or 0)),
+                    max(0, int(item.get("cache_write_tokens") or 0)),
+                    max(0, int(item.get("output_tokens") or 0)),
+                    max(0, int(item.get("reasoning_tokens") or 0)),
+                    max(0, int(item.get("total_tokens") or 0)),
+                    max(0, int(item.get("web_search_calls") or 0)),
+                    int(bool(item.get("usage_reported"))),
+                    str(item.get("request_controls_mode") or "legacy")[:20],
+                ),
+            )
+
+    def ai_usage_summary(self, since: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT task_type,
+                       COUNT(*) AS calls,
+                       SUM(usage_reported) AS reported_calls,
+                       SUM(prompt_chars) AS prompt_chars,
+                       SUM(input_tokens) AS input_tokens,
+                       SUM(cached_input_tokens) AS cached_input_tokens,
+                       SUM(cache_write_tokens) AS cache_write_tokens,
+                       SUM(output_tokens) AS output_tokens,
+                       SUM(reasoning_tokens) AS reasoning_tokens,
+                       SUM(total_tokens) AS total_tokens,
+                       SUM(web_search_calls) AS web_search_calls
+                FROM ai_usage_events
+                WHERE created_at>=?
+                GROUP BY task_type
+                ORDER BY SUM(total_tokens) DESC, COUNT(*) DESC
+                """,
+                (since,),
+            ).fetchall()
+        by_task = [dict(row) for row in rows]
+        keys = (
+            "calls",
+            "reported_calls",
+            "prompt_chars",
+            "input_tokens",
+            "cached_input_tokens",
+            "cache_write_tokens",
+            "output_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "web_search_calls",
+        )
+        result = {key: sum(int(row.get(key) or 0) for row in by_task) for key in keys}
+        result["usage_complete"] = bool(
+            result["calls"] and result["reported_calls"] == result["calls"]
+        )
+        result["by_task"] = by_task
+        return result
+
     def historical_theme_matches(
         self,
         *,
