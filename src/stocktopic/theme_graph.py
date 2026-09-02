@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 
 SOURCE_PRIORITY = {
@@ -120,7 +121,9 @@ class ThemeKnowledgeGraph:
                         source=source,
                     )
 
-    def common_nodes(self, stock_codes: Iterable[str], minimum_members: int = 2) -> list[dict[str, Any]]:
+    def common_nodes(
+        self, stock_codes: Iterable[str], minimum_members: int = 2
+    ) -> list[dict[str, Any]]:
         memberships: dict[str, list[str]] = defaultdict(list)
         labels: dict[str, str] = {}
         weights: dict[str, float] = {}
