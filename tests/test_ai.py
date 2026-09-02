@@ -3,6 +3,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from stocktopic.ai import OpenAIThemeExplainer
+from stocktopic.theme_graph import install_graph_first_ai_clustering
 
 
 class JsonResponse:
@@ -67,12 +68,14 @@ class OpenAIEndpointTests(TestCase):
         self.assertEqual(sleeper.call_count, 2)
 
     def test_semantic_cluster_only_accepts_input_codes_and_actual_search_urls(self):
+        install_graph_first_ai_clustering()
         client = OpenAIThemeExplainer("key", "model")
         client._call_prompt = lambda prompt, reasoning_effort, **kwargs: (
             {"output": []},
             {
                 "clusters": [
                     {
+                        "anchor_tag": "PTFE",
                         "canonical_name": "英伟达PTFE正交背板",
                         "common_logic": "Rubin Ultra背板材料升级",
                         "member_codes": [
@@ -109,11 +112,17 @@ class OpenAIEndpointTests(TestCase):
             [{"url": "https://example.com/real", "title": "真实来源"}],
         )
         events = [
-            {"code": f"60000{i}.SH", "name": f"股票{i}", "themes": [], "concept_tags": []}
+            {
+                "code": f"60000{i}.SH",
+                "name": f"股票{i}",
+                "themes": ["PTFE"],
+                "concept_tags": [],
+            }
             for i in range(4)
         ]
         clusters = client.cluster_limit_events("20260827", events, 4)
         self.assertEqual(len(clusters), 1)
+        self.assertEqual(clusters[0]["tag"], "PTFE")
         self.assertEqual(len(clusters[0]["member_codes"]), 4)
         self.assertEqual(
             clusters[0]["member_reasons"],
