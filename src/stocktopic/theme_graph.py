@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 from __future__ import annotations
 
 import json
@@ -251,6 +252,7 @@ def structured_event_clusters(
                 reasons[tag][code] = reason[:300]
 
     result: list[dict[str, Any]] = []
+    broad_early_tags = {item.upper() for item in BROAD_EARLY_TAGS}
     for tag, member_weights in memberships.items():
         member_codes = list(member_weights)
         if len(member_codes) < minimum_members:
@@ -258,7 +260,7 @@ def structured_event_clusters(
         strongest = max(member_weights.values(), default=0.0)
         # A broad label cannot create a two-stock alert by itself. Three or more
         # simultaneous stocks may still use it as a provisional observation node.
-        if len(member_codes) == 2 and tag.upper() in {item.upper() for item in BROAD_EARLY_TAGS}:
+        if len(member_codes) == 2 and tag.upper() in broad_early_tags:
             continue
         if len(member_codes) == 2 and strongest < 88:
             continue
@@ -384,7 +386,8 @@ def _graph_first_cluster_limit_events(
 允许把多个相邻图谱节点合并成一个具体事件，但必须有公开信息证明它们属于同一催化链。
 
 硬约束：
-1. anchor_tag必须逐字来自“图谱候选”的anchor_tag，不得自创；它用于保证2-3只观察层升级到4只时题材ID稳定。
+1. anchor_tag必须逐字来自“图谱候选”的anchor_tag，不得自创；
+   它用于保证2-3只观察层升级到4只时题材ID稳定。
 2. member_codes只能来自输入股票，且至少{formal_minimum}只；不得为了凑数加入宽泛行业相关股。
 3. canonical_name可以把anchor_tag优化成更具体的新事件名，但不能改变anchor_tag。
 4. 必须逐只核查涨停原因/公司业务与共同事件关系；找不到关系的股票不得纳入。
