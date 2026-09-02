@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterable
 from statistics import median
-from typing import Any, Iterable
+from typing import Any
 
 
 def clamp(value: float) -> float:
@@ -99,8 +99,12 @@ def core_stock_structure(
             + max(0, pct - 5)
         )
         space_score = clamp(height * 24 + max(0, pct) * 3)
-        capacity_score = clamp(min(70, amount / 1e8 * 8) + max(0, pct) * 2 + min(15, turnover))
-        influence_score = clamp(0.45 * pioneer_score + 0.35 * space_score + 0.20 * capacity_score)
+        capacity_score = clamp(
+            min(70, amount / 1e8 * 8) + max(0, pct) * 2 + min(15, turnover)
+        )
+        influence_score = clamp(
+            0.45 * pioneer_score + 0.35 * space_score + 0.20 * capacity_score
+        )
         ranked.append(
             {
                 "code": code,
@@ -141,7 +145,13 @@ def core_stock_structure(
 def catalyst_quality(catalysts: Iterable[dict[str, Any]]) -> dict[str, Any]:
     items = list(catalysts)
     if not items:
-        return {"score": 0.0, "truth": 0.0, "novelty": 0.0, "impact": 0.0, "duration": 0.0}
+        return {
+            "score": 0.0,
+            "truth": 0.0,
+            "novelty": 0.0,
+            "impact": 0.0,
+            "duration": 0.0,
+        }
 
     source_weight = {
         "central_policy": 100,
@@ -159,8 +169,12 @@ def catalyst_quality(catalysts: Iterable[dict[str, Any]]) -> dict[str, Any]:
         tier = str(item.get("source_tier") or item.get("source_type") or "industry_media")
         truth_values.append(float(item.get("truth_score") or source_weight.get(tier, 55)))
         novelty_values.append(float(item.get("novelty_score") or 55))
-        impact_values.append(float(item.get("impact_score") or item.get("industry_impact") or 55))
-        duration_values.append(float(item.get("duration_score") or item.get("persistence_score") or 50))
+        impact_values.append(
+            float(item.get("impact_score") or item.get("industry_impact") or 55)
+        )
+        duration_values.append(
+            float(item.get("duration_score") or item.get("persistence_score") or 50)
+        )
     truth = max(truth_values)
     novelty = max(novelty_values)
     impact = max(impact_values)
