@@ -187,6 +187,27 @@ class ServiceGuardTests(TestCase):
             )
         )
 
+    def test_stale_analyzing_candidate_is_retried_after_watchdog_timeout(self):
+        now = datetime(2026, 8, 29, 10, 0, tzinfo=CN)
+        self.assertFalse(
+            _admission_candidate_due(
+                {
+                    "admission_status": "analyzing",
+                    "admission_reviewed_at": "2026-08-29T09:50:00+08:00",
+                },
+                now,
+            )
+        )
+        self.assertTrue(
+            _admission_candidate_due(
+                {
+                    "admission_status": "analyzing",
+                    "admission_reviewed_at": "2026-08-29T09:44:59+08:00",
+                },
+                now,
+            )
+        )
+
     def test_semantic_cache_ignores_board_open_close_but_not_new_reason_or_stock(self):
         base = [
             {

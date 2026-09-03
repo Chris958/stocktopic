@@ -125,5 +125,8 @@ launchctl kickstart -k gui/$(id -u)/com.chris958.stocktopic
 
 AI请求遇到DNS瞬断、连接超时、HTTP 429或上游5xx时，会按1秒、2秒间隔最多尝试3次。
 若仍失败，候选保持在“AI分析失败”状态，后台每30分钟重新审查，不需要重新创建候选。
+如果服务升级或重启时正处于AI准入请求，启动时会把遗留的`analyzing`状态恢复为
+`awaiting_ai`并立即重试；运行期间超过15分钟的孤立`analyzing`状态也会由看门狗重新调度。
+`/health.latest_ai_recovery`会记录最近一次启动恢复数量。
 
 AI任务用量、预算上限、已实施降耗和分任务模型配置见[AI Token用量说明](AI_TOKEN_USAGE.md)。

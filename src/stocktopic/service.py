@@ -73,6 +73,13 @@ class StockTopicService:
     def initialize(self) -> None:
         self.settings.ensure_directories()
         self.database.initialize()
+        recovered_ai = self.database.recover_interrupted_ai_analyses()
+        if recovered_ai:
+            self.database.set_metadata(
+                "last_ai_recovery",
+                f"{self.clock.china_now().isoformat(timespec='seconds')}|recovered={recovered_ai}",
+            )
+            logger.warning("Recovered %s interrupted AI admission analyses", recovered_ai)
         if not self.database.get_metadata("admission_v2_legacy_reclassified"):
             result = self.database.reclassify_legacy_pending(self.settings.minimum_limit_touches)
             self.database.set_metadata(
@@ -1518,8 +1525,9 @@ class StockTopicService:
             if now.second < 25:
                 candidate_ids.extend(
                     int(theme["id"])
-                    for theme in self.database.list_themes(status="pending")
-                    if _admission_candidate_due(theme, now)
+                    for theme in self.database.list_themes()
+                    if theme.get("status") in {"pending", "watching"}
+                    and _admission_candidate_due(theme, now)
                 )
                 candidate_ids = list(dict.fromkeys(candidate_ids))
                 if candidate_ids and self.explainer.enabled:
@@ -1615,6 +1623,7 @@ class StockTopicService:
             "latest_catalyst_refresh_result": self.database.get_metadata(
                 "last_catalyst_refresh_result"
             ),
+            "latest_ai_recovery": self.database.get_metadata("last_ai_recovery"),
             "ai_usage": {
                 "last_24h": self.database.ai_usage_summary(
                     (now - timedelta(days=1)).isoformat(timespec="seconds")
@@ -1733,11 +1742,22 @@ def _within_retry_cooldown(value: Any, now: datetime, *, minutes: int) -> bool:
 
 
 def _admission_candidate_due(
-    theme: dict[str, Any], now: datetime, *, retry_minutes: int = 30
+    theme: dict[str, Any],
+    now: datetime,
+    *,
+    retry_minutes: int = 30,
+    analyzing_timeout_minutes: int = 15,
 ) -> bool:
     status = str(theme.get("admission_status") or "")
     if status == "awaiting_ai":
         return True
+    if status == "analyzing":
+        reviewed_at = theme.get("admission_reviewed_at")
+        if not reviewed_at:
+            return True
+        return not _within_retry_cooldown(
+            reviewed_at, now, minutes=analyzing_timeout_minutes
+        )
     if status != "analysis_failed":
         return False
     reviewed_at = theme.get("admission_reviewed_at")

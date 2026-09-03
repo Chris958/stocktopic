@@ -1476,6 +1476,24 @@ class Database:
             if not cursor.rowcount:
                 raise KeyError(f"Theme {theme_id} not found")
 
+    def recover_interrupted_ai_analyses(self) -> int:
+        """Reset persisted in-flight states because no AI request survives a service restart."""
+        now = utc_now_iso()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE candidate_themes
+                SET admission_status='awaiting_ai',
+                    admission_reason='上次AI分析被服务重启或进程中断，已恢复并等待自动重试',
+                    admission_reviewed_at=NULL,
+                    updated_at=?
+                WHERE status IN ('pending','watching')
+                  AND admission_status='analyzing'
+                """,
+                (now,),
+            )
+        return int(cursor.rowcount)
+
     def add_validated_members(
         self, theme_id: int, members: Sequence[dict[str, Any]], seen_at: str
     ) -> int:
