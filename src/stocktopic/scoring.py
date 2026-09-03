@@ -5,13 +5,13 @@ from statistics import mean, median
 from typing import Any
 
 from .db import Database
+from .market_environment import build_market_environment
 from .theme_intelligence import (
     catalyst_quality,
     core_stock_structure,
     counter_evidence,
     lifecycle_stage,
 )
-from .theme_intelligence import market_regime as classify_market_regime
 
 
 def clamp(value: float) -> float:
@@ -221,10 +221,8 @@ class ThemeScorer:
             "cohort_avg_next_day_return": round(avg_next_day_return, 3),
             "cohort_loss_ratio": round(cohort_loss_ratio, 3),
             "score_limitations": [
-                "市场环境V1使用当日涨停/炸板/跌停与连板结构，"
-                "昨日涨停收益和晋级率待日线复盘层补齐",
                 "催化新颖度目前主要依据首次催化/强化催化标签，"
-                "后续由准入AI补充90日历史新颖度",
+                "并由准入AI补充90日历史新颖度",
             ],
         }
         return {
@@ -287,51 +285,7 @@ class ThemeScorer:
         return catalyst_quality(items)
 
     def _market_environment(self, trade_date: str) -> dict[str, Any]:
-        try:
-            with self.database.connect() as connection:
-                rows = connection.execute(
-                    """
-                    SELECT board_tag, status, COUNT(*) AS count
-                    FROM kpl_events
-                    WHERE trade_date=?
-                    GROUP BY board_tag, status
-                    """,
-                    (trade_date,),
-                ).fetchall()
-        except Exception:
-            rows = []
-        limit_up = 0
-        failed = 0
-        limit_down = 0
-        promoted = 0
-        for row in rows:
-            tag = str(row["board_tag"] or "")
-            count = int(row["count"] or 0)
-            if tag in {"涨停", "创业板涨幅超10%"}:
-                limit_up += count
-                if _board_height(row["status"]) >= 2:
-                    promoted += count
-            elif tag == "炸板":
-                failed += count
-            elif tag == "跌停":
-                limit_down += count
-        attempts = limit_up + failed
-        seal_rate = limit_up / attempts * 100 if attempts else 0.0
-        failed_rate = failed / attempts * 100 if attempts else 0.0
-        promotion_rate = promoted / limit_up * 100 if limit_up else 0.0
-        metrics = {
-            "limit_up_count": limit_up,
-            "limit_down_count": limit_down,
-            "seal_rate": seal_rate,
-            "promotion_rate": promotion_rate,
-            "yesterday_limit_return": 0.0,
-            "failed_rate": failed_rate,
-        }
-        return {
-            **classify_market_regime(metrics),
-            **metrics,
-            "version": "v1-kpl-intraday",
-        }
+        return build_market_environment(self.database, trade_date)
 
 
 def _duration_score(value: Any) -> float:
