@@ -14,6 +14,7 @@
   <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
   <link rel="stylesheet" href="/static/style.css?v=0.12.1">
+  <link rel="stylesheet" href="/static/graph-nav.css?v=1">
 </head>
 <body>
   <div class="ambient ambient-one" aria-hidden="true"></div>
@@ -28,6 +29,7 @@
       <nav class="desktop-nav" aria-label="主要页面">
         <button class="nav-item active pressable" data-view="candidates" aria-current="page">发现</button>
         <button class="nav-item pressable" data-view="confirmed">题材</button>
+        <a class="nav-item pressable graph-nav-link" href="/graph">图谱</a>
         <button class="nav-item pressable" data-view="backtest">测试票池</button>
         <button class="nav-item pressable" data-view="alerts">预警</button>
       </nav>
@@ -137,6 +139,7 @@
   <nav class="mobile-tabbar" aria-label="移动端导航">
     <button class="mobile-tab active pressable" data-view="candidates" aria-current="page"><span class="tab-icon">⌁</span><span>发现</span><b id="candidateCount">0</b></button>
     <button class="mobile-tab pressable" data-view="confirmed"><span class="tab-icon">▱</span><span>题材</span><b id="confirmedCount">0</b></button>
+    <a class="mobile-tab pressable graph-mobile-link" href="/graph"><span class="tab-icon">◇</span><span>图谱</span><b>0</b></a>
     <button class="mobile-tab pressable" data-view="backtest"><span class="tab-icon">◎</span><span>回测</span><b id="backtestCount">0</b></button>
     <button class="mobile-tab pressable" data-view="alerts"><span class="tab-icon">◌</span><span>预警</span><b id="alertCount">0</b></button>
   </nav>
