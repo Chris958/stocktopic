@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from stocktopic.data_resilience import _quote_failure_streak
+import stocktopic.data_resilience as resilience
+from stocktopic.data_resilience import (
+    _is_dependent_network_failure,
+    _quote_failure_streak,
+    _record_tushare_network_failure,
+)
 
 CN = ZoneInfo("Asia/Shanghai")
 
@@ -49,3 +54,62 @@ def test_quote_failure_streak_resets_after_long_gap():
     assert _quote_failure_streak(
         service, datetime(2026, 9, 3, 13, 0, tzinfo=CN)
     ) == 1
+
+
+def test_tushare_network_incident_aggregates_jobs_and_alerts_only_after_ten_minutes():
+    service = FakeService()
+    resilience._last_tushare_success_at = None
+    first = datetime(2026, 9, 3, 16, 49, tzinfo=CN)
+
+    state = _record_tushare_network_failure(
+        service,
+        "sync_kpl_concepts",
+        first,
+        "Tushare error network: DNS",
+    )
+    assert state["should_alert"] is False
+
+    state = _record_tushare_network_failure(
+        service,
+        "sync_daily_limits",
+        first + timedelta(minutes=1),
+        "Tushare error network: DNS",
+    )
+    assert state["should_alert"] is False
+    assert state["jobs"] == ["sync_daily_limits", "sync_kpl_concepts"]
+
+    state = _record_tushare_network_failure(
+        service,
+        "tushare_network_probe",
+        first + timedelta(minutes=11),
+        "Tushare error network: DNS",
+    )
+    assert state["should_alert"] is True
+    assert state["alerted"] is True
+
+    repeated = _record_tushare_network_failure(
+        service,
+        "sync_kpl_events",
+        first + timedelta(minutes=12),
+        "Tushare error network: DNS",
+    )
+    assert repeated["should_alert"] is False
+
+
+def test_discovery_backfill_wrapper_is_suppressed_during_recent_network_incident():
+    service = FakeService()
+    resilience._last_tushare_success_at = None
+    current = datetime(2026, 9, 3, 16, 50, tzinfo=CN)
+    _record_tushare_network_failure(
+        service,
+        "sync_kpl_events",
+        current,
+        "Tushare error network: DNS",
+    )
+
+    assert _is_dependent_network_failure(
+        service,
+        "discovery_backfill",
+        "KPL events unavailable for 20260902",
+        current + timedelta(seconds=30),
+    )

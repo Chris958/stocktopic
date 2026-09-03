@@ -146,10 +146,9 @@ class TushareClient:
     def kpl_concept_members(self, trade_date: str) -> list[dict[str, Any]]:
         """Return a normalized multi-source concept graph for one trading day.
 
-        The service already syncs this method once per reference day. We therefore
-        reuse that existing job to persist KPL + Eastmoney + TDX concept relations
-        into stock_tags/kpl_concept_memberships without adding a new scheduler.
-        Optional graph sources degrade independently so KPL remains the baseline.
+        KPL is the baseline. Eastmoney and TDX permission errors can degrade
+        independently, but network failures are re-raised so the service retries the
+        whole graph rather than silently persisting a partial snapshot.
         """
         rows = self._paged_call(
             "kpl_concept_cons",
@@ -167,6 +166,8 @@ class TushareClient:
             try:
                 normalized.extend(loader(trade_date))
             except TushareError as error:
+                if str(error.code) == "network":
+                    raise
                 logger.warning("Optional theme graph source %s degraded: %s", loader_name, error)
 
         return _dedupe_graph_rows(normalized)
