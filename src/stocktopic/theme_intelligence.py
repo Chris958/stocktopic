@@ -222,21 +222,32 @@ def counter_evidence(
 
 
 def market_regime(metrics: dict[str, Any]) -> dict[str, Any]:
+    """Classify the whole market using breadth, carry and negative-feedback data."""
     limit_up = int(metrics.get("limit_up_count") or 0)
     limit_down = int(metrics.get("limit_down_count") or 0)
     seal_rate = _float(metrics.get("seal_rate"))
     promotion_rate = _float(metrics.get("promotion_rate"))
     yesterday_return = _float(metrics.get("yesterday_limit_return"))
+    board_trade_return = _float(metrics.get("board_trade_return"))
     failed_rate = _float(metrics.get("failed_rate"))
+    max_board_height = int(metrics.get("max_board_height") or 0)
+    nuclear_button_ratio = _float(metrics.get("nuclear_button_ratio"))
+    break_board_return = _float(metrics.get("break_board_return"))
+    earth_sky_count = int(metrics.get("earth_sky_count") or 0)
 
     score = clamp(
-        35
-        + min(25, limit_up / 60 * 25)
-        - min(25, limit_down / 20 * 25)
-        + seal_rate * 0.16
-        + promotion_rate * 0.12
-        + max(-15, min(15, yesterday_return * 3))
-        - failed_rate * 0.16
+        30
+        + min(22, limit_up / 60 * 22)
+        - min(22, limit_down / 20 * 22)
+        + seal_rate * 0.15
+        + promotion_rate * 0.14
+        + max(-14, min(14, yesterday_return * 2.8))
+        + max(-10, min(10, board_trade_return * 2.0))
+        + min(8, max_board_height * 1.2)
+        - failed_rate * 0.14
+        - nuclear_button_ratio * 0.18
+        + max(-8, min(4, break_board_return * 1.5))
+        - min(8, earth_sky_count * 2)
     )
     if score >= 78:
         label = "主升"
