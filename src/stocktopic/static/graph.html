@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <title>StockTopic · 题材图谱</title>
+  <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/graph.css?v=1">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="返回题材情绪主页">
+      <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span><strong>StockTopic</strong><small>题材图谱</small></span>
+    </a>
+    <div class="top-actions">
+      <a class="ghost-button" href="/">返回主页面</a>
+      <button id="refreshGraph" class="primary-button" type="button">同步图谱</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">KPL · EASTMONEY · TDX</p>
+      <h1>题材关系图谱</h1>
+      <p>统一查看开盘啦、东方财富和通达信的题材节点、成分股与入选理由。相同题材会跨来源合并，默认折叠，需要时展开。</p>
+    </section>
+
+    <section id="stats" class="stats-grid" aria-live="polite">
+      <article><span>数据日期</span><strong id="tradeDate">—</strong></article>
+      <article><span>题材节点</span><strong id="nodeCount">—</strong></article>
+      <article><span>关联股票</span><strong id="memberCount">—</strong></article>
+      <article><span>多源共识节点</span><strong id="crossCount">—</strong></article>
+    </section>
+
+    <section class="source-strip" id="sourceStats" aria-label="图谱来源覆盖"></section>
+
+    <section class="toolbar" aria-label="图谱筛选">
+      <label class="search-box">
+        <span>搜索</span>
+        <input id="searchInput" type="search" placeholder="题材、股票、代码、入选理由" autocomplete="off">
+      </label>
+      <label>
+        <span>来源</span>
+        <select id="sourceFilter">
+          <option value="all">全部来源</option>
+          <option value="kpl">开盘啦</option>
+          <option value="dc">东方财富</option>
+          <option value="tdx">通达信</option>
+        </select>
+      </label>
+      <label>
+        <span>最少成分股</span>
+        <select id="minMembers">
+          <option value="1">1只</option>
+          <option value="2" selected>2只</option>
+          <option value="3">3只</option>
+          <option value="4">4只</option>
+          <option value="5">5只</option>
+          <option value="10">10只</option>
+        </select>
+      </label>
+      <div class="toolbar-actions">
+        <button id="expandAll" class="ghost-button" type="button">全部展开</button>
+        <button id="collapseAll" class="ghost-button" type="button">全部折叠</button>
+      </div>
+    </section>
+
+    <div id="statusLine" class="status-line" role="status">正在读取图谱…</div>
+    <section id="graphList" class="graph-list" aria-live="polite"></section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/static/graph.js?v=1" defer></script>
+</body>
+</html>
