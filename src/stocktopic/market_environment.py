@@ -15,10 +15,12 @@ def build_market_environment(database: Database, trade_date: str) -> dict[str, A
     Definitions:
     - promotion_rate: yesterday's sealed boards that remain sealed today with board height >= 2.
     - yesterday_limit_return: mean current return of yesterday's sealed boards.
-    - board_trade_return: median current return of yesterday's sealed boards (board buyer P/L proxy).
+    - board_trade_return: median current return of yesterday's sealed boards
+      (board buyer P/L proxy).
     - earth_sky_count: intraday high touched upper limit and low touched lower limit.
     - nuclear_button: yesterday's sealed boards currently <= -7% or at limit down.
-    - break_board_return: mean current return of yesterday's 2+ board stocks that failed to seal today.
+    - break_board_return: mean current return of yesterday's 2+ board stocks
+      that failed to seal today.
     """
     trade_date = str(trade_date).replace("-", "")
     previous_trade_date = database.previous_trade_date(trade_date)
