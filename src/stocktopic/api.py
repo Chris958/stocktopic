@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from .config import Settings
 from .providers import NumcatError
 from .service import StockTopicService
+from .theme_graph_view import build_theme_graph
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def authentication(request: Request, call_next):
         public_path = request.url.path in {
             "/",
+            "/graph",
             "/health",
             "/favicon.ico",
             "/api/v1/auth/login",
@@ -121,7 +123,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
-        elif request.url.path == "/" or request.url.path.startswith("/static/"):
+        elif request.url.path in {"/", "/graph"} or request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-store, must-revalidate"
         return response
 
@@ -135,6 +137,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/")
     async def dashboard_page():
         return FileResponse(static_dir / "index.html")
+
+    @app.get("/graph")
+    async def graph_page():
+        return FileResponse(static_dir / "graph.html")
 
     @app.post("/api/v1/auth/login")
     async def login(credentials: LoginRequest):
@@ -180,6 +186,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "alerts": service.database.recent_alerts(100),
             "backtest": service.test_pool.dashboard(now),
         }
+
+    @app.get("/api/v1/theme-graph")
+    async def theme_graph(
+        trade_date: str | None = None,
+        source: str = "all",
+        q: str = "",
+        min_members: int = 1,
+    ):
+        try:
+            return await asyncio.to_thread(
+                build_theme_graph,
+                service.database,
+                trade_date,
+                source=source,
+                query=q,
+                min_members=min_members,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @app.get("/api/v1/test-pool")
     async def test_pool():
@@ -326,6 +351,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if slot not in {"morning", "close"}:
             raise HTTPException(status_code=400, detail="slot必须是morning或close")
         return await asyncio.to_thread(service.refresh_fund_flows, slot)
+
+    @app.post("/api/v1/admin/refresh-theme-graph")
+    async def refresh_theme_graph():
+        now = service.clock.china_now()
+        compact = now.strftime("%Y%m%d")
+        trade_date = None
+        if service.database.calendar_status(compact) and now.hour >= 17:
+            trade_date = compact
+        if not trade_date:
+            trade_date = service.database.previous_trade_date(compact)
+        if not trade_date:
+            dates = service.database.open_trade_dates(compact, 1)
+            trade_date = dates[0] if dates else None
+        if not trade_date:
+            raise HTTPException(status_code=503, detail="交易日历尚未就绪，无法同步题材图谱")
+        rows = await asyncio.to_thread(service.sync_kpl_concepts, trade_date)
+        return {"ok": True, "trade_date": trade_date, "rows": rows}
 
     @app.post("/api/v1/admin/run-once")
     async def run_once():
