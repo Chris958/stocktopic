@@ -1,0 +1,14 @@
+.desktop-nav .graph-nav-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.mobile-tabbar .graph-mobile-link {
+  text-decoration: none;
+  color: inherit;
+}
+@media (max-width: 860px) {
+  .mobile-tabbar { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .mobile-tabbar .graph-mobile-link b { visibility: hidden; }
+}
