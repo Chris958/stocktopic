@@ -4,11 +4,14 @@ import logging
 
 import uvicorn
 
-from .api import create_app
 from .config import Settings
+from .data_resilience import install_data_resilience
 
 
 def main() -> None:
+    install_data_resilience()
+    from .api import create_app
+
     settings = Settings.from_env()
     logging.basicConfig(
         level=getattr(logging, settings.log_level, logging.INFO),
