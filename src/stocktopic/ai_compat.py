@@ -56,7 +56,8 @@ def install_ai_relay_compat() -> None:
                 if not is_unsupported_optional_control_error(error) or cached_mode == "legacy":
                     raise
                 logger.warning(
-                    "AI relay stopped accepting %s request controls; downgrading compatibility mode",
+                    "AI relay stopped accepting %s request controls; "
+                    "downgrading compatibility mode",
                     cached_mode,
                 )
                 start_index = modes.index(cached_mode) + 1
