@@ -6,10 +6,12 @@ import uvicorn
 
 from .config import Settings
 from .data_resilience import install_data_resilience
+from .theme_policy import install_theme_policy
 
 
 def main() -> None:
     install_data_resilience()
+    install_theme_policy()
     from .api import create_app
 
     settings = Settings.from_env()
