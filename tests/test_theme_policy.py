@@ -5,6 +5,9 @@ from stocktopic.theme_policy import (
     policy_assess_for_admission,
     policy_structured_event_clusters,
 )
+from stocktopic.theme_taxonomy import install_theme_taxonomy
+
+install_theme_taxonomy()
 
 
 def _event(code: str, *tags: str) -> dict:
@@ -58,7 +61,7 @@ def test_generic_raising_tag_does_not_bridge_unrelated_livestock_themes():
         _event("000004.SZ", "养殖", "白羽鸡"),
     ]
     clusters = policy_structured_event_clusters(events, minimum_members=4)
-    assert all(item["touch_count"] < 4 for item in clusters) or clusters == []
+    assert clusters == []
 
 
 def test_high_constituent_overlap_merges_non_hardcoded_nearby_nodes():
@@ -84,7 +87,7 @@ class _FakeAdmissionClient:
         return "test-model"
 
     def _call_prompt(self, prompt: str, **_kwargs):
-        assert "旧赛道新周期" in prompt
+        assert "new_cycle" in prompt
         parsed = {
             "suggested_name": "猪价反弹与产能去化周期拐点",
             "novelty_mode": "new_cycle",
