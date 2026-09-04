@@ -7,10 +7,12 @@ import uvicorn
 from .config import Settings
 from .data_resilience import install_data_resilience
 from .theme_policy import install_theme_policy
+from .theme_taxonomy import install_theme_taxonomy
 
 
 def main() -> None:
     install_data_resilience()
+    install_theme_taxonomy()
     install_theme_policy()
     from .api import create_app
 
