@@ -2,7 +2,7 @@
 
 ## 范围
 
-项目只有三类任务会调用OpenAI Responses API。Tushare行情、猫爪Level-2、资金委托分析、
+项目只有三类任务会调用OpenAI Responses API。Tushare行情、三源资金流、资金方向分析、
 测试票池、题材评分、数据库处理和企业微信群机器人推送都不消耗大模型Token；这些服务中的
 `token`或API Key只是访问凭据，配额和计费由各数据商单独决定。
 

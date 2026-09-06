@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import threading
+import time as elapsed_time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -18,9 +19,9 @@ from .backtest import PaperTradeTracker
 from .config import Settings
 from .db import Database
 from .domain import StockContext
-from .level2 import analyze_level2_orders
+from .fund_flow import EastmoneyFlowClient
 from .market_clock import MarketClock
-from .providers import NumcatClient, NumcatError, TushareClient
+from .providers import TushareClient
 from .scoring import ThemeScorer
 from .themes import ThemeDiscovery
 from .wecom import WeComNotifier
@@ -33,7 +34,7 @@ class StockTopicService:
         self.settings = settings
         self.database = Database(settings.db_path, settings.archive_dir)
         self.provider = TushareClient(settings.tushare_token)
-        self.level2_provider = NumcatClient(settings.numcat_api_key)
+        self.flow_provider = EastmoneyFlowClient()
         self.detector = AnomalyDetector()
         self.discovery = ThemeDiscovery(
             self.database,
@@ -265,347 +266,168 @@ class StockTopicService:
         current = self.clock.normalize(now or self.clock.china_now())
         return self.test_pool.add(theme_id, code, current)
 
-    def analyze_level2_stock(
-        self,
-        code: str,
-        trade_date: str | None = None,
-        now: datetime | None = None,
-        force_refresh: bool = False,
-        end_time: str | None = None,
-        include_order_history: bool = True,
-    ) -> dict[str, Any]:
-        if not self.level2_provider.enabled:
-            raise RuntimeError("猫爪数据尚未配置，请先运行configure_integrations.sh")
-        normalized_code = _normalize_stock_code(code)
-        universe = self.database.active_stock_map()
-        stock = universe.get(normalized_code)
-        if not stock:
-            raise ValueError(f"股票不在当前监控名单：{normalized_code}")
-        now = self.clock.normalize(now or self.clock.china_now())
-        compact = now.strftime("%Y%m%d")
-        explicit_date = bool(trade_date)
-        if trade_date:
-            requested_date = trade_date.replace("-", "")
-            if not re.fullmatch(r"20\d{6}", requested_date):
-                raise ValueError("交易日期必须是YYYYMMDD或YYYY-MM-DD")
-            candidate_dates = [requested_date]
-        else:
-            candidate_dates = self.database.open_trade_dates(compact, 6)
-            # The history API does not document an intraday availability guarantee.
-            # Before 16:00, prefer completed sessions; after 16:00, try today first
-            # and fall back if the provider has not published it yet.
-            if now.time() < time(16, 0):
-                candidate_dates = [item for item in candidate_dates if item != compact]
-            candidate_dates = candidate_dates[:5]
-            if not candidate_dates:
-                raise RuntimeError("交易日历尚未就绪，无法确定Level-2分析日期")
-        if not force_refresh:
-            preferred_cache_count = 1 if explicit_date or now.time() < time(16, 0) else 2
-            for cache_date in candidate_dates[:preferred_cache_count]:
-                cached = self.database.get_level2_report(normalized_code, cache_date)
-                if cached and not cached.get("partial"):
-                    cached["cache_hit"] = True
-                    return cached
-        short_code = normalized_code.split(".", 1)[0]
-        attempted_dates: list[str] = []
-        last_no_data_error: NumcatError | None = None
-        trades: list[dict[str, Any]] = []
-        orders: list[dict[str, Any]] | None = None if include_order_history else []
-        order_error = ""
-        compact_date = ""
-        for candidate_date in candidate_dates:
-            attempted_dates.append(candidate_date)
-            if not force_refresh:
-                cached = self.database.get_level2_report(normalized_code, candidate_date)
-                if cached and not cached.get("partial"):
-                    cached["cache_hit"] = True
-                    return cached
-            trade_error: NumcatError | None = None
-            candidate_orders: list[dict[str, Any]] | None = (
-                None if include_order_history else []
-            )
-            candidate_order_error = ""
-            if candidate_date != compact and include_order_history:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    trade_future = executor.submit(
-                        self.level2_provider.trade_history,
-                        short_code,
-                        candidate_date,
-                        end_time=end_time,
-                    )
-                    order_future = executor.submit(
-                        self.level2_provider.order_history,
-                        short_code,
-                        candidate_date,
-                        end_time=end_time,
-                    )
-                    try:
-                        candidate_trades = trade_future.result()
-                    except NumcatError as error:
-                        candidate_trades = []
-                        trade_error = error
-                    try:
-                        candidate_orders = order_future.result()
-                    except NumcatError as error:
-                        candidate_orders = []
-                        candidate_order_error = _safe_error(error)
-            else:
-                try:
-                    candidate_trades = self.level2_provider.trade_history(
-                        short_code, candidate_date, end_time=end_time
-                    )
-                except NumcatError as error:
-                    candidate_trades = []
-                    trade_error = error
-            if trade_error:
-                error = trade_error
-                if not _is_numcat_no_data(error):
-                    raise error
-                last_no_data_error = error
-                continue
-            if not candidate_trades:
-                continue
-            compact_date = candidate_date
-            trades = candidate_trades
-            orders = candidate_orders
-            order_error = candidate_order_error
-            break
-        if not trades:
-            provider_result = (
-                f"接口返回{last_no_data_error.code}：{last_no_data_error.message}"
-                if last_no_data_error
-                else "接口成功但逐笔成交为空"
-            )
-            dates = "、".join(attempted_dates)
-            if explicit_date:
-                raise RuntimeError(
-                    f"猫爪未返回{stock.get('name') or normalized_code}({normalized_code})"
-                    f"在{dates}的Level-2逐笔成交（{provider_result}）。"
-                    "请确认猫爪套餐包含level2_trade_history，且该日期在可用历史范围内；"
-                    "当天数据也可能尚未生成。"
-                )
-            raise RuntimeError(
-                f"猫爪未返回{stock.get('name') or normalized_code}({normalized_code})"
-                f"最近已完成交易日的Level-2逐笔成交；已尝试：{dates}"
-                f"（{provider_result}）。请在猫爪控制台确认level2_trade_history权限"
-                "和历史数据起始日期。"
-            )
-        partial = compact_date == compact and now.time() < time(15, 5)
-        if orders is None:
-            try:
-                orders = self.level2_provider.order_history(
-                    short_code, compact_date, end_time=end_time
-                )
-            except NumcatError as error:
-                orders = []
-                order_error = _safe_error(error)
-        date_key = datetime.strptime(compact_date, "%Y%m%d").date().isoformat()
-        upper_limit = self.database.daily_limit_map(date_key).get(normalized_code, (None, None))[0]
-        report = analyze_level2_orders(
-            trades,
-            orders,
-            code=normalized_code,
-            name=str(stock.get("name") or normalized_code),
-            trade_date=compact_date,
-            upper_limit=upper_limit,
-            generated_at=now.isoformat(timespec="seconds"),
-            partial=partial,
-        )
-        report["cache_hit"] = False
-        report["window_end_time"] = end_time
-        if not include_order_history:
-            report["limitations"].append(
-                "定时批处理仅下载逐笔成交并按主动方委托号聚合，未重复下载逐笔委托审计表"
-            )
-        if order_error:
-            report["raw_profile"]["order_history_error"] = order_error
-            report["limitations"].append(
-                "逐笔委托接口本次不可用；50W+/100W+成交聚合仍有效，撤单分析暂不可用"
-            )
-        self.database.save_level2_report(report)
-        return report
+    def refresh_fund_flows(self, slot: str, now: datetime | None = None) -> dict[str, Any]:
+        from .fund_flow import SOURCES, aggregate, normalize, report
 
-    def refresh_fund_flows(
-        self,
-        slot: str,
-        now: datetime | None = None,
-    ) -> dict[str, Any]:
-        if slot not in {"morning", "close"}:
-            raise ValueError("资金流向时段必须是morning或close")
+        started = elapsed_time.monotonic()
         current = self.clock.normalize(now or self.clock.china_now())
         trade_date = current.strftime("%Y%m%d")
-        if self.database.calendar_status(trade_date) is not True:
-            return {"status": "idle", "reason": "not_open_trade_day", "slot": slot}
-        run_id = self.database.begin_run(f"fund_flow_{slot}")
+        due = self._due_fund_flow_slots(current, self.database.calendar_status(trade_date))
+        if slot == "intraday":
+            slot = next((s for s in due if s != "close"), "intraday")
+        if slot not in due:
+            return {"status": "idle", "reason": "outside_fund_flow_window", "slot": slot}
         with self._fund_flow_lock:
+            run_id = self.database.begin_run(f"fund_flow_{slot}")
             try:
-                targets = self._fund_flow_targets()
-                updated_at = current.isoformat(timespec="seconds")
-                self.database.prepare_fund_flow_updates(
-                    targets, trade_date, slot, updated_at
-                )
-                target_codes = {str(item["code"]) for item in targets}
-                codes = self.database.pending_fund_flow_codes(trade_date, slot)
-                if not codes:
-                    detail = "no active targets" if not targets else "all targets completed"
-                    self.database.finish_run(run_id, "success", 0, detail)
-                    return {
-                        "status": "success",
-                        "slot": slot,
-                        "trade_date": trade_date,
-                        "target_count": len(targets),
-                        "stock_count": 0,
-                        "completed_count": 0,
-                        "failed_count": 0,
-                        "skipped_completed_count": len(target_codes),
-                    }
-                self.database.mark_fund_flow_codes_running(
-                    codes, trade_date, slot, updated_at
-                )
-                completed = 0
-                failures: dict[str, str] = {}
-                end_time = "10:00:00" if slot == "morning" else None
-                if not self.level2_provider.enabled:
-                    error = "猫爪数据尚未配置"
-                    for code in codes:
-                        failures[code] = error
-                        self.database.finish_fund_flow_code(
-                            code,
-                            trade_date,
-                            slot,
-                            completed_at=updated_at,
-                            error=error,
+                themes = [t for t in self.database.list_themes() if t.get("status") == "confirmed"]
+                stamp = current.isoformat(timespec="microseconds")
+                reports, failures = {}, {}
+                probe_error = None
+                members_by_theme = {
+                    t["id"]: [m for m in t.get("members", []) if m.get("active", 1)] for t in themes
+                }
+                # Freeze membership at the first close report for this date.
+                if slot == "close":
+                    for theme in themes:
+                        prior = self.database.flow_history("theme", str(theme["id"]), trade_date)
+                        original = next(
+                            (r for r in reversed(prior) if r.get("slot") == "close"), None
                         )
-                else:
-                    with ThreadPoolExecutor(max_workers=2) as executor:
-                        futures = {
-                            executor.submit(
-                                self.analyze_level2_stock,
-                                code,
-                                trade_date,
-                                current,
-                                True,
-                                end_time,
-                                False,
-                            ): code
-                            for code in codes
-                        }
-                        for future in as_completed(futures):
-                            code = futures[future]
-                            finished_at = self.clock.china_now().isoformat(timespec="seconds")
-                            try:
-                                report = future.result()
-                            except Exception as error:
-                                message = _safe_error(error)
-                                failures[code] = message
-                                self.database.finish_fund_flow_code(
-                                    code,
-                                    trade_date,
-                                    slot,
-                                    completed_at=finished_at,
-                                    error=message,
-                                )
-                            else:
-                                completed += 1
-                                self.database.finish_fund_flow_code(
-                                    code,
-                                    trade_date,
-                                    slot,
-                                    completed_at=finished_at,
-                                    report=report,
-                                )
-                status = "success" if not failures else "degraded"
-                detail = json.dumps(
-                    {
-                        "slot": slot,
-                        "targets": len(targets),
-                        "unique_stocks": len(codes),
-                        "completed": completed,
-                        "failed": len(failures),
-                    },
-                    ensure_ascii=False,
+                        if original is not None:
+                            members_by_theme[theme["id"]] = original["members"]
+                codes = sorted(
+                    {m["code"] for members in members_by_theme.values() for m in members}
                 )
-                self.database.finish_run(run_id, status, completed, detail)
+                for code in codes:
+                    previous = self.database.flow_history("stock", code, trade_date)
+                    cached = next((r for r in previous if r.get("slot") == slot), None)
+                    sources = dict((cached or {}).get("sources", {}))
+                    if slot == "close":
+                        for source, api_name in zip(
+                            SOURCES, ("moneyflow", "moneyflow_dc", "moneyflow_ths"), strict=True
+                        ):
+                            if sources.get(source, {}).get("status") == "available":
+                                continue
+                            try:
+                                rows = self.provider.call(
+                                    api_name, {"ts_code": code, "trade_date": trade_date}
+                                )
+                                exact = [
+                                    r
+                                    for r in rows
+                                    if r.get("ts_code") == code
+                                    and str(r.get("trade_date")) == trade_date
+                                ]
+                                if len(exact) != 1:
+                                    raise ValueError("当日资金数据未发布或返回重复记录")
+                                sources[source] = normalize(source, exact[0], code, trade_date)
+                            except Exception as error:
+                                sources[source] = {
+                                    "source": source,
+                                    "status": "unavailable",
+                                    "error": _safe_error(error),
+                                    "main_net": None,
+                                }
+                                failures[f"{code}:{source}"] = _safe_error(error)
+                        result = report(sources, trade_date, stamp)
+                    else:
+                        try:
+                            if probe_error:
+                                raise ValueError(probe_error)
+                            snapshot = self.flow_provider.snapshot(code, current)
+                            self.database.set_metadata(
+                                "eastmoney_intraday_probe", "available:" + stamp
+                            )
+                        except Exception as error:
+                            if not reports:
+                                probe_error = _safe_error(error)
+                            failures[code] = _safe_error(error)
+                            self.database.set_metadata(
+                                "eastmoney_intraday_probe", "unavailable:" + _safe_error(error)
+                            )
+                            snapshot = {
+                                "status": "unavailable",
+                                "main_net": None,
+                                "error": _safe_error(error),
+                            }
+                        result = report({"eastmoney": snapshot}, trade_date, stamp)
+                        result.update(
+                            main_net=snapshot.get("main_net"),
+                            large_net=snapshot.get("large_net"),
+                            extra_large_net=snapshot.get("extra_large_net"),
+                        )
+                    stamp = (
+                        current + timedelta(seconds=elapsed_time.monotonic() - started)
+                    ).isoformat(timespec="microseconds")
+                    result.update(code=code, slot=slot, captured_at=stamp)
+                    reports[code] = result
+                    self.database.save_flow("stock", code, trade_date, slot, stamp, result)
+                for theme in themes:
+                    members = members_by_theme[theme["id"]]
+                    stamp = (
+                        current + timedelta(seconds=elapsed_time.monotonic() - started)
+                    ).isoformat(timespec="microseconds")
+                    result = aggregate(members, reports, trade_date, stamp)
+                    if slot != "close":
+                        result.update(
+                            {
+                                k: result["sources"]["eastmoney"].get(k)
+                                for k in ("main_net", "large_net", "extra_large_net")
+                            }
+                        )
+                    result.update(theme_id=theme["id"], slot=slot, members=members)
+                    self.database.save_flow(
+                        "theme", str(theme["id"]), trade_date, slot, stamp, result
+                    )
+                status = "degraded" if failures else "success"
+                self.database.finish_run(
+                    run_id, status, len(codes), json.dumps(failures, ensure_ascii=False)
+                )
                 return {
                     "status": status,
+                    "stock_count": len(codes),
+                    "theme_count": len(themes),
+                    "failures": failures,
                     "slot": slot,
                     "trade_date": trade_date,
-                    "target_count": len(targets),
-                    "stock_count": len(codes),
-                    "completed_count": completed,
-                    "failed_count": len(failures),
-                    "skipped_completed_count": len(target_codes) - len(codes),
-                    "failures": failures,
                 }
             except Exception as error:
                 self.database.finish_run(run_id, "failed", detail=_safe_error(error))
                 raise
 
     def _fund_flow_targets(self) -> list[dict[str, Any]]:
-        targets: list[dict[str, Any]] = []
-        for theme in self.database.list_themes():
-            if str(theme.get("status")) not in {"watching", "confirmed"}:
-                continue
-            members = [
-                item for item in theme.get("members", []) if item.get("active", 1)
-            ]
-            members.sort(key=lambda item: int(item.get("leader_rank") or 9999))
-            for rank, member in enumerate(members[:5], 1):
-                targets.append(
-                    {
-                        "owner_type": "theme",
-                        "owner_id": int(theme["id"]),
-                        "code": str(member["code"]),
-                        "name": str(member.get("name") or member["code"]),
-                        "priority_rank": rank,
-                    }
-                )
-        for entry in self.database.list_test_pool_entries():
-            if str(entry.get("status")) not in {"awaiting_buy", "awaiting_exit"}:
-                continue
-            targets.append(
-                {
-                    "owner_type": "test_pool",
-                    "owner_id": int(entry["id"]),
-                    "code": str(entry["code"]),
-                    "name": str(entry.get("name") or entry["code"]),
-                    "priority_rank": None,
-                }
-            )
-        unique: dict[tuple[str, int, str], dict[str, Any]] = {}
-        for item in targets:
-            unique[(str(item["owner_type"]), int(item["owner_id"]), str(item["code"]))] = item
-        return list(unique.values())
+        return [
+            dict(owner_type="theme", owner_id=t["id"], **m)
+            for t in self.database.list_themes()
+            if t.get("status") == "confirmed"
+            for m in t.get("members", [])
+            if m.get("active", 1)
+        ]
 
     def fund_flow_display_context(self, now: datetime | None = None) -> tuple[str, str]:
         current = self.clock.normalize(now or self.clock.china_now())
         compact = current.strftime("%Y%m%d")
         dates = self.database.open_trade_dates(compact, 1)
-        trade_date = dates[0] if dates else compact
-        slot = (
-            "close"
-            if trade_date != compact or current.time() >= time(17, 10)
-            else "morning"
-        )
-        return trade_date, slot
+        return (dates[0] if dates else compact, "close")
 
     @staticmethod
     def _due_fund_flow_slots(now: datetime, is_open_day: bool | None) -> list[str]:
+        current = MarketClock.normalize(now)
         if is_open_day is not True:
             return []
-        slots = []
-        if now.time() >= time(10, 0):
-            slots.append("morning")
-        if now.time() >= time(17, 10):
-            slots.append("close")
-        return slots
+        if current.time() >= time(17, 10):
+            return ["close"]
+        if MarketClock.session_name(current) in {"morning", "afternoon"}:
+            return [current.replace(minute=current.minute // 15 * 15).strftime("%H:%M")]
+        return []
 
-    def _run_scheduled_fund_flow(
-        self, slot: str, now: datetime, schedule_key: str
-    ) -> None:
+    def _run_scheduled_fund_flow(self, slot: str, now: datetime, schedule_key: str) -> None:
         try:
             result = self.refresh_fund_flows(slot, now)
-            self.database.set_metadata(schedule_key, json.dumps(result, ensure_ascii=False))
+            # Missing end-of-day sources are retried in the next 15-minute retry window.
+            if result["status"] == "success":
+                self.database.set_metadata(schedule_key, json.dumps(result, ensure_ascii=False))
         except Exception:
             logger.exception("Scheduled fund-flow update failed: %s", slot)
         finally:
@@ -1556,13 +1378,20 @@ class StockTopicService:
             if now.second < 25:
                 for fund_slot in self._due_fund_flow_slots(now, calendar):
                     schedule_key = (
-                        f"fund_flow_refresh:{now.date().isoformat()}:{fund_slot}"
+                        f"moneyflow_v1_refresh:{now.date().isoformat()}:{fund_slot}"
                     )
                     if (
                         schedule_key not in self._fund_flow_inflight
                         and not self.database.get_metadata(schedule_key)
+                        and not self.database.get_metadata(
+                            schedule_key + ":attempt:" + now.strftime("%H") + str(now.minute//15)
+                        )
                     ):
                         self._fund_flow_inflight.add(schedule_key)
+                        self.database.set_metadata(
+                            schedule_key + ":attempt:" + now.strftime("%H") + str(now.minute//15),
+                            now.isoformat(),
+                        )
                         asyncio.create_task(
                             asyncio.to_thread(
                                 self._run_scheduled_fund_flow,
@@ -1602,7 +1431,7 @@ class StockTopicService:
             "integrations": {
                 "tushare": True,
                 "openai": self.explainer.enabled,
-                "numcat_level2": self.level2_provider.enabled,
+                "eastmoney_intraday": self.database.get_metadata("eastmoney_intraday_probe"),
                 "wecom_group_robot": self.notifier.enabled,
                 "apns": False,
             },
@@ -1612,9 +1441,9 @@ class StockTopicService:
                 "latest_price_sync": self.database.latest_run("sync_daily_prices"),
             },
             "fund_flow": {
-                "schedule": ["10:00", "17:10"],
-                "theme_top_n": 5,
-                "latest_morning": self.database.latest_run("fund_flow_morning"),
+                "schedule": ["交易时段每15分钟", "17:10起每15分钟重试缺源"],
+                "scope": "all_formal_theme_members",
+
                 "latest_close": self.database.latest_run("fund_flow_close"),
             },
             "latest_catalyst_refresh_started_at": self.database.get_metadata(
@@ -1709,7 +1538,7 @@ def _safe_error(error: Exception) -> str:
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)
     message = re.sub(
-        r'(?i)(["\']?(?:apikey|NUMCAT_API_KEY)["\']?\s*[:=]\s*)[^,}\s]+',
+        r'(?i)(["\']?(?:apikey|API_KEY)["\']?\s*[:=]\s*)[^,}\s]+',
         r"\1***",
         message,
     )
@@ -1726,9 +1555,6 @@ def _normalize_stock_code(value: str) -> str:
     exchange = exchange or ("SH" if symbol.startswith(("5", "6", "9")) else "SZ")
     return f"{symbol}.{exchange}"
 
-
-def _is_numcat_no_data(error: NumcatError) -> bool:
-    return str(error.code) == "1002" or "未找到 Level-2 数据" in error.message
 
 
 def _within_retry_cooldown(value: Any, now: datetime, *, minutes: int) -> bool:

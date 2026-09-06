@@ -50,6 +50,13 @@ class Database:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
+        for old, archived in (("level2_reports", "legacy_order_flow_reports"),
+                              ("fund_flow_updates", "legacy_order_flow_updates")):
+            exists = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)
+            ).fetchone()
+            if exists:
+                connection.execute(f'ALTER TABLE "{old}" RENAME TO "{archived}"')
         columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(candidate_themes)").fetchall()
@@ -1426,14 +1433,6 @@ class Database:
                 """,
                 (now, now, theme_id),
             )
-            connection.execute(
-                """
-                UPDATE fund_flow_updates SET status='stopped', updated_at=?
-                WHERE owner_type='theme' AND owner_id=?
-                  AND status IN ('pending','running','failed')
-                """,
-                (now, theme_id),
-            )
 
     def restore_theme(self, theme_id: int) -> None:
         now = utc_now_iso()
@@ -2160,289 +2159,62 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def save_level2_report(self, report: dict[str, Any]) -> None:
-        with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO level2_reports(
-                    code, trade_date, generated_at, is_partial, method, report_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(code, trade_date) DO UPDATE SET
-                    generated_at=excluded.generated_at,
-                    is_partial=excluded.is_partial,
-                    method=excluded.method,
-                    report_json=excluded.report_json
-                """,
-                (
-                    report["code"],
-                    report["trade_date"],
-                    report["generated_at"],
-                    int(bool(report.get("partial"))),
-                    report["method"],
-                    json.dumps(report, ensure_ascii=False, separators=(",", ":")),
-                ),
-            )
-
-    def get_level2_report(self, code: str, trade_date: str | None = None) -> dict[str, Any] | None:
-        condition = "code=?"
-        params: list[Any] = [code]
-        if trade_date:
-            condition += " AND trade_date=?"
-            params.append(trade_date)
-        with self.connect() as connection:
-            row = connection.execute(
-                f"SELECT report_json FROM level2_reports WHERE {condition} "
-                "ORDER BY trade_date DESC LIMIT 1",
-                params,
-            ).fetchone()
-        return json.loads(row["report_json"]) if row else None
-
-    def prepare_fund_flow_updates(
-        self,
-        targets: Sequence[dict[str, Any]],
-        trade_date: str,
-        slot: str,
-        updated_at: str,
-    ) -> int:
-        values = [
-            (
-                str(item["owner_type"]),
-                int(item["owner_id"]),
-                str(item["code"]),
-                str(item.get("name") or item["code"]),
-                trade_date,
-                slot,
-                int(item.get("priority_rank") or 0) or None,
-                updated_at,
-            )
-            for item in targets
-        ]
-        if not values:
-            return 0
-        with self.connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO fund_flow_updates(
-                    owner_type, owner_id, code, name, trade_date, slot,
-                    priority_rank, status, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-                ON CONFLICT(owner_type, owner_id, code, trade_date, slot) DO UPDATE SET
-                    name=excluded.name,
-                    priority_rank=excluded.priority_rank,
-                    status=CASE WHEN fund_flow_updates.status='completed'
-                                THEN 'completed' ELSE 'pending' END,
-                    started_at=CASE WHEN fund_flow_updates.status='completed'
-                                    THEN fund_flow_updates.started_at ELSE NULL END,
-                    error=CASE WHEN fund_flow_updates.status='completed'
-                               THEN fund_flow_updates.error ELSE NULL END,
-                    updated_at=excluded.updated_at
-                """,
-                values,
-            )
-        return len(values)
-
-    def mark_fund_flow_codes_running(
-        self, codes: Sequence[str], trade_date: str, slot: str, started_at: str
+    def save_flow(
+        self, kind: str, owner: str, trade_date: str, slot: str, captured_at: str, payload: dict
     ) -> None:
-        if not codes:
-            return
-        placeholders = ",".join("?" for _ in codes)
         with self.connect() as connection:
             connection.execute(
-                f"""
-                UPDATE fund_flow_updates
-                SET status='running', started_at=?, completed_at=NULL,
-                    error=NULL, updated_at=?
-                WHERE trade_date=? AND slot=? AND code IN ({placeholders})
-                  AND status!='completed'
-                  AND (
-                    (owner_type='theme' AND EXISTS (
-                        SELECT 1 FROM candidate_themes theme
-                        WHERE theme.id=fund_flow_updates.owner_id
-                          AND theme.status IN ('watching','confirmed')
-                    ))
-                    OR
-                    (owner_type='test_pool' AND EXISTS (
-                        SELECT 1 FROM test_pool_entries entry
-                        WHERE entry.id=fund_flow_updates.owner_id
-                          AND entry.status IN ('awaiting_buy','awaiting_exit')
-                    ))
-                  )
-                """,
-                [started_at, started_at, trade_date, slot, *codes],
-            )
-
-    def pending_fund_flow_codes(self, trade_date: str, slot: str) -> list[str]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT DISTINCT code FROM fund_flow_updates
-                WHERE trade_date=? AND slot=? AND status!='completed'
-                  AND (
-                    (owner_type='theme' AND EXISTS (
-                        SELECT 1 FROM candidate_themes theme
-                        WHERE theme.id=fund_flow_updates.owner_id
-                          AND theme.status IN ('watching','confirmed')
-                    ))
-                    OR
-                    (owner_type='test_pool' AND EXISTS (
-                        SELECT 1 FROM test_pool_entries entry
-                        WHERE entry.id=fund_flow_updates.owner_id
-                          AND entry.status IN ('awaiting_buy','awaiting_exit')
-                    ))
-                  )
-                ORDER BY code
-                """,
-                (trade_date, slot),
-            ).fetchall()
-        return [str(row["code"]) for row in rows]
-
-    def finish_fund_flow_code(
-        self,
-        code: str,
-        trade_date: str,
-        slot: str,
-        *,
-        completed_at: str,
-        report: dict[str, Any] | None = None,
-        error: str | None = None,
-    ) -> None:
-        status = "completed" if report else "failed"
-        report_json = (
-            json.dumps(report, ensure_ascii=False, separators=(",", ":")) if report else None
-        )
-        with self.connect() as connection:
-            connection.execute(
-                """
-                UPDATE fund_flow_updates
-                SET status=?, completed_at=?, error=?, report_json=?, updated_at=?
-                WHERE code=? AND trade_date=? AND slot=?
-                  AND status!='completed'
-                  AND (
-                    (owner_type='theme' AND EXISTS (
-                        SELECT 1 FROM candidate_themes theme
-                        WHERE theme.id=fund_flow_updates.owner_id
-                          AND theme.status IN ('watching','confirmed')
-                    ))
-                    OR
-                    (owner_type='test_pool' AND EXISTS (
-                        SELECT 1 FROM test_pool_entries entry
-                        WHERE entry.id=fund_flow_updates.owner_id
-                          AND entry.status IN ('awaiting_buy','awaiting_exit')
-                    ))
-                  )
-                """,
+                "INSERT INTO flow_history(kind,owner,trade_date,slot,captured_at,payload) "
+                "VALUES(?,?,?,?,?,?)",
                 (
-                    status,
-                    completed_at,
-                    (error or "")[:500] or None,
-                    report_json,
-                    completed_at,
-                    code,
+                    kind,
+                    owner,
                     trade_date,
                     slot,
+                    captured_at,
+                    json.dumps(payload, ensure_ascii=False, allow_nan=False),
                 ),
             )
 
-    def attach_theme_fund_flows(
-        self,
-        themes: list[dict[str, Any]],
-        trade_date: str,
-        slot: str,
-    ) -> None:
-        owner_ids = [int(item["id"]) for item in themes]
-        rows = self._fund_flow_rows("theme", owner_ids, trade_date, slot)
-        by_owner_code = {(int(row["owner_id"]), str(row["code"])): row for row in rows}
-        for theme in themes:
-            active_tracking = str(theme.get("status")) in {"watching", "confirmed"}
-            members = [item for item in theme.get("members", []) if item.get("active", 1)]
-            top_members = sorted(
-                members,
-                key=lambda item: int(item.get("leader_rank") or 9999),
-            )[:5]
-            reports: list[dict[str, Any]] = []
-            statuses: list[str] = []
-            for rank, member in enumerate(top_members, 1):
-                row = by_owner_code.get((int(theme["id"]), str(member["code"])))
-                view = (
-                    _fund_flow_view(row)
-                    if active_tracking and row
-                    else _pending_fund_flow_view(trade_date, slot)
-                    if active_tracking
-                    else {"status": "stopped", "trade_date": trade_date, "slot": slot}
-                )
-                view["priority_rank"] = rank
-                statuses.append(str(view["status"]))
-                if view.get("_report"):
-                    reports.append(view.pop("_report"))
-                member["fund_flow"] = view
-            if not active_tracking:
-                status = "stopped"
-            elif any(value == "running" for value in statuses):
-                status = "running"
-            elif statuses and all(value == "completed" for value in statuses):
-                status = "completed"
-            else:
-                status = "pending"
-            theme["fund_flow"] = {
-                "status": status,
-                "trade_date": trade_date,
-                "slot": slot,
-                "target_count": len(top_members),
-                "completed_count": sum(value == "completed" for value in statuses),
-                "failed_count": sum(value == "failed" for value in statuses),
-                "summary": _aggregate_fund_flow_reports(reports),
-            }
+    def flow_history(
+        self, kind: str, owner: str, trade_date: str | None = None, as_of: str | None = None
+    ) -> list[dict]:
+        clauses, params = ["kind=?", "owner=?"], [kind, str(owner)]
+        if trade_date:
+            clauses.append("trade_date=?")
+            params.append(trade_date)
+        if as_of:
+            clauses.append("captured_at<=?")
+            params.append(as_of)
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM flow_history WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY captured_at DESC,id DESC",
+                params,
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
 
-    def attach_test_pool_fund_flows(
-        self,
-        entries: list[dict[str, Any]],
-        trade_date: str,
-        slot: str,
-    ) -> None:
-        owner_ids = [int(item["id"]) for item in entries]
-        rows = self._fund_flow_rows("test_pool", owner_ids, trade_date, slot)
-        by_owner = {int(row["owner_id"]): row for row in rows}
-        for entry in entries:
-            active_tracking = str(entry.get("status")) in {"awaiting_buy", "awaiting_exit"}
-            row = by_owner.get(int(entry["id"]))
-            if active_tracking and row:
-                view = _fund_flow_view(row)
-                view.pop("_report", None)
-                entry["fund_flow"] = view
-            elif active_tracking:
-                entry["fund_flow"] = _pending_fund_flow_view(trade_date, slot)
-            else:
-                entry["fund_flow"] = {
-                    "status": "stopped",
-                    "trade_date": trade_date,
-                    "slot": slot,
+    def attach_theme_fund_flows(self, themes: list[dict], trade_date: str, slot: str) -> None:
+        for theme in themes:
+            rows = self.flow_history("theme", str(theme["id"]), trade_date)
+            daily = next((r for r in rows if r.get("slot") == "close"), None)
+            intraday = next((r for r in rows if r.get("slot") != "close"), None)
+            theme["fund_flow"] = {"daily": daily, "intraday": intraday, "trade_date": trade_date}
+            for member in theme.get("members", []):
+                stock_rows = self.flow_history("stock", member["code"], trade_date)
+                member["fund_flow"] = {
+                    "daily": next((r for r in stock_rows if r.get("slot") == "close"), None),
+                    "intraday": next((r for r in stock_rows if r.get("slot") != "close"), None),
                 }
 
-    def _fund_flow_rows(
-        self,
-        owner_type: str,
-        owner_ids: Sequence[int],
-        trade_date: str,
-        slot: str,
-    ) -> list[dict[str, Any]]:
-        if not owner_ids:
-            return []
-        result: list[dict[str, Any]] = []
-        with self.connect() as connection:
-            for start in range(0, len(owner_ids), 800):
-                chunk = owner_ids[start : start + 800]
-                placeholders = ",".join("?" for _ in chunk)
-                rows = connection.execute(
-                    f"""
-                    SELECT * FROM fund_flow_updates
-                    WHERE owner_type=? AND trade_date=? AND slot=?
-                      AND owner_id IN ({placeholders})
-                    """,
-                    [owner_type, trade_date, slot, *chunk],
-                ).fetchall()
-                result.extend(dict(row) for row in rows)
-        return result
+    def attach_test_pool_fund_flows(self, entries: list[dict], trade_date: str, slot: str) -> None:
+        # Test-pool membership never triggers collection. Existing snapshots are reusable.
+        for entry in entries:
+            rows = self.flow_history("stock", entry["code"], trade_date)
+            entry["fund_flow"] = {
+                "daily": next((r for r in rows if r.get("slot") == "close"), None)
+            }
 
     def add_test_pool_entry(
         self,
@@ -2561,16 +2333,6 @@ class Database:
                 f"UPDATE test_pool_entries SET {assignments} WHERE id=?",
                 [*(value for _, value in fields), entry_id],
             )
-            status = next((value for name, value in fields if name == "status"), None)
-            if status not in {None, "awaiting_buy", "awaiting_exit"}:
-                connection.execute(
-                    """
-                    UPDATE fund_flow_updates SET status='stopped', updated_at=?
-                    WHERE owner_type='test_pool' AND owner_id=?
-                      AND status IN ('pending','running','failed')
-                    """,
-                    (utc_now_iso(), entry_id),
-                )
 
     def pending_test_pool_price_dates(self, ready_through: str) -> list[str]:
         with self.connect() as connection:
@@ -2715,80 +2477,6 @@ def _decode_test_pool_entry(row: sqlite3.Row) -> dict[str, Any]:
     item = dict(row)
     item["source_themes"] = json.loads(item.pop("source_themes_json") or "[]")
     return item
-
-
-def _pending_fund_flow_view(trade_date: str, slot: str) -> dict[str, Any]:
-    return {
-        "status": "pending",
-        "trade_date": trade_date,
-        "slot": slot,
-        "started_at": None,
-        "completed_at": None,
-        "error": None,
-        "summary": None,
-    }
-
-
-def _fund_flow_view(row: dict[str, Any]) -> dict[str, Any]:
-    report = json.loads(row.get("report_json") or "null")
-    return {
-        "status": str(row.get("status") or "pending"),
-        "trade_date": str(row.get("trade_date") or ""),
-        "slot": str(row.get("slot") or ""),
-        "started_at": row.get("started_at"),
-        "completed_at": row.get("completed_at"),
-        "error": row.get("error"),
-        "summary": _fund_flow_report_summary(report) if report else None,
-        "_report": report,
-    }
-
-
-def _fund_flow_report_summary(report: dict[str, Any]) -> dict[str, Any]:
-    tiers = {str(item.get("label")): item for item in report.get("thresholds", [])}
-    large = tiers.get("50W+", {})
-    super_large = tiers.get("100W+", {})
-    coverage = report.get("coverage", {})
-    return {
-        "large_buy_ratio_pct": large.get("buy_ratio_pct"),
-        "large_net_inflow": float(large.get("net_inflow") or 0),
-        "super_buy_ratio_pct": super_large.get("buy_ratio_pct"),
-        "super_net_inflow": float(super_large.get("net_inflow") or 0),
-        "directional_coverage_pct": coverage.get("directional_amount_coverage_pct"),
-        "order_id_coverage_pct": coverage.get("order_id_amount_coverage_pct"),
-        "generated_at": report.get("generated_at"),
-        "partial": bool(report.get("partial")),
-    }
-
-
-def _aggregate_fund_flow_reports(reports: Sequence[dict[str, Any]]) -> dict[str, Any] | None:
-    if not reports:
-        return None
-    buckets = {
-        "50W+": {"buy": 0.0, "sell": 0.0},
-        "100W+": {"buy": 0.0, "sell": 0.0},
-    }
-    for report in reports:
-        for item in report.get("thresholds", []):
-            label = str(item.get("label") or "")
-            if label not in buckets:
-                continue
-            buckets[label]["buy"] += float(item.get("buy_amount") or 0)
-            buckets[label]["sell"] += float(item.get("sell_amount") or 0)
-
-    def summary(label: str) -> dict[str, Any]:
-        buy = buckets[label]["buy"]
-        sell = buckets[label]["sell"]
-        total = buy + sell
-        return {
-            "buy_ratio_pct": round(buy / total * 100, 2) if total else None,
-            "net_inflow": round(buy - sell, 2),
-        }
-
-    return {
-        "large": summary("50W+"),
-        "super_large": summary("100W+"),
-        "report_count": len(reports),
-    }
 
 
 def _split_tags(value: str) -> list[str]:
