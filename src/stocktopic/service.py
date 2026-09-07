@@ -45,6 +45,7 @@ class StockTopicService:
             settings.openai_api_key,
             settings.openai_model,
             settings.openai_base_url,
+            timeout=settings.openai_timeout_seconds,
             usage_callback=self.database.record_ai_usage,
             task_models={
                 "catalyst_refresh": settings.openai_catalyst_model,
@@ -1637,6 +1638,7 @@ class StockTopicService:
                     "confirmed_catalyst_refreshes_per_day": 1,
                     "pending_separate_catalyst_refresh": False,
                     "reassess_only_when_new_catalyst": True,
+                    "timeout_seconds": self.settings.openai_timeout_seconds,
                     "models": {
                         "catalyst_refresh": self._ai_model_for_task("catalyst_refresh"),
                         "admission_analysis": self._ai_model_for_task(

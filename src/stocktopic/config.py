@@ -56,6 +56,7 @@ class Settings:
     openai_catalyst_model: str = ""
     openai_admission_model: str = ""
     openai_cluster_model: str = ""
+    openai_timeout_seconds: float = 120.0
     numcat_api_key: str = ""
     wecom_bot_webhook: str = ""
     admin_username: str = "admin"
@@ -124,6 +125,10 @@ class Settings:
             ),
             openai_cluster_model=(
                 os.getenv("OPENAI_CLUSTER_MODEL", "").strip() or openai_model
+            ),
+            openai_timeout_seconds=max(
+                30.0,
+                min(300.0, float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120"))),
             ),
             numcat_api_key=os.getenv("NUMCAT_API_KEY", "").strip(),
             wecom_bot_webhook=os.getenv("WECOM_BOT_WEBHOOK", "").strip(),
