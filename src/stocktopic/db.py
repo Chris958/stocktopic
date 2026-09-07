@@ -50,13 +50,22 @@ class Database:
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
-        for old, archived in (("level2_reports", "legacy_order_flow_reports"),
-                              ("fund_flow_updates", "legacy_order_flow_updates")):
+        for old, archived in (
+            ("level2_reports", "legacy_order_flow_reports"),
+            ("fund_flow_updates", "legacy_order_flow_updates"),
+        ):
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (old,)
             ).fetchone()
             if exists:
-                connection.execute(f'ALTER TABLE "{old}" RENAME TO "{archived}"')
+                destination = archived
+                suffix = 2
+                while connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE name=?", (destination,)
+                ).fetchone():
+                    destination = f"{archived}_{suffix}"
+                    suffix += 1
+                connection.execute(f'ALTER TABLE "{old}" RENAME TO "{destination}"')
         columns = {
             str(row["name"])
             for row in connection.execute("PRAGMA table_info(candidate_themes)").fetchall()
