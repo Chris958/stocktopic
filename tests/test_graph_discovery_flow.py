@@ -121,6 +121,40 @@ def test_four_stock_layer_calls_ai_but_preserves_graph_anchor():
     assert len(clusters[0]["member_codes"]) == 4
 
 
+def test_graph_verifier_excludes_unrelated_events_and_uses_bounded_workload():
+    install_graph_first_ai_clustering()
+    client = OpenAIThemeExplainer("test-key", "test-model")
+    events = _events(4)
+    events.append(
+        {
+            "code": "688999.SH",
+            "name": "无关股票",
+            "market": "创业板",
+            "board_tag": "创业板涨幅超10%",
+            "status": "",
+            "limit_reason": "完全无关的独立事件",
+            "themes": ["孤立标签"],
+            "concept_tags": [{"tag": "孤立标签", "confidence": 0.9}],
+        }
+    )
+    captured = {}
+
+    def fake_call(prompt, **kwargs):
+        captured["prompt"] = prompt
+        captured.update(kwargs)
+        return {}, {"clusters": []}, []
+
+    client._call_prompt = fake_call  # type: ignore[method-assign]
+    client.cluster_limit_events("20260907", events, 2)
+
+    assert "600000.SH" in captured["prompt"]
+    assert "688999.SH" not in captured["prompt"]
+    assert captured["reasoning_effort"] == "low"
+    assert captured["search_context_size"] == "low"
+    assert captured["max_output_tokens"] == 5000
+    assert captured["max_tool_calls"] == 4
+
+
 def test_four_stock_broad_parent_requires_specific_ai_logic():
     install_graph_first_ai_clustering()
     client = OpenAIThemeExplainer("test-key", "test-model")
@@ -165,6 +199,17 @@ def test_existing_minimum_limit_env_is_formal_only(monkeypatch):
     settings = Settings.from_env(require_secrets=False)
     assert settings.minimum_limit_touches == 2
     assert settings.formal_limit_touches == 4
+
+
+def test_openai_timeout_is_configurable_and_bounded(monkeypatch):
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "180")
+    assert Settings.from_env(require_secrets=False).openai_timeout_seconds == 180
+
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "5")
+    assert Settings.from_env(require_secrets=False).openai_timeout_seconds == 30
+
+    monkeypatch.setenv("OPENAI_TIMEOUT_SECONDS", "900")
+    assert Settings.from_env(require_secrets=False).openai_timeout_seconds == 300
 
 
 class FakeGraphClient(TushareClient):

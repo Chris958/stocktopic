@@ -104,6 +104,7 @@ append_default "CATALYST_CONFIDENCE_THRESHOLD" "65"
 append_default "MINIMUM_EXPECTED_DURATION_DAYS" "3"
 append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
 append_default "CATALYST_REFRESH_HOURS" "08:40,15:30"
+append_default "OPENAI_TIMEOUT_SECONDS" "120"
 
 if ! grep -q '^NUMCAT_API_KEY=' "$APP_DIR/.env"; then
   NUMCAT_API_KEY_INPUT=""
