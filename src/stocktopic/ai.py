@@ -41,7 +41,16 @@ class OpenAIThemeExplainer:
             for key, value in (task_models or {}).items()
             if str(value).strip()
         }
-        self._request_controls_mode: str | None = None
+        # Third-party OpenAI-compatible relays commonly implement Responses API
+        # without newer optional controls such as ``max_tool_calls`` and
+        # ``prompt_cache_key``.  Start those endpoints in the conservative mode
+        # and only send the portable output-token bound.  Official OpenAI keeps
+        # the full controls, while the compatibility layer can still downgrade
+        # either endpoint further when required.
+        endpoint_host = (urllib.parse.urlsplit(self.endpoint).hostname or "").casefold()
+        self._request_controls_mode: str | None = (
+            None if endpoint_host == "api.openai.com" else "bounded"
+        )
         self._request_controls_lock = threading.Lock()
 
     @property
@@ -91,7 +100,7 @@ class OpenAIThemeExplainer:
 任务输入（只使用下列数据）：
 候选题材：{json.dumps(immutable_candidate, ensure_ascii=False)}
 其他题材名称：{json.dumps(other_theme_names[:20], ensure_ascii=False)}
-已经收录的催化（不得重复）：{json.dumps((existing_catalysts or [])[:6], ensure_ascii=False)}
+已经收录的催化（不得重复）：{json.dumps((existing_catalysts or [])[:4], ensure_ascii=False)}
 """.strip()
         raw, parsed, sources = self._call_prompt(
             prompt,
@@ -99,8 +108,8 @@ class OpenAIThemeExplainer:
             task_type="catalyst_refresh",
             subject_id=str(theme.get("id") or ""),
             search_context_size="low",
-            max_output_tokens=3500,
-            max_tool_calls=3,
+            max_output_tokens=2500,
+            max_tool_calls=2,
         )
         catalysts = _normalize_catalysts(parsed.get("catalysts"), sources)
         if not catalysts and sources:
@@ -409,18 +418,32 @@ class OpenAIThemeExplainer:
         search_context_size: str = "medium",
         max_output_tokens: int = 6000,
         max_tool_calls: int = 5,
+        web_search: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]:
         request_model = self.model_for_task(task_type)
         base_payload = {
             "model": request_model,
             "reasoning": {"effort": reasoning_effort},
-            "tools": [
-                {"type": "web_search", "search_context_size": search_context_size}
-            ],
-            "tool_choice": "required",
-            "include": ["web_search_call.action.sources"],
             "input": prompt,
+            # Long reasoning + web-search requests can exceed a relay's buffered
+            # response timeout. SSE progress events keep the connection active and
+            # the final ``response.completed`` event still contains the canonical
+            # Responses API object used by the rest of the application.
+            "stream": True,
         }
+        if web_search:
+            base_payload.update(
+                {
+                    "tools": [
+                        {
+                            "type": "web_search",
+                            "search_context_size": search_context_size,
+                        }
+                    ],
+                    "tool_choice": "required",
+                    "include": ["web_search_call.action.sources"],
+                }
+            )
         raw, controls_mode = self._request_with_compatible_controls(
             base_payload,
             task_type=task_type,
@@ -495,7 +518,7 @@ class OpenAIThemeExplainer:
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
-                "Accept": "application/json",
+                "Accept": "text/event-stream, application/json",
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "User-Agent": "StockTopic/0.12 (+https://github.com/Chris958/stocktopic)",
@@ -559,7 +582,7 @@ class OpenAIThemeExplainer:
         for attempt in range(max(1, attempts)):
             try:
                 with open_url(request, timeout=self.timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    return _read_response_json(response)
             except urllib.error.HTTPError as error:
                 last_error = error
                 body = error.read().decode("utf-8", errors="replace")
@@ -567,7 +590,26 @@ class OpenAIThemeExplainer:
                 retryable = error.code == 429 or error.code >= 500
                 if not retryable or attempt >= attempts - 1:
                     raise RuntimeError(last_message) from error
-            except (urllib.error.URLError, TimeoutError) as error:
+            except TimeoutError as error:
+                # Streaming progress makes a silent read timeout much more likely to
+                # be a broken relay connection than a healthy long generation. Allow
+                # one bounded retry for streamed requests; retain the single-attempt
+                # behavior for non-streaming requests to avoid duplicate billing.
+                timeout_attempts = min(max(1, attempts), 2) if _request_streams(request) else 1
+                last_error = error
+                last_message = (
+                    f"AI upstream read timed out after {min(attempt + 1, timeout_attempts)}/"
+                    f"{timeout_attempts} attempts (host={host}, timeout={self.timeout:g}s): "
+                    f"{error}"
+                )
+                if attempt >= timeout_attempts - 1:
+                    raise RuntimeError(last_message) from error
+            except _RetryableAIStreamError as error:
+                last_error = error
+                last_message = f"AI upstream stream failed (host={host}): {error}"
+                if attempt >= attempts - 1:
+                    raise RuntimeError(last_message) from error
+            except urllib.error.URLError as error:
                 last_error = error
                 last_message = (
                     f"AI upstream network failed after {attempt + 1}/{attempts} attempts "
@@ -582,6 +624,75 @@ class OpenAIThemeExplainer:
                     raise RuntimeError(last_message) from error
             time.sleep(1.0 * (2**attempt))
         raise RuntimeError(last_message) from last_error
+
+
+class _RetryableAIStreamError(RuntimeError):
+    """The relay accepted a stream but reported a transient upstream failure."""
+
+
+def _request_streams(request: urllib.request.Request) -> bool:
+    try:
+        payload = json.loads((request.data or b"{}").decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return payload.get("stream") is True
+
+
+def _read_response_json(response: Any) -> dict[str, Any]:
+    """Read either a normal JSON response or a Responses API SSE stream."""
+    headers = getattr(response, "headers", None)
+    content_type = str(headers.get("Content-Type", "") if headers is not None else "")
+    if "text/event-stream" not in content_type.casefold():
+        return json.loads(response.read().decode("utf-8"))
+
+    latest_response: dict[str, Any] | None = None
+    data_lines: list[str] = []
+
+    def consume_event() -> dict[str, Any] | None:
+        nonlocal latest_response
+        if not data_lines:
+            return None
+        data = "\n".join(data_lines).strip()
+        data_lines.clear()
+        if not data or data == "[DONE]":
+            return None
+        event = json.loads(data)
+        event_type = str(event.get("type") or "")
+        embedded = event.get("response")
+        if isinstance(embedded, dict):
+            latest_response = embedded
+        elif isinstance(event.get("output"), list):
+            latest_response = event
+        if event_type == "response.completed" and latest_response is not None:
+            return latest_response
+        if event_type in {"response.failed", "error"}:
+            detail = (
+                event.get("error")
+                or (embedded.get("error") if isinstance(embedded, dict) else None)
+                or event.get("message")
+                or event
+            )
+            raise _RetryableAIStreamError(str(detail)[:500])
+        return None
+
+    while True:
+        raw_line = response.readline()
+        if not raw_line:
+            break
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            completed = consume_event()
+            if completed is not None:
+                return completed
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+
+    completed = consume_event()
+    if completed is not None:
+        return completed
+    if latest_response is not None and latest_response.get("status") == "completed":
+        return latest_response
+    raise _RetryableAIStreamError("stream ended before response.completed")
 
 
 def _output_text(response: dict[str, Any]) -> str:
@@ -745,12 +856,12 @@ def _compact_evidence(value: Any) -> dict[str, Any]:
             concept_tags.append(str(tag))
     compact = {
         "shared_tag": value.get("shared_tag"),
-        "source_themes": list(value.get("source_themes") or [])[:8],
-        "concept_tags": concept_tags[:8],
+        "source_themes": list(value.get("source_themes") or [])[:6],
+        "concept_tags": concept_tags[:6],
         "board_tag": value.get("board_tag"),
         "board_status": value.get("board_status"),
-        "limit_reason": _trim(value.get("limit_reason"), 240),
-        "aggregated_reason": _trim(value.get("aggregated_reason"), 300),
+        "limit_reason": _trim(value.get("limit_reason"), 180),
+        "aggregated_reason": _trim(value.get("aggregated_reason"), 220),
         "trade_date": value.get("trade_date"),
     }
     return {

@@ -104,7 +104,7 @@ def install_ai_relay_compat() -> None:
         for attempt in range(max(1, attempts)):
             try:
                 with ai_module.open_url(request, timeout=self.timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    return ai_module._read_response_json(response)
             except urllib.error.HTTPError as error:
                 last_error = error
                 body = error.read().decode("utf-8", errors="replace")
@@ -124,7 +124,26 @@ def install_ai_relay_compat() -> None:
                     attempt + 2,
                     attempts,
                 )
-            except (urllib.error.URLError, TimeoutError) as error:
+            except TimeoutError as error:
+                timeout_attempts = (
+                    min(max(1, attempts), 2)
+                    if ai_module._request_streams(request)
+                    else 1
+                )
+                last_error = error
+                last_message = (
+                    f"AI upstream read timed out after {min(attempt + 1, timeout_attempts)}/"
+                    f"{timeout_attempts} attempts (host={host}, timeout={self.timeout:g}s): "
+                    f"{error}"
+                )
+                if attempt >= timeout_attempts - 1:
+                    raise RuntimeError(last_message) from error
+            except ai_module._RetryableAIStreamError as error:
+                last_error = error
+                last_message = f"AI upstream stream failed (host={host}): {error}"
+                if attempt >= attempts - 1:
+                    raise RuntimeError(last_message) from error
+            except urllib.error.URLError as error:
                 last_error = error
                 last_message = (
                     f"AI upstream network failed after {attempt + 1}/{attempts} attempts "

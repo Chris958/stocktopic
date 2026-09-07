@@ -10,6 +10,7 @@ from stocktopic.service import (
     StockTopicService,
     _admission_candidate_due,
     _semantic_event_signature,
+    _semantic_signature_events,
 )
 
 CN = ZoneInfo("Asia/Shanghai")
@@ -233,6 +234,29 @@ class ServiceGuardTests(TestCase):
         self.assertNotEqual(
             _semantic_event_signature(base), _semantic_event_signature(new_stock)
         )
+
+    def test_semantic_signature_ignores_isolated_stock_after_graph_candidate_exists(self):
+        candidate = [
+            {
+                "code": f"60000{index}.SH",
+                "market": "主板",
+                "themes": ["液冷"],
+                "limit_reason": "液冷超节点发布",
+                "concept_tags": [{"tag": "液冷"}],
+            }
+            for index in range(4)
+        ]
+        isolated = {
+            "code": "688999.SH",
+            "market": "创业板",
+            "themes": ["孤立事件"],
+            "limit_reason": "无关异动",
+            "concept_tags": [{"tag": "孤立事件"}],
+        }
+
+        relevant = _semantic_signature_events([*candidate, isolated])
+
+        self.assertEqual({item["code"] for item in relevant}, {item["code"] for item in candidate})
 
     def test_auction_zero_prices_are_skipped_without_minus_one_hundred_events(self):
         self.service.database.replace_calendar(

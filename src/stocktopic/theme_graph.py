@@ -375,10 +375,33 @@ def _graph_first_cluster_limit_events(
         # to invent a four-stock theme from scratch.
         return []
 
+    graph_payload = [
+        {
+            "anchor_tag": item["tag"],
+            "member_codes": item["member_codes"],
+            "cluster_confidence": item["cluster_confidence"],
+            "member_reasons": {
+                str(code): str(reason)[:180]
+                for code, reason in item.get("member_reasons", {}).items()
+                if str(code) in allowed_codes and str(reason).strip()
+            },
+            "parent_only": bool(item.get("parent_only")),
+        }
+        for item in graph_candidates
+    ]
+    # Only candidate-connected stocks can be accepted by the graph verifier. Sending
+    # every unrelated strong stock increased prompt size and made slower relay routes
+    # exceed the read timeout without improving recall.
+    candidate_codes = {
+        str(code)
+        for item in graph_payload
+        for code in item["member_codes"]
+        if str(code) in allowed_codes
+    }
     compact_events = []
-    for event in events[:120]:
+    for event in events:
         code = str(event.get("code") or "").strip()
-        if not code:
+        if code not in candidate_codes:
             continue
         compact_events.append(
             {
@@ -387,26 +410,15 @@ def _graph_first_cluster_limit_events(
                 "market": event.get("market"),
                 "board_tag": event.get("board_tag"),
                 "status": event.get("status"),
-                "limit_reason": str(event.get("limit_reason") or "")[:240],
-                "source_themes": list(event.get("themes") or [])[:8],
+                "limit_reason": str(event.get("limit_reason") or "")[:180],
+                "source_themes": list(event.get("themes") or [])[:6],
                 "concept_tags": [
                     item.get("tag")
-                    for item in event.get("concept_tags", [])[:10]
+                    for item in event.get("concept_tags", [])[:6]
                     if isinstance(item, dict) and item.get("tag")
                 ],
             }
         )
-
-    graph_payload = [
-        {
-            "anchor_tag": item["tag"],
-            "member_codes": item["member_codes"],
-            "cluster_confidence": item["cluster_confidence"],
-            "member_reasons": item.get("member_reasons", {}),
-            "parent_only": bool(item.get("parent_only")),
-        }
-        for item in graph_candidates
-    ]
     anchor_tags = {str(item["anchor_tag"]) for item in graph_payload}
     prompt = f"""
 你是A股题材图谱验证器。系统已经先用结构化知识图谱完成股票聚合；你只能在这些图谱候选上
@@ -457,12 +469,12 @@ def _graph_first_cluster_limit_events(
 
     raw, parsed, sources = self._call_prompt(
         prompt,
-        reasoning_effort="medium",
+        reasoning_effort="low",
         task_type="semantic_event_clustering",
         subject_id=trade_date,
-        search_context_size="medium",
-        max_output_tokens=7000,
-        max_tool_calls=5,
+        search_context_size="low",
+        max_output_tokens=5000,
+        max_tool_calls=4,
     )
     clusters = parsed.get("clusters")
     if not isinstance(clusters, list):

@@ -102,6 +102,21 @@ append_default "CATALYST_CONFIDENCE_THRESHOLD" "65"
 append_default "MINIMUM_EXPECTED_DURATION_DAYS" "3"
 append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
 append_default "CATALYST_REFRESH_HOURS" "08:40,15:30"
+append_default "OPENAI_TIMEOUT_SECONDS" "120"
+
+set_default_if_blank() {
+  local key="$1"
+  local value="$2"
+  if grep -q "^${key}=$" "$APP_DIR/.env"; then
+    sed -i '' "s|^${key}=$|${key}=${value}|" "$APP_DIR/.env"
+  elif ! grep -q "^${key}=" "$APP_DIR/.env"; then
+    printf '\n%s=%s\n' "$key" "$value" >> "$APP_DIR/.env"
+  fi
+}
+
+set_default_if_blank "OPENAI_CATALYST_MODEL" "gpt-5.5"
+set_default_if_blank "OPENAI_ADMISSION_MODEL" "gpt-5.6-sol"
+set_default_if_blank "OPENAI_CLUSTER_MODEL" "gpt-5.6-terra"
 
 
 if ! grep -q '^WECOM_BOT_WEBHOOK=' "$APP_DIR/.env"; then
