@@ -1644,7 +1644,8 @@ class StockTopicService:
                     "pending_separate_catalyst_refresh": False,
                     "reassess_only_when_new_catalyst": True,
                     "admission_reuses_verified_catalysts": True,
-                    "read_timeout_immediate_retries": 0,
+                    "streaming_requests": True,
+                    "read_timeout_immediate_retries": 1,
                     "timeout_seconds": self.settings.openai_timeout_seconds,
                     "models": {
                         "catalyst_refresh": self._ai_model_for_task("catalyst_refresh"),
