@@ -64,7 +64,7 @@ class OpenAIEndpointTests(TestCase):
         with self.assertRaisesRegex(ValueError, "must not contain credentials"):
             OpenAIThemeExplainer("key", "model", "https://user:pass@provider.example/v1")
 
-    def test_openai_request_sends_json_accept_and_explicit_user_agent(self):
+    def test_openai_request_accepts_sse_and_sets_explicit_user_agent(self):
         client = OpenAIThemeExplainer("key", "model", "https://relay.example/v1")
         with patch.object(
             client, "_request_json_with_retry", return_value={"output": []}
@@ -72,7 +72,9 @@ class OpenAIEndpointTests(TestCase):
             client._request_payload({"model": "model", "input": "test"})
 
         request = sender.call_args.args[0]
-        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(
+            request.get_header("Accept"), "text/event-stream, application/json"
+        )
         self.assertEqual(
             request.get_header("User-agent"),
             "StockTopic/0.12 (+https://github.com/Chris958/stocktopic)",

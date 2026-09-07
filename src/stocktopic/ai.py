@@ -425,6 +425,11 @@ class OpenAIThemeExplainer:
             "model": request_model,
             "reasoning": {"effort": reasoning_effort},
             "input": prompt,
+            # Long reasoning + web-search requests can exceed a relay's buffered
+            # response timeout. SSE progress events keep the connection active and
+            # the final ``response.completed`` event still contains the canonical
+            # Responses API object used by the rest of the application.
+            "stream": True,
         }
         if web_search:
             base_payload.update(
@@ -513,7 +518,7 @@ class OpenAIThemeExplainer:
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             method="POST",
             headers={
-                "Accept": "application/json",
+                "Accept": "text/event-stream, application/json",
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
                 "User-Agent": "StockTopic/0.12 (+https://github.com/Chris958/stocktopic)",
@@ -577,7 +582,7 @@ class OpenAIThemeExplainer:
         for attempt in range(max(1, attempts)):
             try:
                 with open_url(request, timeout=self.timeout) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    return _read_response_json(response)
             except urllib.error.HTTPError as error:
                 last_error = error
                 body = error.read().decode("utf-8", errors="replace")
@@ -586,14 +591,24 @@ class OpenAIThemeExplainer:
                 if not retryable or attempt >= attempts - 1:
                     raise RuntimeError(last_message) from error
             except TimeoutError as error:
-                # A read timeout happens after the request reached the model. Retrying
-                # immediately can bill the same long generation multiple times even
-                # though the response was not received, so leave recovery to the
-                # service-level cooldown instead.
-                raise RuntimeError(
-                    f"AI upstream read timed out after 1/1 attempt "
-                    f"(host={host}, timeout={self.timeout:g}s): {error}"
-                ) from error
+                # Streaming progress makes a silent read timeout much more likely to
+                # be a broken relay connection than a healthy long generation. Allow
+                # one bounded retry for streamed requests; retain the single-attempt
+                # behavior for non-streaming requests to avoid duplicate billing.
+                timeout_attempts = min(max(1, attempts), 2) if _request_streams(request) else 1
+                last_error = error
+                last_message = (
+                    f"AI upstream read timed out after {min(attempt + 1, timeout_attempts)}/"
+                    f"{timeout_attempts} attempts (host={host}, timeout={self.timeout:g}s): "
+                    f"{error}"
+                )
+                if attempt >= timeout_attempts - 1:
+                    raise RuntimeError(last_message) from error
+            except _RetryableAIStreamError as error:
+                last_error = error
+                last_message = f"AI upstream stream failed (host={host}): {error}"
+                if attempt >= attempts - 1:
+                    raise RuntimeError(last_message) from error
             except urllib.error.URLError as error:
                 last_error = error
                 last_message = (
@@ -609,6 +624,75 @@ class OpenAIThemeExplainer:
                     raise RuntimeError(last_message) from error
             time.sleep(1.0 * (2**attempt))
         raise RuntimeError(last_message) from last_error
+
+
+class _RetryableAIStreamError(RuntimeError):
+    """The relay accepted a stream but reported a transient upstream failure."""
+
+
+def _request_streams(request: urllib.request.Request) -> bool:
+    try:
+        payload = json.loads((request.data or b"{}").decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return payload.get("stream") is True
+
+
+def _read_response_json(response: Any) -> dict[str, Any]:
+    """Read either a normal JSON response or a Responses API SSE stream."""
+    headers = getattr(response, "headers", None)
+    content_type = str(headers.get("Content-Type", "") if headers is not None else "")
+    if "text/event-stream" not in content_type.casefold():
+        return json.loads(response.read().decode("utf-8"))
+
+    latest_response: dict[str, Any] | None = None
+    data_lines: list[str] = []
+
+    def consume_event() -> dict[str, Any] | None:
+        nonlocal latest_response
+        if not data_lines:
+            return None
+        data = "\n".join(data_lines).strip()
+        data_lines.clear()
+        if not data or data == "[DONE]":
+            return None
+        event = json.loads(data)
+        event_type = str(event.get("type") or "")
+        embedded = event.get("response")
+        if isinstance(embedded, dict):
+            latest_response = embedded
+        elif isinstance(event.get("output"), list):
+            latest_response = event
+        if event_type == "response.completed" and latest_response is not None:
+            return latest_response
+        if event_type in {"response.failed", "error"}:
+            detail = (
+                event.get("error")
+                or (embedded.get("error") if isinstance(embedded, dict) else None)
+                or event.get("message")
+                or event
+            )
+            raise _RetryableAIStreamError(str(detail)[:500])
+        return None
+
+    while True:
+        raw_line = response.readline()
+        if not raw_line:
+            break
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if not line:
+            completed = consume_event()
+            if completed is not None:
+                return completed
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+
+    completed = consume_event()
+    if completed is not None:
+        return completed
+    if latest_response is not None and latest_response.get("status") == "completed":
+        return latest_response
+    raise _RetryableAIStreamError("stream ended before response.completed")
 
 
 def _output_text(response: dict[str, Any]) -> str:
