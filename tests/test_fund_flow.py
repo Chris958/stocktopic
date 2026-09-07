@@ -176,6 +176,37 @@ def test_migration_retains_legacy_without_dependency(tmp_path):
     assert db.flow_history("stock", "600001.SH") == []
 
 
+def test_migration_preserves_duplicate_legacy_tables(tmp_path):
+    db = Database(tmp_path / "old.db", tmp_path / "archive")
+    with db.connect() as con:
+        con.execute("CREATE TABLE legacy_order_flow_reports (report_json TEXT)")
+        con.execute("INSERT INTO legacy_order_flow_reports VALUES (?)", ("first archive",))
+        con.execute("CREATE TABLE level2_reports (report_json TEXT)")
+        con.execute("INSERT INTO level2_reports VALUES (?)", ("second archive",))
+
+    db.initialize()
+    db.initialize()
+
+    with db.connect() as con:
+        tables = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name LIKE 'legacy_order_flow_reports%'"
+            ).fetchall()
+        }
+        assert tables == {"legacy_order_flow_reports", "legacy_order_flow_reports_2"}
+        assert con.execute(
+            "SELECT report_json FROM legacy_order_flow_reports"
+        ).fetchone()[0] == "first archive"
+        assert con.execute(
+            "SELECT report_json FROM legacy_order_flow_reports_2"
+        ).fetchone()[0] == "second archive"
+        assert not con.execute(
+            "SELECT name FROM sqlite_master WHERE name='level2_reports'"
+        ).fetchone()
+
+
 def test_intraday_rejects_empty_and_stale(monkeypatch):
     import json
     from io import BytesIO
