@@ -22,6 +22,7 @@ from .level2 import analyze_level2_orders
 from .market_clock import MarketClock
 from .providers import NumcatClient, NumcatError, TushareClient
 from .scoring import ThemeScorer
+from .theme_graph import structured_event_clusters
 from .themes import ThemeDiscovery
 from .wecom import WeComNotifier
 
@@ -658,7 +659,10 @@ class StockTopicService:
             events = self.database.limit_touch_events(trade_date)
             if len(events) < self.settings.minimum_limit_touches:
                 return []
-            input_signature = _semantic_event_signature(events)
+            signature_events = _semantic_signature_events(
+                events, self.settings.minimum_limit_touches
+            )
+            input_signature = _semantic_event_signature(signature_events)
             cached = self.database.semantic_cluster_run(trade_date, input_signature)
             semantic_clusters: list[dict[str, Any]] | None = None
             if cached and cached.get("status") == "success":
@@ -1634,10 +1638,13 @@ class StockTopicService:
                 ),
                 "policy": {
                     "semantic_cluster_cache": "trade_date+input_signature",
+                    "semantic_signature_scope": "graph_candidate_members",
                     "watching_catalyst_refreshes_per_day": 2,
                     "confirmed_catalyst_refreshes_per_day": 1,
                     "pending_separate_catalyst_refresh": False,
                     "reassess_only_when_new_catalyst": True,
+                    "admission_reuses_verified_catalysts": True,
+                    "read_timeout_immediate_retries": 0,
                     "timeout_seconds": self.settings.openai_timeout_seconds,
                     "models": {
                         "catalyst_refresh": self._ai_model_for_task("catalyst_refresh"),
@@ -1703,6 +1710,38 @@ def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
     ).hexdigest()
+
+
+def _semantic_signature_events(
+    events: list[dict[str, Any]], minimum_members: int = 2
+) -> list[dict[str, Any]]:
+    """Ignore isolated stocks once local graph candidates exist.
+
+    The graph is still rebuilt from every event on every collection pass. A new stock
+    that forms a two-member relationship therefore enters the signature immediately,
+    while unrelated one-off movers no longer invalidate a successful AI cache entry.
+    """
+    codes = {
+        str(event.get("code") or "").strip()
+        for event in events
+        if str(event.get("code") or "").strip()
+    }
+    clusters = structured_event_clusters(
+        events,
+        minimum_members=max(2, minimum_members),
+        include_broad_parents=len(codes) >= 4,
+    )
+    candidate_codes = {
+        str(code)
+        for cluster in clusters[:20]
+        for code in cluster.get("member_codes", [])
+        if str(code) in codes
+    }
+    if not candidate_codes:
+        return events
+    return [
+        event for event in events if str(event.get("code") or "").strip() in candidate_codes
+    ]
 
 
 def _safe_error(error: Exception) -> str:

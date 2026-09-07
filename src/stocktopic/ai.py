@@ -100,7 +100,7 @@ class OpenAIThemeExplainer:
 任务输入（只使用下列数据）：
 候选题材：{json.dumps(immutable_candidate, ensure_ascii=False)}
 其他题材名称：{json.dumps(other_theme_names[:20], ensure_ascii=False)}
-已经收录的催化（不得重复）：{json.dumps((existing_catalysts or [])[:6], ensure_ascii=False)}
+已经收录的催化（不得重复）：{json.dumps((existing_catalysts or [])[:4], ensure_ascii=False)}
 """.strip()
         raw, parsed, sources = self._call_prompt(
             prompt,
@@ -108,8 +108,8 @@ class OpenAIThemeExplainer:
             task_type="catalyst_refresh",
             subject_id=str(theme.get("id") or ""),
             search_context_size="low",
-            max_output_tokens=3500,
-            max_tool_calls=3,
+            max_output_tokens=2500,
+            max_tool_calls=2,
         )
         catalysts = _normalize_catalysts(parsed.get("catalysts"), sources)
         if not catalysts and sources:
@@ -418,18 +418,27 @@ class OpenAIThemeExplainer:
         search_context_size: str = "medium",
         max_output_tokens: int = 6000,
         max_tool_calls: int = 5,
+        web_search: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]:
         request_model = self.model_for_task(task_type)
         base_payload = {
             "model": request_model,
             "reasoning": {"effort": reasoning_effort},
-            "tools": [
-                {"type": "web_search", "search_context_size": search_context_size}
-            ],
-            "tool_choice": "required",
-            "include": ["web_search_call.action.sources"],
             "input": prompt,
         }
+        if web_search:
+            base_payload.update(
+                {
+                    "tools": [
+                        {
+                            "type": "web_search",
+                            "search_context_size": search_context_size,
+                        }
+                    ],
+                    "tool_choice": "required",
+                    "include": ["web_search_call.action.sources"],
+                }
+            )
         raw, controls_mode = self._request_with_compatible_controls(
             base_payload,
             task_type=task_type,
@@ -576,7 +585,16 @@ class OpenAIThemeExplainer:
                 retryable = error.code == 429 or error.code >= 500
                 if not retryable or attempt >= attempts - 1:
                     raise RuntimeError(last_message) from error
-            except (urllib.error.URLError, TimeoutError) as error:
+            except TimeoutError as error:
+                # A read timeout happens after the request reached the model. Retrying
+                # immediately can bill the same long generation multiple times even
+                # though the response was not received, so leave recovery to the
+                # service-level cooldown instead.
+                raise RuntimeError(
+                    f"AI upstream read timed out after 1/1 attempt "
+                    f"(host={host}, timeout={self.timeout:g}s): {error}"
+                ) from error
+            except urllib.error.URLError as error:
                 last_error = error
                 last_message = (
                     f"AI upstream network failed after {attempt + 1}/{attempts} attempts "
@@ -754,12 +772,12 @@ def _compact_evidence(value: Any) -> dict[str, Any]:
             concept_tags.append(str(tag))
     compact = {
         "shared_tag": value.get("shared_tag"),
-        "source_themes": list(value.get("source_themes") or [])[:8],
-        "concept_tags": concept_tags[:8],
+        "source_themes": list(value.get("source_themes") or [])[:6],
+        "concept_tags": concept_tags[:6],
         "board_tag": value.get("board_tag"),
         "board_status": value.get("board_status"),
-        "limit_reason": _trim(value.get("limit_reason"), 240),
-        "aggregated_reason": _trim(value.get("aggregated_reason"), 300),
+        "limit_reason": _trim(value.get("limit_reason"), 180),
+        "aggregated_reason": _trim(value.get("aggregated_reason"), 220),
         "trade_date": value.get("trade_date"),
     }
     return {

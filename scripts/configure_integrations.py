@@ -60,6 +60,15 @@ def main() -> None:
             values.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         ),
         "OPENAI_MODEL": prompt_value("OpenAI模型", values.get("OPENAI_MODEL", "gpt-5.5")),
+        "OPENAI_CATALYST_MODEL": prompt_value(
+            "催化刷新模型", values.get("OPENAI_CATALYST_MODEL", "gpt-5.5")
+        ),
+        "OPENAI_ADMISSION_MODEL": prompt_value(
+            "题材准入模型", values.get("OPENAI_ADMISSION_MODEL", "gpt-5.6-sol")
+        ),
+        "OPENAI_CLUSTER_MODEL": prompt_value(
+            "语义聚类模型", values.get("OPENAI_CLUSTER_MODEL", "gpt-5.6-terra")
+        ),
         "NUMCAT_API_KEY": prompt_value(
             "猫爪数据 API Key",
             values.get("NUMCAT_API_KEY", ""),

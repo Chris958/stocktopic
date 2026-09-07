@@ -228,7 +228,7 @@ def candidate_for_ai(theme: dict[str, Any]) -> dict[str, Any]:
         "theme_id": theme["id"],
         "provisional_name": theme["provisional_name"],
         "shared_tag": theme["shared_tag"],
-        "discovery_reason": str(theme["discovery_reason"])[:700],
+        "discovery_reason": str(theme["discovery_reason"])[:420],
         "stocks_read_only": [
             {
                 "code": member["code"],
@@ -239,13 +239,13 @@ def candidate_for_ai(theme: dict[str, Any]) -> dict[str, Any]:
                         "board_tag": member.get("evidence", {}).get("board_tag"),
                         "limit_reason": str(
                             member.get("evidence", {}).get("limit_reason") or ""
-                        )[:240],
+                        )[:180],
                         "aggregated_reason": str(
                             member.get("evidence", {}).get("aggregated_reason") or ""
-                        )[:300],
+                        )[:220],
                         "source_themes": list(
                             member.get("evidence", {}).get("source_themes") or []
-                        )[:8],
+                        )[:6],
                         "trade_date": member.get("evidence", {}).get("trade_date"),
                         "synchronization_score": member.get("evidence", {}).get(
                             "synchronization_score"

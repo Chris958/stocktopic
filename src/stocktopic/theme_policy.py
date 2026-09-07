@@ -352,20 +352,40 @@ def policy_assess_for_admission(
         if member.get("active", 1)
     ]
     compact_history = [
-        ai_module._compact_history(item) for item in historical_matches[:20]
+        ai_module._compact_history(item) for item in historical_matches[:12]
     ]
     compact_stock_pool = [
         {
             "code": item.get("code"),
             "name": item.get("name"),
-            "matched_tags": list(item.get("matched_tags") or [])[:8],
+            "matched_tags": list(item.get("matched_tags") or [])[:5],
         }
-        for item in eligible_stock_pool[:80]
+        for item in eligible_stock_pool[:40]
     ]
+    compact_catalysts = [
+        {
+            "title": item.get("title"),
+            "summary": str(item.get("summary") or "")[:240],
+            "source": item.get("source_name") or item.get("source"),
+            "url": item.get("source_url") or item.get("url"),
+            "published_at": item.get("published_at"),
+            "catalyst_type": item.get("catalyst_type"),
+            "evidence_level": item.get("evidence_level"),
+            "source_kind": item.get("source_kind"),
+        }
+        for item in theme.get("catalysts", [])
+        if item.get("source_url") or item.get("url")
+    ][:4]
+    search_policy = (
+        "上一步联网聚类或催化刷新已经提供带URL的近期证据。本次只做准入推理，禁止再次联网搜索；"
+        "只能使用下方已验证催化和系统60交易日历史。"
+        if compact_catalysts
+        else "当前没有可复用的带URL催化，必须使用web_search补齐近期证据后再判断。"
+    )
 
     prompt = f"""
 你是A股重点题材准入审查器。目标是识别真正形成资金共识的新炒作逻辑，同时过滤普通轮动。
-必须使用web_search核查最近催化及系统提供的60交易日历史。
+    {search_policy}
 
 关键定义：行业/概念长期存在，并不等于本轮没有新题材资格。请先分类 novelty_mode：
 - new_theme：新的最小共同产业/事件逻辑首次形成广泛共识；
@@ -416,7 +436,8 @@ def policy_assess_for_admission(
 候选最小共同逻辑：{json.dumps(theme.get("shared_tag"), ensure_ascii=False)}
 图谱别名：{json.dumps(theme.get("cluster_aliases") or [], ensure_ascii=False)}
 系统保存的60交易日历史相似题材：{json.dumps(compact_history, ensure_ascii=False)}
-允许提议加入的股票白名单：{json.dumps(compact_stock_pool, ensure_ascii=False)}
+上一步已经核验的近期催化：{json.dumps(compact_catalysts, ensure_ascii=False)}
+允许提议加入的股票白名单（最多40只）：{json.dumps(compact_stock_pool, ensure_ascii=False)}
 """.strip()
 
     raw, parsed, sources = self._call_prompt(
@@ -424,10 +445,36 @@ def policy_assess_for_admission(
         reasoning_effort="medium",
         task_type="admission_analysis",
         subject_id=str(theme.get("id") or ""),
-        search_context_size="medium",
-        max_output_tokens=6000,
-        max_tool_calls=5,
+        search_context_size="low",
+        max_output_tokens=4500,
+        max_tool_calls=3,
+        web_search=not bool(compact_catalysts),
     )
+    if not sources and compact_catalysts:
+        sources = [
+            {
+                "title": str(item.get("title") or item.get("source") or "已有催化"),
+                "url": str(item["url"]),
+            }
+            for item in compact_catalysts
+        ]
+    normalized_catalysts = ai_module._normalize_catalysts(
+        parsed.get("catalysts"), sources
+    )
+    if not normalized_catalysts and compact_catalysts:
+        normalized_catalysts = [
+            {
+                "title": str(item.get("title") or "已有催化"),
+                "summary": str(item.get("summary") or "上一步已核验的催化证据"),
+                "source": str(item.get("source") or ""),
+                "url": str(item["url"]),
+                "published_at": item.get("published_at"),
+                "catalyst_type": str(item.get("catalyst_type") or "背景"),
+                "evidence_level": str(item.get("evidence_level") or "合理推断"),
+                "source_kind": str(item.get("source_kind") or "unknown"),
+            }
+            for item in compact_catalysts
+        ]
     required = {
         "suggested_name",
         "novelty_mode",
@@ -493,7 +540,7 @@ def policy_assess_for_admission(
             parsed.get("proposed_members"), eligible_stock_pool
         ),
         "sources": sources,
-        "catalysts": ai_module._normalize_catalysts(parsed.get("catalysts"), sources),
+        "catalysts": normalized_catalysts,
         "raw": raw,
     }
 
