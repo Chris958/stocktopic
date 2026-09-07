@@ -240,6 +240,31 @@ class OpenAIEndpointTests(TestCase):
         self.assertEqual(recorded[0]["reasoning_tokens"], 120)
         self.assertEqual(recorded[0]["web_search_calls"], 1)
 
+    def test_custom_relay_avoids_nonportable_request_controls_on_first_request(self):
+        client = OpenAIThemeExplainer(
+            "key", "model", base_url="https://relay.example/v1"
+        )
+        payloads = []
+
+        def respond(payload):
+            payloads.append(payload)
+            return {"output": []}
+
+        client._request_payload = respond
+        client._call_prompt(
+            "prompt",
+            reasoning_effort="low",
+            task_type="catalyst_refresh",
+            max_output_tokens=3500,
+            max_tool_calls=3,
+        )
+
+        self.assertEqual(len(payloads), 1)
+        self.assertEqual(payloads[0]["max_output_tokens"], 3500)
+        self.assertNotIn("max_tool_calls", payloads[0])
+        self.assertNotIn("prompt_cache_key", payloads[0])
+        self.assertEqual(client._request_controls_mode, "bounded")
+
     def test_unsupported_optional_controls_are_negotiated_once(self):
         client = OpenAIThemeExplainer("key", "model")
         payloads = []

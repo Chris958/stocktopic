@@ -41,7 +41,16 @@ class OpenAIThemeExplainer:
             for key, value in (task_models or {}).items()
             if str(value).strip()
         }
-        self._request_controls_mode: str | None = None
+        # Third-party OpenAI-compatible relays commonly implement Responses API
+        # without newer optional controls such as ``max_tool_calls`` and
+        # ``prompt_cache_key``.  Start those endpoints in the conservative mode
+        # and only send the portable output-token bound.  Official OpenAI keeps
+        # the full controls, while the compatibility layer can still downgrade
+        # either endpoint further when required.
+        endpoint_host = (urllib.parse.urlsplit(self.endpoint).hostname or "").casefold()
+        self._request_controls_mode: str | None = (
+            None if endpoint_host == "api.openai.com" else "bounded"
+        )
         self._request_controls_lock = threading.Lock()
 
     @property
