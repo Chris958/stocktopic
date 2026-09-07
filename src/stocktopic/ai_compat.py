@@ -118,6 +118,12 @@ def install_ai_relay_compat() -> None:
                 )
                 if not retryable or attempt >= attempts - 1:
                     raise RuntimeError(last_message) from error
+                logger.warning(
+                    "AI upstream HTTP %s; retrying request (%s/%s)",
+                    error.code,
+                    attempt + 2,
+                    attempts,
+                )
             except (urllib.error.URLError, TimeoutError) as error:
                 last_error = error
                 last_message = (
