@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from stocktopic.ai import OpenAIThemeExplainer, _concrete_suggested_name
 from stocktopic.theme_graph import install_graph_first_ai_clustering
+from stocktopic.theme_policy import policy_assess_for_admission
 
 
 class JsonResponse:
@@ -34,6 +35,26 @@ class OpenAIEndpointTests(TestCase):
         )
         self.assertEqual(client.model_for_task("catalyst_refresh"), "economy-model")
         self.assertEqual(client.model_for_task("admission_analysis"), "strong-model")
+
+    def test_call_without_web_search_omits_all_tool_fields(self):
+        client = OpenAIThemeExplainer("key", "model")
+        payloads = []
+
+        def respond(payload):
+            payloads.append(payload)
+            return {"output": []}
+
+        client._request_payload = respond
+        client._call_prompt(
+            "prompt",
+            reasoning_effort="medium",
+            task_type="admission_analysis",
+            web_search=False,
+        )
+
+        self.assertNotIn("tools", payloads[0])
+        self.assertNotIn("tool_choice", payloads[0])
+        self.assertNotIn("include", payloads[0])
 
     def test_complete_responses_endpoint_is_not_duplicated(self):
         client = OpenAIThemeExplainer("key", "model", "https://provider.example/v1/responses/")
@@ -197,6 +218,75 @@ class OpenAIEndpointTests(TestCase):
         self.assertFalse(result["is_new_theme"])
         self.assertEqual(result["within_window_match_ids"], [])
         self.assertIn("更早历史只能作为产业背景", captured["prompt"])
+
+    def test_policy_admission_reuses_verified_catalyst_without_second_web_search(self):
+        client = OpenAIThemeExplainer("key", "model")
+        captured = {}
+
+        def answer(prompt, **kwargs):
+            captured["prompt"] = prompt
+            captured.update(kwargs)
+            return (
+                {"output": []},
+                {
+                    "suggested_name": "液冷超节点发布",
+                    "novelty_mode": "new_catalyst",
+                    "is_new_theme": True,
+                    "novelty_confidence": 85,
+                    "novelty_reason": "新产品发布",
+                    "within_window_match_ids": [],
+                    "catalyst_summary": "厂商发布新产品",
+                    "catalyst_confidence": 82,
+                    "expected_duration_days": 3,
+                    "duration_reason": "产品发布后仍有订单验证",
+                    "leader_candidate_code": "600000.SH",
+                    "leader_upside_scenario_pct": 30,
+                    "upside_scenario_reason": "订单兑现情景",
+                    "counter_evidence": [],
+                    "proposed_members": [],
+                    "catalysts": [
+                        {
+                            "title": "产品发布",
+                            "url": "https://example.com/release",
+                            "source": "公司",
+                            "evidence_level": "官方确认",
+                            "source_kind": "company_disclosure",
+                        }
+                    ],
+                },
+                [],
+            )
+
+        client._call_prompt = answer
+        result = policy_assess_for_admission(
+            client,
+            {
+                "id": 7,
+                "provisional_name": "液冷待审",
+                "shared_tag": "液冷超节点",
+                "cluster_aliases": ["液冷"],
+                "members": [
+                    {"code": "600000.SH", "name": "测试股份", "evidence": {}}
+                ],
+                "catalysts": [
+                    {
+                        "title": "产品发布",
+                        "summary": "发布新一代产品",
+                        "source_name": "公司",
+                        "source_url": "https://example.com/release",
+                        "evidence_level": "官方确认",
+                        "source_kind": "company_disclosure",
+                    }
+                ],
+            },
+            [],
+            [],
+        )
+
+        self.assertFalse(captured["web_search"])
+        self.assertEqual(captured["max_output_tokens"], 4500)
+        self.assertIn("禁止再次联网搜索", captured["prompt"])
+        self.assertEqual(result["sources"][0]["url"], "https://example.com/release")
 
     def test_responses_request_has_task_specific_token_controls_and_usage_recording(self):
         recorded = []

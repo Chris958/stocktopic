@@ -118,13 +118,13 @@ class Settings:
             ),
             openai_model=openai_model,
             openai_catalyst_model=(
-                os.getenv("OPENAI_CATALYST_MODEL", "").strip() or openai_model
+                os.getenv("OPENAI_CATALYST_MODEL", "").strip() or "gpt-5.5"
             ),
             openai_admission_model=(
-                os.getenv("OPENAI_ADMISSION_MODEL", "").strip() or openai_model
+                os.getenv("OPENAI_ADMISSION_MODEL", "").strip() or "gpt-5.6-sol"
             ),
             openai_cluster_model=(
-                os.getenv("OPENAI_CLUSTER_MODEL", "").strip() or openai_model
+                os.getenv("OPENAI_CLUSTER_MODEL", "").strip() or "gpt-5.6-terra"
             ),
             openai_timeout_seconds=max(
                 30.0,

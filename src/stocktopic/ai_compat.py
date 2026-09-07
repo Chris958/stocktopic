@@ -118,7 +118,12 @@ def install_ai_relay_compat() -> None:
                 )
                 if not retryable or attempt >= attempts - 1:
                     raise RuntimeError(last_message) from error
-            except (urllib.error.URLError, TimeoutError) as error:
+            except TimeoutError as error:
+                raise RuntimeError(
+                    f"AI upstream read timed out after 1/1 attempt "
+                    f"(host={host}, timeout={self.timeout:g}s): {error}"
+                ) from error
+            except urllib.error.URLError as error:
                 last_error = error
                 last_message = (
                     f"AI upstream network failed after {attempt + 1}/{attempts} attempts "

@@ -110,3 +110,22 @@ def test_normal_http_500_still_retries(monkeypatch):
 
     assert client._request_json_with_retry(request, attempts=3) == {"output": []}
     assert calls == 2
+
+
+def test_read_timeout_is_not_immediately_retried_and_double_billed(monkeypatch):
+    install_ai_relay_compat()
+    client = OpenAIThemeExplainer("key", "model", base_url="https://relay.example/v1")
+    calls = 0
+
+    def timeout(_request, timeout):
+        nonlocal calls
+        calls += 1
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(ai_module, "open_url", timeout)
+    request = urllib.request.Request(client.endpoint, data=b"{}", method="POST")
+
+    with pytest.raises(RuntimeError, match="read timed out after 1/1 attempt"):
+        client._request_json_with_retry(request, attempts=3)
+
+    assert calls == 1

@@ -112,7 +112,10 @@ Webhook中的Key等同密码：只能放在权限为600的`.env`中，不要发�
 ```dotenv
 OPENAI_API_KEY=你的Key
 OPENAI_BASE_URL=https://服务商地址/v1
-OPENAI_MODEL=服务商支持的模型名
+OPENAI_MODEL=gpt-5.6-sol
+OPENAI_CATALYST_MODEL=gpt-5.5
+OPENAI_ADMISSION_MODEL=gpt-5.6-sol
+OPENAI_CLUSTER_MODEL=gpt-5.6-terra
 ```
 
 `OPENAI_BASE_URL` 推荐填写到 `/v1`，系统会自动追加 `/responses`；填写完整
@@ -127,7 +130,8 @@ launchctl kickstart -k gui/$(id -u)/com.chris958.stocktopic
 `prompt_cache_key`，只保留`max_output_tokens`。如果中转连该参数也不支持，系统会自动降级为
 基础Responses API请求；官方`api.openai.com`仍使用完整请求控制参数。
 
-AI请求遇到DNS瞬断、连接超时、HTTP 429或上游5xx时，会按1秒、2秒间隔最多尝试3次。
+AI请求遇到DNS瞬断、HTTP 429或上游5xx时，会按1秒、2秒间隔最多尝试3次。读取超时不立即
+重发，避免同一个已到达模型的长请求被重复计费；系统冷却后仍会自动恢复审查。
 若仍失败，候选保持在“AI分析失败”状态，后台每30分钟重新审查，不需要重新创建候选。
 如果服务升级或重启时正处于AI准入请求，启动时会把遗留的`analyzing`状态恢复为
 `awaiting_ai`并立即重试；运行期间超过15分钟的孤立`analyzing`状态也会由看门狗重新调度。
