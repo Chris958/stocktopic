@@ -110,3 +110,32 @@ def test_normal_http_500_still_retries(monkeypatch):
 
     assert client._request_json_with_retry(request, attempts=3) == {"output": []}
     assert calls == 2
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504])
+def test_persistent_upstream_5xx_uses_all_retry_attempts(monkeypatch, status):
+    install_ai_relay_compat()
+    client = OpenAIThemeExplainer("key", "model", base_url="https://relay.example/v1")
+    calls = 0
+    sleeps = []
+
+    def reject(_request, timeout):
+        nonlocal calls
+        calls += 1
+        raise urllib.error.HTTPError(
+            "https://relay.example/v1/responses",
+            status,
+            "upstream failure",
+            {},
+            io.BytesIO(b'{"error":{"message":"temporary upstream failure"}}'),
+        )
+
+    monkeypatch.setattr(ai_module, "open_url", reject)
+    monkeypatch.setattr("stocktopic.ai_compat.time.sleep", sleeps.append)
+    request = urllib.request.Request(client.endpoint, data=b"{}", method="POST")
+
+    with pytest.raises(RuntimeError, match=f"OpenAI HTTP {status}"):
+        client._request_json_with_retry(request, attempts=3)
+
+    assert calls == 3
+    assert sleeps == [1.0, 2.0]

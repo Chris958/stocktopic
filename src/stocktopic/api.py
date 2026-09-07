@@ -17,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .config import Settings
-from .providers import NumcatError
 from .service import StockTopicService
 from .theme_graph_view import build_theme_graph
 
@@ -51,12 +50,6 @@ class TrackStockRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=100)
     password: str = Field(min_length=1, max_length=500)
-
-
-class Level2AnalysisRequest(BaseModel):
-    code: str = Field(min_length=6, max_length=16)
-    trade_date: str | None = Field(default=None, min_length=8, max_length=10)
-    force_refresh: bool = False
 
 
 SESSION_COOKIE = "stocktopic_session"
@@ -220,24 +213,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(error)) from error
         return {"ok": True, "created": created, "entry": entry}
 
-    @app.post("/api/v1/level2/analyze")
-    async def analyze_level2(request: Level2AnalysisRequest):
-        try:
-            report = await asyncio.to_thread(
-                service.analyze_level2_stock,
-                request.code,
-                request.trade_date,
-                None,
-                request.force_refresh,
-            )
-        except NumcatError as error:
-            raise HTTPException(status_code=502, detail=_safe_integration_error(error)) from error
-        except ValueError as error:
-            raise HTTPException(status_code=400, detail=str(error)) from error
-        except RuntimeError as error:
-            status = 503 if "尚未配置" in str(error) else 422
-            raise HTTPException(status_code=status, detail=str(error)) from error
-        return {"ok": True, "report": report}
+    @app.get("/api/v1/fund-flow/{kind}/{owner}")
+    async def flow_history(
+        kind: str, owner: str, trade_date: str | None = None, as_of: str | None = None
+    ):
+        if kind not in {"stock", "theme"}:
+            raise HTTPException(status_code=400, detail="kind必须是stock或theme")
+        return {"history": service.database.flow_history(kind, owner, trade_date, as_of)}
 
     @app.get("/api/v1/themes")
     async def themes(status: str | None = None):
@@ -348,8 +330,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/admin/refresh-fund-flow/{slot}")
     async def refresh_fund_flow(slot: str):
-        if slot not in {"morning", "close"}:
-            raise HTTPException(status_code=400, detail="slot必须是morning或close")
+        if slot not in {"intraday", "close"}:
+            raise HTTPException(status_code=400, detail="slot必须是intraday或close")
         return await asyncio.to_thread(service.refresh_fund_flows, slot)
 
     @app.post("/api/v1/admin/refresh-theme-graph")
@@ -480,7 +462,7 @@ def _safe_integration_error(error: Exception) -> str:
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)
     message = re.sub(
-        r'(?i)(["\']?(?:apikey|NUMCAT_API_KEY)["\']?\s*[:=]\s*)[^,}\s]+',
+        r'(?i)(["\']?(?:apikey|API_KEY)["\']?\s*[:=]\s*)[^,}\s]+',
         r"\1***",
         message,
     )

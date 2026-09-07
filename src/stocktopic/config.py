@@ -56,7 +56,6 @@ class Settings:
     openai_catalyst_model: str = ""
     openai_admission_model: str = ""
     openai_cluster_model: str = ""
-    numcat_api_key: str = ""
     wecom_bot_webhook: str = ""
     admin_username: str = "admin"
     admin_password: str = ""
@@ -125,7 +124,6 @@ class Settings:
             openai_cluster_model=(
                 os.getenv("OPENAI_CLUSTER_MODEL", "").strip() or openai_model
             ),
-            numcat_api_key=os.getenv("NUMCAT_API_KEY", "").strip(),
             wecom_bot_webhook=os.getenv("WECOM_BOT_WEBHOOK", "").strip(),
             admin_username=os.getenv("ADMIN_USERNAME", "admin").strip(),
             admin_password=admin_password,
@@ -147,8 +145,6 @@ class Settings:
             warnings.append("OPENAI_API_KEY missing: AI naming and news explanation disabled")
         if not self.wecom_bot_webhook:
             warnings.append("WeCom group robot webhook not configured: push disabled")
-        if not self.numcat_api_key:
-            warnings.append("NUMCAT_API_KEY missing: Level-2 order-flow analysis disabled")
         return warnings
 
 

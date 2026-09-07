@@ -41,7 +41,7 @@ def test_api_auth_and_csrf_guard():
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
         assert script.status_code == 200
-        assert "flow-net-trigger" in script.text
+        assert "member-flow-details" in script.text
         assert 'level2-button' not in script.text
         assert script.headers["cache-control"] == "no-store, must-revalidate"
         assert client.get("/static/manifest.webmanifest").status_code == 200
@@ -85,8 +85,7 @@ def test_api_auth_and_csrf_guard():
             json={"code": "603269.SH"},
             headers=basic,
         )
-        assert level2.status_code == 503
-        assert "猫爪数据尚未配置" in level2.json()["detail"]
+        assert level2.status_code == 404
         response = client.post("/api/v1/admin/run-once", headers=basic)
         assert response.status_code == 200
         assert response.json()["status"] == "idle"
