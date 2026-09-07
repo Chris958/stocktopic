@@ -59,15 +59,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     service = StockTopicService(settings)
 
+    async def run_background_services() -> None:
+        try:
+            await asyncio.to_thread(service.initialize_reference_data)
+        except Exception:
+            logger.exception("Background reference data initialization failed")
+        await service.run_scheduler()
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
-        await asyncio.to_thread(service.initialize)
-        scheduler = asyncio.create_task(service.run_scheduler(), name="stocktopic-scheduler")
+        await asyncio.to_thread(service.initialize_storage)
+        background_services = asyncio.create_task(
+            run_background_services(), name="stocktopic-background-services"
+        )
         try:
             yield
         finally:
             service.stop()
-            await scheduler
+            await background_services
 
     app = FastAPI(
         title="StockTopic API",
