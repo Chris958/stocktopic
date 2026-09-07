@@ -74,6 +74,10 @@ class StockTopicService:
         return self.settings.openai_model
 
     def initialize(self) -> None:
+        self.initialize_storage()
+        self.initialize_reference_data()
+
+    def initialize_storage(self) -> None:
         self.settings.ensure_directories()
         self.database.initialize()
         recovered_ai = self.database.recover_interrupted_ai_analyses()
@@ -89,6 +93,8 @@ class StockTopicService:
                 "admission_v2_legacy_reclassified",
                 f"awaiting_ai={result['awaiting_ai']},failed={result['failed']}",
             )
+
+    def initialize_reference_data(self) -> None:
         self.bootstrap_reference_data()
         self.refresh_test_pool_prices(self.clock.china_now())
 
