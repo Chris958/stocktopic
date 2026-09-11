@@ -11,7 +11,10 @@ from typing import Any
 from .providers.tushare import TushareClient, TushareError
 from .service import StockTopicService
 
-_QUOTE_MIN_RAW_ROWS = 2000
+# The supported main-board + ChiNext universe is above 4,400 securities. A
+# 2,000-3,000 row rt_k response is partial and must be retried before the service's
+# 80% coverage guard evaluates it.
+_QUOTE_MIN_RAW_ROWS = 4000
 _QUOTE_RETRY_DELAYS = (1.0, 2.0)
 _TUSHARE_NETWORK_RETRY_DELAYS = (1.0, 3.0)
 _DAILY_METRICS_READY_TIME = time(17, 20)
@@ -66,17 +69,9 @@ def install_data_resilience() -> None:
         raise last_error
 
     def resilient_realtime_quotes(self: TushareClient, captured_at: datetime):
-        best = original_realtime_quotes(self, captured_at)
-        if len(best) >= _QUOTE_MIN_RAW_ROWS:
-            return best
-        for delay in _QUOTE_RETRY_DELAYS:
-            sleep(delay)
-            rows = original_realtime_quotes(self, captured_at)
-            if len(rows) > len(best):
-                best = rows
-            if len(rows) >= _QUOTE_MIN_RAW_ROWS:
-                return rows
-        return best
+        return _best_realtime_snapshot(
+            lambda: original_realtime_quotes(self, captured_at)
+        )
 
     def resilient_data_pull_failure(
         self: StockTopicService,
@@ -203,6 +198,21 @@ def install_data_resilience() -> None:
 def _mark_tushare_success() -> None:
     global _last_tushare_success_at
     _last_tushare_success_at = datetime.now().astimezone()
+
+
+def _best_realtime_snapshot(fetch: Any) -> Any:
+    """Retry empty or partial rt_k snapshots and retain the largest response."""
+    best = fetch()
+    if len(best) >= _QUOTE_MIN_RAW_ROWS:
+        return best
+    for delay in _QUOTE_RETRY_DELAYS:
+        sleep(delay)
+        rows = fetch()
+        if len(rows) > len(best):
+            best = rows
+        if len(rows) >= _QUOTE_MIN_RAW_ROWS:
+            return rows
+    return best
 
 
 def _quote_failure_streak(service: StockTopicService, current: datetime) -> int:
