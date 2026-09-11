@@ -45,8 +45,10 @@ class Database:
         with self.connect() as connection:
             connection.executescript(schema)
             self._migrate_schema(connection)
-            connection.execute("DELETE FROM anomaly_events WHERE pct_change<=-99")
-            connection.execute("DELETE FROM quote_snapshots WHERE close<=0 OR pre_close<=0")
+            # Invalid auction rows were produced by an old bug and have already been
+            # filtered at ingestion since 0.12.  Re-scanning the multi-million-row
+            # quote history on every process start can keep Uvicorn in startup for
+            # minutes, so startup migrations must remain metadata/schema-only.
 
     @staticmethod
     def _migrate_schema(connection: sqlite3.Connection) -> None:
@@ -2466,6 +2468,15 @@ class Database:
         with self.connect() as connection:
             row = connection.execute("PRAGMA quick_check").fetchone()
         return str(row[0])
+
+    def ping(self) -> bool:
+        """Cheap readiness probe; full quick_check must not run on every HTTP poll."""
+        try:
+            with self.connect() as connection:
+                row = connection.execute("SELECT 1").fetchone()
+            return bool(row and row[0] == 1)
+        except sqlite3.Error:
+            return False
 
 
 def _decode_anomaly_rows(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import stocktopic.data_resilience as resilience
 from stocktopic.data_resilience import (
+    _best_realtime_snapshot,
     _is_dependent_network_failure,
     _quote_failure_streak,
     _record_tushare_network_failure,
@@ -28,6 +29,42 @@ class FakeDatabase:
 class FakeService:
     def __init__(self):
         self.database = FakeDatabase()
+
+
+def test_partial_realtime_snapshot_is_retried_until_complete(monkeypatch):
+    snapshots = [list(range(2901)), list(range(4407))]
+    calls = 0
+
+    def fetch():
+        nonlocal calls
+        value = snapshots[min(calls, len(snapshots) - 1)]
+        calls += 1
+        return value
+
+    monkeypatch.setattr(resilience, "sleep", lambda _seconds: None)
+
+    result = _best_realtime_snapshot(fetch)
+
+    assert len(result) == 4407
+    assert calls == 2
+
+
+def test_partial_realtime_retries_keep_largest_snapshot(monkeypatch):
+    snapshots = [list(range(2901)), [], list(range(2780))]
+    calls = 0
+
+    def fetch():
+        nonlocal calls
+        value = snapshots[calls]
+        calls += 1
+        return value
+
+    monkeypatch.setattr(resilience, "sleep", lambda _seconds: None)
+
+    result = _best_realtime_snapshot(fetch)
+
+    assert len(result) == 2901
+    assert calls == 3
 
 
 def test_quote_failure_streak_counts_unique_consecutive_slots_only():

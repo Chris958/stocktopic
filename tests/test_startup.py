@@ -17,6 +17,10 @@ def test_health_is_available_while_reference_data_loads():
             archive_dir=root / "archive",
         )
         app = create_app(settings)
+        # The detailed health response must not scan the entire SQLite database.
+        app.state.service.database.integrity_check = lambda: (_ for _ in ()).throw(
+            AssertionError("health must use the lightweight database ping")
+        )
         reference_started = threading.Event()
         reference_release = threading.Event()
 
@@ -31,6 +35,7 @@ def test_health_is_available_while_reference_data_loads():
                 response = client.get("/health")
                 assert response.status_code == 200
                 assert response.json()["status"] == "ok"
+                assert response.json()["database"] == "reachable"
                 reference_release.set()
         finally:
             reference_release.set()

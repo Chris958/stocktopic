@@ -1266,6 +1266,15 @@ class StockTopicService:
             )
             cohort_count = self._record_daily_cohorts(now)
             backup = self.database.backup()
+            database_integrity = self.database.integrity_check()
+            self.database.set_metadata(
+                "last_database_integrity_check",
+                f"{now.isoformat()}|{database_integrity}",
+            )
+            if database_integrity != "ok":
+                raise RuntimeError(
+                    f"Database integrity check failed: {database_integrity}"
+                )
             self.database.prune_backups()
             archived = self.database.archive_quotes_before(now.date() - timedelta(days=120))
             self.database.set_metadata(run_key, now.isoformat())
@@ -1427,10 +1436,12 @@ class StockTopicService:
         compact = now.strftime("%Y%m%d")
         state = self.clock.state(now, self.database.calendar_status(compact))
         latest = self.database.latest_run("collect_quotes")
+        database_ready = self.database.ping()
         return {
-            "status": "ok" if self.database.integrity_check() == "ok" else "degraded",
+            "status": "ok" if database_ready else "degraded",
             "version": __version__,
             "china_time": now.isoformat(timespec="seconds"),
+            "database": "reachable" if database_ready else "unavailable",
             "market": {
                 "is_open_day": state.is_open_day,
                 "session": state.session,
@@ -1495,6 +1506,9 @@ class StockTopicService:
             },
             "daily_metrics_trade_date": self.database.get_metadata("daily_metrics_synced_date"),
             "latest_wecom_error": self.database.get_metadata("last_wecom_error"),
+            "last_database_integrity_check": self.database.get_metadata(
+                "last_database_integrity_check"
+            ),
             "latest_discovery_backfill": self.database.get_metadata(
                 "last_discovery_backfill"
             ),
