@@ -51,6 +51,7 @@ def main() -> None:
     values = read_values()
     print("===== STOCKTOPIC INTEGRATION CONFIG =====")
     print("敏感值不会显示；秘密字段直接回车会保留原值。")
+    print("AI模型固定为 gpt-5.6-sol；所有AI任务使用同一模型。")
     updates = {
         "OPENAI_API_KEY": prompt_value(
             "OpenAI API Key", values.get("OPENAI_API_KEY", ""), secret=True
@@ -59,16 +60,10 @@ def main() -> None:
             "OpenAI Base URL",
             values.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
         ),
-        "OPENAI_MODEL": prompt_value("OpenAI模型", values.get("OPENAI_MODEL", "gpt-5.5")),
-        "OPENAI_CATALYST_MODEL": prompt_value(
-            "催化刷新模型", values.get("OPENAI_CATALYST_MODEL", "gpt-5.5")
-        ),
-        "OPENAI_ADMISSION_MODEL": prompt_value(
-            "题材准入模型", values.get("OPENAI_ADMISSION_MODEL", "gpt-5.6-sol")
-        ),
-        "OPENAI_CLUSTER_MODEL": prompt_value(
-            "语义聚类模型", values.get("OPENAI_CLUSTER_MODEL", "gpt-5.6-terra")
-        ),
+        "OPENAI_MODEL": "gpt-5.6-sol",
+        "OPENAI_CATALYST_MODEL": "gpt-5.6-sol",
+        "OPENAI_ADMISSION_MODEL": "gpt-5.6-sol",
+        "OPENAI_CLUSTER_MODEL": "gpt-5.6-sol",
         "WECOM_BOT_WEBHOOK": prompt_value(
             "企业微信群机器人完整Webhook",
             values.get("WECOM_BOT_WEBHOOK", ""),
