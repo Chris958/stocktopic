@@ -95,10 +95,9 @@ Webhook中的Key等同密码：只能放在权限为600的`.env`中，不要发�
 OPENAI_API_KEY=你的Key
 OPENAI_BASE_URL=https://服务商地址/v1
 OPENAI_MODEL=gpt-5.6-sol
-OPENAI_CATALYST_MODEL=gpt-5.5
-OPENAI_ADMISSION_MODEL=gpt-5.6-sol
-OPENAI_CLUSTER_MODEL=gpt-5.6-terra
 ```
+
+所有AI任务固定使用 `gpt-5.6-sol`，不再按催化、准入、语义聚类分别配置模型。旧版 `.env` 中的任务级模型变量在升级安装时会统一迁移为 `gpt-5.6-sol`，运行时不参与模型选择。
 
 `OPENAI_BASE_URL` 推荐填写到 `/v1`，系统会自动追加 `/responses`；填写完整
 `/v1/responses` 也可以。修改后执行：
@@ -121,4 +120,4 @@ AI请求使用Responses API流式返回，长推理和联网搜索期间由SSE�
 `awaiting_ai`并立即重试；运行期间超过15分钟的孤立`analyzing`状态也会由看门狗重新调度。
 `/health.latest_ai_recovery`会记录最近一次启动恢复数量。
 
-AI任务用量、预算上限、已实施降耗和分任务模型配置见[AI Token用量说明](AI_TOKEN_USAGE.md)。
+AI任务用量、预算上限、已实施降耗和统一模型配置见[AI Token用量说明](AI_TOKEN_USAGE.md)。

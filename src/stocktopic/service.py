@@ -49,11 +49,6 @@ class StockTopicService:
             settings.openai_base_url,
             timeout=settings.openai_timeout_seconds,
             usage_callback=self.database.record_ai_usage,
-            task_models={
-                "catalyst_refresh": settings.openai_catalyst_model,
-                "admission_analysis": settings.openai_admission_model,
-                "semantic_event_clustering": settings.openai_cluster_model,
-            },
         )
         self.notifier = WeComNotifier(settings.wecom_bot_webhook)
         self.clock = MarketClock()

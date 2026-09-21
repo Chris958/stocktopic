@@ -212,20 +212,18 @@ def test_openai_timeout_is_configurable_and_bounded(monkeypatch):
     assert Settings.from_env(require_secrets=False).openai_timeout_seconds == 300
 
 
-def test_default_task_models_use_balanced_cost_routing(monkeypatch):
-    for key in (
-        "OPENAI_CATALYST_MODEL",
-        "OPENAI_ADMISSION_MODEL",
-        "OPENAI_CLUSTER_MODEL",
-    ):
-        monkeypatch.delenv(key, raising=False)
+def test_all_runtime_ai_tasks_are_forced_to_gpt_5_6_sol(monkeypatch):
+    monkeypatch.setenv("OPENAI_MODEL", "legacy-model")
+    monkeypatch.setenv("OPENAI_CATALYST_MODEL", "legacy-catalyst")
+    monkeypatch.setenv("OPENAI_ADMISSION_MODEL", "legacy-admission")
+    monkeypatch.setenv("OPENAI_CLUSTER_MODEL", "legacy-cluster")
 
     settings = Settings.from_env(require_secrets=False)
 
-    assert settings.openai_catalyst_model == "gpt-5.5"
+    assert settings.openai_model == "gpt-5.6-sol"
+    assert settings.openai_catalyst_model == "gpt-5.6-sol"
     assert settings.openai_admission_model == "gpt-5.6-sol"
-    assert settings.openai_cluster_model == "gpt-5.6-terra"
-
+    assert settings.openai_cluster_model == "gpt-5.6-sol"
 
 class FakeGraphClient(TushareClient):
     def __init__(self):

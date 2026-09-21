@@ -45,8 +45,8 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   read -r -s -p "OpenAI API Key: " OPENAI_KEY_INPUT; echo
   read -r -p "OpenAI Base URL [https://api.openai.com/v1]: " OPENAI_BASE_URL_INPUT
   OPENAI_BASE_URL_INPUT="${OPENAI_BASE_URL_INPUT:-https://api.openai.com/v1}"
-  read -r -p "OpenAI模型 [gpt-5.5]: " OPENAI_MODEL_INPUT
-  OPENAI_MODEL_INPUT="${OPENAI_MODEL_INPUT:-gpt-5.5}"
+  OPENAI_MODEL_INPUT="gpt-5.6-sol"
+  echo "OpenAI模型固定为：$OPENAI_MODEL_INPUT"
   read -r -s -p "企业微信群机器人完整Webhook（可留空）: " WECOM_BOT_WEBHOOK_INPUT; echo
   validate_wecom_webhook "$WECOM_BOT_WEBHOOK_INPUT"
   read -r -p "管理用户名 [admin]: " ADMIN_USER_INPUT
@@ -104,20 +104,22 @@ append_default "LEADER_UPSIDE_THRESHOLD_PCT" "30"
 append_default "CATALYST_REFRESH_HOURS" "08:40,15:30"
 append_default "OPENAI_TIMEOUT_SECONDS" "120"
 
-set_default_if_blank() {
+set_env_value() {
   local key="$1"
   local value="$2"
-  if grep -q "^${key}=$" "$APP_DIR/.env"; then
-    sed -i '' "s|^${key}=$|${key}=${value}|" "$APP_DIR/.env"
-  elif ! grep -q "^${key}=" "$APP_DIR/.env"; then
+  if grep -q "^${key}=" "$APP_DIR/.env"; then
+    sed -i '' "s|^${key}=.*$|${key}=${value}|" "$APP_DIR/.env"
+  else
     printf '\n%s=%s\n' "$key" "$value" >> "$APP_DIR/.env"
   fi
 }
 
-set_default_if_blank "OPENAI_CATALYST_MODEL" "gpt-5.5"
-set_default_if_blank "OPENAI_ADMISSION_MODEL" "gpt-5.6-sol"
-set_default_if_blank "OPENAI_CLUSTER_MODEL" "gpt-5.6-terra"
-
+# All AI tasks intentionally use one model. Rewrite legacy task routes on every upgrade.
+set_env_value "OPENAI_MODEL" "gpt-5.6-sol"
+set_env_value "OPENAI_CATALYST_MODEL" "gpt-5.6-sol"
+set_env_value "OPENAI_ADMISSION_MODEL" "gpt-5.6-sol"
+set_env_value "OPENAI_CLUSTER_MODEL" "gpt-5.6-sol"
+echo "已统一所有AI任务模型为 gpt-5.6-sol。"
 
 if ! grep -q '^WECOM_BOT_WEBHOOK=' "$APP_DIR/.env"; then
   WECOM_BOT_WEBHOOK_INPUT=""

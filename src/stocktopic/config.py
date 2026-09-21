@@ -5,6 +5,8 @@ import secrets
 from dataclasses import dataclass
 from pathlib import Path
 
+UNIFIED_OPENAI_MODEL = "gpt-5.6-sol"
+
 
 def _required(name: str) -> str:
     value = os.getenv(name, "").strip()
@@ -52,10 +54,12 @@ class Settings:
     stale_after_seconds: int = 120
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
-    openai_model: str = "gpt-5.5"
-    openai_catalyst_model: str = ""
-    openai_admission_model: str = ""
-    openai_cluster_model: str = ""
+    openai_model: str = UNIFIED_OPENAI_MODEL
+    # Legacy task-model fields remain for compatibility with health/debug consumers.
+    # Runtime routing is intentionally unified on gpt-5.6-sol.
+    openai_catalyst_model: str = UNIFIED_OPENAI_MODEL
+    openai_admission_model: str = UNIFIED_OPENAI_MODEL
+    openai_cluster_model: str = UNIFIED_OPENAI_MODEL
     openai_timeout_seconds: float = 120.0
     wecom_bot_webhook: str = ""
     admin_username: str = "admin"
@@ -73,7 +77,7 @@ class Settings:
         archive_dir = Path(os.getenv("STOCKTOPIC_ARCHIVE_DIR", "./data/archive"))
         admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
         app_api_token = os.getenv("APP_API_TOKEN", "").strip()
-        openai_model = os.getenv("OPENAI_MODEL", "gpt-5.5").strip()
+        openai_model = UNIFIED_OPENAI_MODEL
         early_limit_touches = max(2, int(os.getenv("EARLY_LIMIT_TOUCHES", "2")))
         # MINIMUM_LIMIT_TOUCHES=4 existed in previous installs. Preserve it as a
         # backwards-compatible formal threshold instead of letting it block the new
@@ -116,15 +120,9 @@ class Settings:
                 or "https://api.openai.com/v1"
             ),
             openai_model=openai_model,
-            openai_catalyst_model=(
-                os.getenv("OPENAI_CATALYST_MODEL", "").strip() or "gpt-5.5"
-            ),
-            openai_admission_model=(
-                os.getenv("OPENAI_ADMISSION_MODEL", "").strip() or "gpt-5.6-sol"
-            ),
-            openai_cluster_model=(
-                os.getenv("OPENAI_CLUSTER_MODEL", "").strip() or "gpt-5.6-terra"
-            ),
+            openai_catalyst_model=openai_model,
+            openai_admission_model=openai_model,
+            openai_cluster_model=openai_model,
             openai_timeout_seconds=max(
                 30.0,
                 min(300.0, float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120"))),
