@@ -63,6 +63,15 @@ def mcp_open_url(captured, tool_envelope):
 
 
 class TushareClientTests(TestCase):
+    def test_direct_token_takes_priority_over_a_stale_mcp_url(self):
+        client = TushareClient(
+            "official-token",
+            mcp_url="https://relay.example/mcp?token=stale-placeholder",
+        )
+
+        self.assertEqual(client.transport, "direct")
+        self.assertEqual(client.mcp_url, "")
+
     def test_realtime_query_includes_main_board_and_chinext(self):
         client = TushareClient("test")
         captured = {}

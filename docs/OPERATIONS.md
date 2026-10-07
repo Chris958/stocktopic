@@ -11,7 +11,8 @@ curl http://127.0.0.1:8765/health
 
 ## 状态解释
 
-- `realtime_collection_enabled=false`：休市、午休、交易日历未知或不在有效窗口。
+- `realtime_collection_enabled=false`：休市、午休、交易日历未知、不在有效窗口，或已通过
+  `TUSHARE_RT_K_ENABLED=false` 暂停实时行情。
 - `calendar_unknown_fail_closed`：交易日历同步失败，系统主动停止实时采集。
 - `coverage abnormal`：Tushare返回的有效主板与创业板行情低于当前股票池80%（且至少2000只），本周期不参与计算。
 - `data_stale`：全市场累计成交量和成交额没有变化，本周期信号熔断。
@@ -73,16 +74,17 @@ curl -u '你的管理用户名' \
 ./scripts/configure_integrations.sh
 ```
 
-从直连迁移到MCP中转时，在交互脚本中填写完整的Tushare MCP URL；输入过程不回显。
-保存后脚本会重启服务。随后运行：
+生产环境使用官方Token直连时，在交互脚本中填写 `TUSHARE_TOKEN`，并在MCP URL提示处输入
+`-` 清空中转配置。没有 `rt_k` 权限时，对“启用rt_k盘中实时行情”回答 `n`。保存后脚本会
+重启服务。随后运行：
 
 ```bash
 ./scripts/doctor.sh
 ```
 
-确认 `TUSHARE_PROVIDER` 返回 `status=ok` 且 `transport=mcp`。稳定运行后可以再次执行交互脚本，
-在旧 `TUSHARE_TOKEN` 提示处输入 `-` 清空；也可以暂时保留作为人工回退值。不要把MCP URL
-粘贴到命令行、Issue、日志或Git提交中，因为它通常包含访问凭据。
+确认 `TUSHARE_PROVIDER` 返回 `status=ok` 且 `transport=direct`，健康页显示
+`tushare_rt_k_enabled=false`。关闭 `rt_k` 不会关闭 `moneyflow`、`moneyflow_dc`、
+`moneyflow_ths` 盘后主力资金任务。
 
 资金模块复用同一Tushare数据通道；`moneyflow`、`moneyflow_dc`、`moneyflow_ths`需分别具有
 权限。调度与迁移见 [资金流说明](FUND_FLOW.md)。

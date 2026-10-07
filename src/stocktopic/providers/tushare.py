@@ -32,7 +32,10 @@ class TushareClient:
     def __init__(self, token: str = "", timeout: float = 30.0, mcp_url: str = ""):
         self.token = token.strip()
         self.timeout = timeout
-        self.mcp_url = mcp_url.strip()
+        # The official token is the production default.  Keeping an old relay URL
+        # in .env must not silently route requests through the relay once a direct
+        # token has been configured.
+        self.mcp_url = "" if self.token else mcp_url.strip()
         self._mcp_session_id = ""
         self._mcp_ready = False
         self._mcp_lock = threading.Lock()

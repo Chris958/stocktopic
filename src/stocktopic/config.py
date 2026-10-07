@@ -8,6 +8,18 @@ from pathlib import Path
 UNIFIED_OPENAI_MODEL = "gpt-5.6-sol"
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Invalid boolean environment variable: {name}")
+
+
 def load_dotenv(path: Path = Path(".env")) -> None:
     """Small dotenv loader so production does not depend on python-dotenv."""
     if not path.exists():
@@ -28,6 +40,7 @@ class Settings:
     db_path: Path
     archive_dir: Path
     tushare_mcp_url: str = ""
+    tushare_rt_k_enabled: bool = True
     host: str = "127.0.0.1"
     port: int = 8765
     market_timezone: str = "Asia/Shanghai"
@@ -99,6 +112,7 @@ class Settings:
             db_path=db_path,
             archive_dir=archive_dir,
             tushare_mcp_url=mcp_url,
+            tushare_rt_k_enabled=_env_bool("TUSHARE_RT_K_ENABLED", True),
             host=os.getenv("STOCKTOPIC_HOST", "127.0.0.1"),
             port=int(os.getenv("STOCKTOPIC_PORT", "8765")),
             anomaly_display_min_severity=float(os.getenv("ANOMALY_DISPLAY_MIN_SEVERITY", "68")),

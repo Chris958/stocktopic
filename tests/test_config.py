@@ -24,3 +24,30 @@ def test_tushare_configuration_requires_mcp_url_or_direct_token():
     with patch.dict(os.environ, values, clear=True):
         with pytest.raises(RuntimeError, match="TUSHARE_MCP_URL or TUSHARE_TOKEN"):
             Settings.from_env()
+
+
+def test_rt_k_can_be_disabled_without_disabling_direct_tushare():
+    values = {
+        "TUSHARE_TOKEN": "test",
+        "TUSHARE_RT_K_ENABLED": "false",
+        "ADMIN_PASSWORD": "test",
+        "APP_API_TOKEN": "test",
+    }
+    with patch.dict(os.environ, values, clear=True):
+        settings = Settings.from_env()
+
+    assert settings.tushare_token == "test"
+    assert settings.tushare_mcp_url == ""
+    assert settings.tushare_rt_k_enabled is False
+
+
+def test_invalid_rt_k_boolean_is_rejected():
+    values = {
+        "TUSHARE_TOKEN": "test",
+        "TUSHARE_RT_K_ENABLED": "sometimes",
+        "ADMIN_PASSWORD": "test",
+        "APP_API_TOKEN": "test",
+    }
+    with patch.dict(os.environ, values, clear=True):
+        with pytest.raises(RuntimeError, match="TUSHARE_RT_K_ENABLED"):
+            Settings.from_env()
