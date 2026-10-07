@@ -91,10 +91,9 @@ $('#loginForm').addEventListener('submit', async event => {
     await api('/api/v1/auth/login', {
       method: 'POST', body: JSON.stringify(credentials)
     });
-    state.data = await api('/api/v1/dashboard');
     hideLogin();
-    render();
-    toast('连接成功');
+    toast('验证通过，正在加载数据');
+    await load();
   } catch (error) {
     $('#loginError').textContent = error.message;
   } finally {
@@ -824,7 +823,13 @@ function toast(message, isError = false) {
   toastTimer = setTimeout(() => node.classList.remove('show'), 3200);
 }
 
-load().then(() => {
-  if (state.data) hideLogin();
-}).catch(() => {});
+async function restoreSession() {
+  try {
+    await api('/api/v1/auth/session');
+    hideLogin();
+    await load();
+  } catch (_) {}
+}
+
+restoreSession();
 setInterval(() => { if (state.authenticated && document.visibilityState === 'visible') load(); }, 60_000);

@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -112,6 +112,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response = JSONResponse({"detail": "CSRF check failed"}, status_code=403)
         else:
             response = await call_next(request)
+        if (
+            auth_kind == "session"
+            and request.url.path.startswith("/api/")
+            and request.url.path not in {"/api/v1/auth/login", "/api/v1/auth/logout"}
+            and response.status_code < 400
+        ):
+            _set_session_cookie(response, settings)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -152,18 +159,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ) and hmac.compare_digest(credentials.password, settings.admin_password)
         if not valid:
             raise HTTPException(status_code=401, detail="用户名或密码不正确")
-        max_age = settings.session_cookie_days * 24 * 60 * 60
-        response = JSONResponse({"ok": True, "expires_in_days": settings.session_cookie_days})
-        response.set_cookie(
-            SESSION_COOKIE,
-            _make_session_token(settings, credentials.username, int(time.time()) + max_age),
-            max_age=max_age,
-            httponly=True,
-            secure=settings.public_base_url.startswith("https://"),
-            samesite="strict",
-            path="/",
+        response = JSONResponse(
+            {
+                "ok": True,
+                "expires_in_days": settings.session_cookie_days,
+                "rolling": True,
+            }
         )
+        _set_session_cookie(response, settings)
         return response
+
+    @app.get("/api/v1/auth/session")
+    async def session_status():
+        return {"ok": True, "rolling": True}
 
     @app.post("/api/v1/auth/logout")
     async def logout():
@@ -432,6 +440,23 @@ def _session_key(settings: Settings) -> bytes:
         f"stocktopic-session-v1\0{settings.app_api_token}\0{settings.admin_password}"
     ).encode()
     return hashlib.sha256(material).digest()
+
+
+def _set_session_cookie(response: Response, settings: Settings) -> None:
+    max_age = settings.session_cookie_days * 24 * 60 * 60
+    response.set_cookie(
+        SESSION_COOKIE,
+        _make_session_token(
+            settings,
+            settings.admin_username,
+            int(time.time()) + max_age,
+        ),
+        max_age=max_age,
+        httponly=True,
+        secure=settings.public_base_url.startswith("https://"),
+        samesite="strict",
+        path="/",
+    )
 
 
 def _make_session_token(settings: Settings, username: str, expires_at: int) -> str:

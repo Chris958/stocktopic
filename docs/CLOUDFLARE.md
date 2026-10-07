@@ -72,9 +72,9 @@ curl -i https://stock.bnken.com/api/v1/dashboard
 
 浏览器打开 `https://stock.bnken.com` 后，使用Mac mini项目 `.env` 中配置的
 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 登录。密码只在登录请求中经过HTTPS传输，验证后由
-服务端签发30天有效的签名会话Cookie；Cookie启用 `HttpOnly`、`Secure` 和
-`SameSite=Strict`，前端脚本不能读取原始密码或会话值。主动退出、会话过期，或管理员密码/
-`APP_API_TOKEN` 变更后需要重新登录。API响应禁止浏览器缓存。
+服务端签发400天滚动有效的签名会话Cookie，并在每次已认证API请求后自动续期；Cookie启用
+`HttpOnly`、`Secure` 和 `SameSite=Strict`，前端脚本不能读取原始密码或会话值。主动退出，
+或管理员密码/`APP_API_TOKEN` 变更后需要重新登录。API响应禁止浏览器缓存。
 
 ## iPhone添加到主屏幕
 

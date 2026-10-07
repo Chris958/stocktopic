@@ -36,7 +36,7 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.12.1" in page.text
+        assert "app.js?v=0.12.7" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
@@ -59,14 +59,21 @@ def test_api_auth_and_csrf_guard():
         assert "HttpOnly" in cookie
         assert "Secure" in cookie
         assert "SameSite=strict" in cookie
-        assert "Max-Age=2592000" in cookie
+        assert "Max-Age=34560000" in cookie
         assert "password" not in cookie
+        session = client.get("/api/v1/auth/session")
+        assert session.status_code == 200
+        assert session.json() == {"ok": True, "rolling": True}
+        assert "Max-Age=34560000" in session.headers["set-cookie"]
         session_dashboard = client.get("/api/v1/dashboard")
         assert session_dashboard.status_code == 200
+        assert "Max-Age=34560000" in session_dashboard.headers["set-cookie"]
         assert client.post("/api/v1/auth/logout").status_code == 403
-        assert client.post(
+        logout = client.post(
             "/api/v1/auth/logout", headers={"X-StockTopic-Request": "1"}
-        ).status_code == 200
+        )
+        assert logout.status_code == 200
+        assert "Max-Age=34560000" not in logout.headers["set-cookie"]
         assert client.get("/api/v1/dashboard").status_code == 401
         bearer = {"Authorization": "Bearer app-token"}
         dashboard = client.get("/api/v1/dashboard", headers=bearer)

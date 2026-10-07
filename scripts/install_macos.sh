@@ -120,6 +120,7 @@ append_default() {
 append_default "PUBLIC_BASE_URL" "https://stock.bnken.com"
 append_default "TUSHARE_MCP_URL" ""
 append_default "TUSHARE_RT_K_ENABLED" "true"
+append_default "SESSION_COOKIE_DAYS" "400"
 append_default "MINIMUM_LIMIT_TOUCHES" "4"
 append_default "MAXIMUM_CANDIDATES_PER_RUN" "0"
 append_default "NOVELTY_LOOKBACK_TRADE_DAYS" "60"
@@ -146,6 +147,11 @@ set_env_value "OPENAI_CATALYST_MODEL" "gpt-5.6-sol"
 set_env_value "OPENAI_ADMISSION_MODEL" "gpt-5.6-sol"
 set_env_value "OPENAI_CLUSTER_MODEL" "gpt-5.6-sol"
 echo "已统一所有AI任务模型为 gpt-5.6-sol。"
+
+if grep -q '^SESSION_COOKIE_DAYS=30$' "$APP_DIR/.env"; then
+  set_env_value "SESSION_COOKIE_DAYS" "400"
+  echo "已将登录Cookie升级为400天滚动有效期；正常使用时会自动续期。"
+fi
 
 if ! grep -q '^WECOM_BOT_WEBHOOK=' "$APP_DIR/.env"; then
   WECOM_BOT_WEBHOOK_INPUT=""
