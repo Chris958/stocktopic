@@ -1,4 +1,5 @@
 import tempfile
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from unittest import TestCase
@@ -59,6 +60,20 @@ class ServiceGuardTests(TestCase):
         result = self.service.collect_once(datetime(2026, 8, 26, 12, 0, tzinfo=CN))
         self.assertEqual(result["status"], "idle")
         self.assertEqual(result["session"], "lunch_break")
+
+    def test_disabled_rt_k_never_calls_realtime_api_during_market_hours(self):
+        self.service.settings = replace(
+            self.service.settings,
+            tushare_rt_k_enabled=False,
+        )
+        self.service.database.replace_calendar(
+            [{"cal_date": "20260826", "is_open": "1", "pretrade_date": "20260825"}]
+        )
+
+        result = self.service.collect_once(datetime(2026, 8, 26, 10, 0, tzinfo=CN))
+
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["reason"], "rt_k_disabled_by_configuration")
 
     def test_two_day_discovery_backfill_never_calls_realtime_api(self):
         self.service.database.replace_calendar(

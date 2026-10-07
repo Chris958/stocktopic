@@ -27,6 +27,7 @@ def main() -> None:
             {
                 "status": "ok",
                 "transport": client.transport,
+                "rt_k_enabled": settings.tushare_rt_k_enabled,
                 "trade_calendar_rows": len(rows),
             },
             ensure_ascii=False,

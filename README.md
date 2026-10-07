@@ -47,8 +47,8 @@ flowchart TD
 
 ## Mac mini安装
 
-要求：macOS、Python 3.11或更高版本，以及具备所需数据权限的Tushare MCP中转地址
-（推荐）或Tushare Token。实时采集仍需 `rt_k` 权限。
+要求：macOS、Python 3.11或更高版本，以及具备所需数据权限的官方Tushare Token。
+也可选用MCP中转；实时采集仍需 `rt_k` 权限。
 
 ```bash
 git clone https://github.com/Chris958/stocktopic.git
@@ -56,7 +56,7 @@ cd stocktopic
 ./scripts/install_macos.sh
 ```
 
-安装程序会在本机提示输入Tushare MCP URL（或直连Token）、OpenAI及企业微信群机器人
+安装程序会在本机提示输入Tushare官方Token（或可选MCP URL）、OpenAI及企业微信群机器人
 Webhook，生成个人App API Token，并注册 `com.chris958.stocktopic` LaunchAgent。MCP URL可能
 自带访问凭据，因此与Token一样只保存在权限为600的 `.env`，不会出现在健康页和日志中。
 
@@ -78,9 +78,14 @@ open http://127.0.0.1:8765
 ./scripts/configure_integrations.sh
 ```
 
-配置了 `TUSHARE_MCP_URL` 时系统优先走MCP中转；未配置时继续兼容 `TUSHARE_TOKEN` 直连。
+系统优先使用官方 `TUSHARE_TOKEN` 直连；只有未配置官方Token、但配置了MCP URL时才会
+切换到中转。迁移完成后仍建议清空旧MCP URL，移除不再使用的凭据。
 `./scripts/doctor.sh` 会通过交易日历执行一次实时数据源探测，并只显示 `mcp` 或 `direct`
 模式，不显示地址和凭据。
+
+账号没有 `rt_k` 权限时，可在交互配置中关闭盘中实时行情。关闭后不会再调用 `rt_k`，盘中
+五分钟扫描、实时题材发现和测试票盘中确认暂停；交易日历、股票池、日线、KPL及盘后主力资金
+任务继续运行。
 
 公网过渡版使用 `https://stock.bnken.com`，通过Cloudflare Tunnel转发到
 `http://127.0.0.1:8765`。首次打开使用`.env`中的管理用户名和密码登录；验证成功后服务端

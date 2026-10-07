@@ -59,3 +59,23 @@ def test_health_reports_mcp_transport_without_exposing_url():
         assert health["integrations"]["tushare"] is True
         assert health["integrations"]["tushare_transport"] == "mcp"
         assert mcp_url not in str(health)
+
+
+def test_health_reports_disabled_rt_k_with_direct_transport():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        settings = Settings(
+            tushare_token="test",
+            db_path=root / "test.sqlite3",
+            archive_dir=root / "archive",
+            tushare_rt_k_enabled=False,
+        )
+        app = create_app(settings)
+        app.state.service.initialize_storage()
+
+        health = app.state.service.health()
+
+        assert health["integrations"]["tushare_transport"] == "direct"
+        assert health["integrations"]["tushare_rt_k_enabled"] is False
+        assert health["market"]["realtime_collection_enabled"] is False
+        assert health["market"]["reason"] == "rt_k_disabled_by_configuration"

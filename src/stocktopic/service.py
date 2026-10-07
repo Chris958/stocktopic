@@ -631,6 +631,12 @@ class StockTopicService:
             started = self.clock.normalize(now or self.clock.china_now())
             compact = started.strftime("%Y%m%d")
             state = self.clock.state(started, self.database.calendar_status(compact))
+            if not self.settings.tushare_rt_k_enabled:
+                return {
+                    "status": "idle",
+                    "reason": "rt_k_disabled_by_configuration",
+                    "session": state.session,
+                }
             if not state.in_realtime_window:
                 return {"status": "idle", "reason": state.reason, "session": state.session}
             if not state.slot:
@@ -1350,7 +1356,12 @@ class StockTopicService:
                     asyncio.to_thread(self._startup_backfill, now),
                     name="startup-discovery-backfill",
                 )
-            if state.in_realtime_window and state.slot and now.second < 25:
+            if (
+                self.settings.tushare_rt_k_enabled
+                and state.in_realtime_window
+                and state.slot
+                and now.second < 25
+            ):
                 result = await asyncio.to_thread(self.collect_once, now)
                 candidate_ids.extend(result.get("candidate_ids", []))
                 discovery_date = result.get("discovery_trade_date")
@@ -1435,6 +1446,12 @@ class StockTopicService:
         state = self.clock.state(now, self.database.calendar_status(compact))
         latest = self.database.latest_run("collect_quotes")
         database_ready = self.database.ping()
+        realtime_enabled = self.settings.tushare_rt_k_enabled and state.in_realtime_window
+        market_reason = (
+            state.reason
+            if self.settings.tushare_rt_k_enabled
+            else "rt_k_disabled_by_configuration"
+        )
         return {
             "status": "ok" if database_ready else "degraded",
             "version": __version__,
@@ -1443,14 +1460,15 @@ class StockTopicService:
             "market": {
                 "is_open_day": state.is_open_day,
                 "session": state.session,
-                "realtime_collection_enabled": state.in_realtime_window,
-                "reason": state.reason,
+                "realtime_collection_enabled": realtime_enabled,
+                "reason": market_reason,
             },
             "universe_count": self.database.active_stock_count(),
             "latest_quote_run": latest,
             "integrations": {
                 "tushare": True,
                 "tushare_transport": self.provider.transport,
+                "tushare_rt_k_enabled": self.settings.tushare_rt_k_enabled,
                 "openai": self.explainer.enabled,
                 "eastmoney_intraday": self.database.get_metadata("eastmoney_intraday_probe"),
                 "wecom_group_robot": self.notifier.enabled,

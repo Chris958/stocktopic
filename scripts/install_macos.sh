@@ -49,11 +49,16 @@ mkdir -p "$LAUNCH_DIR" "$LOG_DIR" "$DATA_DIR"
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
   echo "首次配置：密钥只会保存在Mac mini本地的.env文件中。"
-  read -r -s -p "Tushare MCP URL（推荐，可留空使用直连Token）: " TUSHARE_MCP_URL_INPUT; echo
-  validate_tushare_mcp_url "$TUSHARE_MCP_URL_INPUT"
-  TUSHARE_TOKEN_INPUT=""
-  if [[ -z "$TUSHARE_MCP_URL_INPUT" ]]; then
-    read -r -s -p "Tushare Token: " TUSHARE_TOKEN_INPUT; echo
+  read -r -s -p "Tushare官方Token（推荐，可留空使用MCP）: " TUSHARE_TOKEN_INPUT; echo
+  TUSHARE_MCP_URL_INPUT=""
+  if [[ -z "$TUSHARE_TOKEN_INPUT" ]]; then
+    read -r -s -p "Tushare MCP URL: " TUSHARE_MCP_URL_INPUT; echo
+    validate_tushare_mcp_url "$TUSHARE_MCP_URL_INPUT"
+  fi
+  read -r -p "启用rt_k盘中实时行情 [Y/n]: " TUSHARE_RT_K_INPUT
+  TUSHARE_RT_K_ENABLED_INPUT="true"
+  if [[ "$TUSHARE_RT_K_INPUT" =~ ^[Nn]([Oo])?$ ]]; then
+    TUSHARE_RT_K_ENABLED_INPUT="false"
   fi
   read -r -s -p "OpenAI API Key: " OPENAI_KEY_INPUT; echo
   read -r -p "OpenAI Base URL [https://api.openai.com/v1]: " OPENAI_BASE_URL_INPUT
@@ -78,6 +83,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   {
     printf 'TUSHARE_MCP_URL=%s\n' "$TUSHARE_MCP_URL_INPUT"
     printf 'TUSHARE_TOKEN=%s\n' "$TUSHARE_TOKEN_INPUT"
+    printf 'TUSHARE_RT_K_ENABLED=%s\n' "$TUSHARE_RT_K_ENABLED_INPUT"
     printf 'OPENAI_API_KEY=%s\n' "$OPENAI_KEY_INPUT"
     printf 'OPENAI_BASE_URL=%s\n' "$OPENAI_BASE_URL_INPUT"
     printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL_INPUT"
@@ -113,6 +119,7 @@ append_default() {
 
 append_default "PUBLIC_BASE_URL" "https://stock.bnken.com"
 append_default "TUSHARE_MCP_URL" ""
+append_default "TUSHARE_RT_K_ENABLED" "true"
 append_default "MINIMUM_LIMIT_TOUCHES" "4"
 append_default "MAXIMUM_CANDIDATES_PER_RUN" "0"
 append_default "NOVELTY_LOOKBACK_TRADE_DAYS" "60"

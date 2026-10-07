@@ -44,6 +44,24 @@ def prompt_value(
     return value.strip() or current
 
 
+def prompt_bool(label: str, current: str, *, default: bool) -> str:
+    normalized = current.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        enabled = True
+    elif normalized in {"0", "false", "no", "off"}:
+        enabled = False
+    else:
+        enabled = default
+    choice = input(f"{label} [{'Y/n' if enabled else 'y/N'}]: ").strip().lower()
+    if not choice:
+        return "true" if enabled else "false"
+    if choice in {"y", "yes", "1", "true", "on"}:
+        return "true"
+    if choice in {"n", "no", "0", "false", "off"}:
+        return "false"
+    raise SystemExit(f"{label}只能输入y或n。")
+
+
 def upsert(lines: list[str], updates: dict[str, str]) -> list[str]:
     remaining = dict(updates)
     result: list[str] = []
@@ -67,17 +85,22 @@ def main() -> None:
     print("敏感值不会显示；秘密字段直接回车会保留原值。")
     print("AI模型固定为 gpt-5.6-sol；所有AI任务使用同一模型。")
     updates = {
+        "TUSHARE_TOKEN": prompt_value(
+            "Tushare官方Token（推荐）",
+            values.get("TUSHARE_TOKEN", ""),
+            secret=True,
+            allow_clear=True,
+        ),
         "TUSHARE_MCP_URL": prompt_value(
-            "Tushare MCP URL（推荐）",
+            "Tushare MCP URL（不用中转请输入-清空）",
             values.get("TUSHARE_MCP_URL", ""),
             secret=True,
             allow_clear=True,
         ),
-        "TUSHARE_TOKEN": prompt_value(
-            "Tushare直连Token（MCP已配置时可留空）",
-            values.get("TUSHARE_TOKEN", ""),
-            secret=True,
-            allow_clear=True,
+        "TUSHARE_RT_K_ENABLED": prompt_bool(
+            "启用rt_k盘中实时行情",
+            values.get("TUSHARE_RT_K_ENABLED", "true"),
+            default=True,
         ),
         "OPENAI_API_KEY": prompt_value(
             "OpenAI API Key", values.get("OPENAI_API_KEY", ""), secret=True
