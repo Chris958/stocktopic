@@ -19,6 +19,8 @@ curl http://127.0.0.1:8765/health
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
 - `admission_policy`：当前生效的共同事件4只强势股票、主板涨停/炸板与创业板涨幅超过10%、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
 - `test_pool`：测试票池记录数量和最近一次Tushare正式日线同步任务。
+- `integrations.tushare_transport`：当前数据通道，`mcp`表示使用中转，`direct`表示Token直连；
+  健康页不会返回MCP URL。
 - `ai_usage`：近24小时和7天的AI调用、输入/缓存/输出/推理Token及联网搜索次数；
   `usage_complete=false`表示中转服务没有为全部请求返回usage，不能把当前总数当作完整账单。
 
@@ -71,7 +73,19 @@ curl -u '你的管理用户名' \
 ./scripts/configure_integrations.sh
 ```
 
-资金模块沿用 `TUSHARE_TOKEN`，三源接口需分别具有权限。调度与迁移见 [资金流说明](FUND_FLOW.md)。
+从直连迁移到MCP中转时，在交互脚本中填写完整的Tushare MCP URL；输入过程不回显。
+保存后脚本会重启服务。随后运行：
+
+```bash
+./scripts/doctor.sh
+```
+
+确认 `TUSHARE_PROVIDER` 返回 `status=ok` 且 `transport=mcp`。稳定运行后可以再次执行交互脚本，
+在旧 `TUSHARE_TOKEN` 提示处输入 `-` 清空；也可以暂时保留作为人工回退值。不要把MCP URL
+粘贴到命令行、Issue、日志或Git提交中，因为它通常包含访问凭据。
+
+资金模块复用同一Tushare数据通道；`moneyflow`、`moneyflow_dc`、`moneyflow_ths`需分别具有
+权限。调度与迁移见 [资金流说明](FUND_FLOW.md)。
 
 新版只需要企业微信群机器人生成的完整Webhook：
 
