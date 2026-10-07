@@ -34,7 +34,10 @@ class StockTopicService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.database = Database(settings.db_path, settings.archive_dir)
-        self.provider = TushareClient(settings.tushare_token)
+        self.provider = TushareClient(
+            settings.tushare_token,
+            mcp_url=settings.tushare_mcp_url,
+        )
         self.flow_provider = EastmoneyFlowClient()
         self.detector = AnomalyDetector()
         self.discovery = ThemeDiscovery(
@@ -1447,6 +1450,7 @@ class StockTopicService:
             "latest_quote_run": latest,
             "integrations": {
                 "tushare": True,
+                "tushare_transport": self.provider.transport,
                 "openai": self.explainer.enabled,
                 "eastmoney_intraday": self.database.get_metadata("eastmoney_intraday_probe"),
                 "wecom_group_robot": self.notifier.enabled,

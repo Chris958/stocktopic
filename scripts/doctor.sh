@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+doctor_status=0
 echo "===== STOCKTOPIC DOCTOR ====="
 echo "APP_DIR=$APP_DIR"
 echo "PYTHON=$($APP_DIR/.venv/bin/python --version 2>&1 || true)"
@@ -25,8 +26,15 @@ for ((attempt = 1; attempt <= health_attempts; attempt++)); do
 done
 if ((health_ready == 0)); then
   echo "服务在 ${health_attempts} 次检查后仍未就绪，请查看下方错误日志"
+  doctor_status=1
+fi
+echo
+echo "TUSHARE_PROVIDER:"
+if ! "$APP_DIR/.venv/bin/python" "$APP_DIR/scripts/check_tushare.py"; then
+  doctor_status=1
 fi
 echo
 echo "RECENT_ERROR_LOG:"
 tail -30 "$APP_DIR/logs/stocktopic.err.log" 2>/dev/null || echo "NO_ERROR_LOG"
 echo "===== FINISHED ====="
+exit "$doctor_status"

@@ -47,7 +47,8 @@ flowchart TD
 
 ## Mac mini安装
 
-要求：macOS、Python 3.11或更高版本、Tushare Token及已购买的 `rt_k` 权限。
+要求：macOS、Python 3.11或更高版本，以及具备所需数据权限的Tushare MCP中转地址
+（推荐）或Tushare Token。实时采集仍需 `rt_k` 权限。
 
 ```bash
 git clone https://github.com/Chris958/stocktopic.git
@@ -55,7 +56,9 @@ cd stocktopic
 ./scripts/install_macos.sh
 ```
 
-安装程序会在本机提示输入Tushare、OpenAI及企业微信群机器人Webhook，生成个人App API Token，并注册 `com.chris958.stocktopic` LaunchAgent。真实凭据只保存在权限为600的 `.env`，不会写入仓库。
+安装程序会在本机提示输入Tushare MCP URL（或直连Token）、OpenAI及企业微信群机器人
+Webhook，生成个人App API Token，并注册 `com.chris958.stocktopic` LaunchAgent。MCP URL可能
+自带访问凭据，因此与Token一样只保存在权限为600的 `.env`，不会出现在健康页和日志中。
 
 如果OpenAI Key来自兼容服务商，安装时把Base URL填写为服务商提供的API根地址，通常形如
 `https://provider.example/v1`。系统会自动请求其 `/responses` 端点；也允许直接填写完整的
@@ -69,11 +72,15 @@ cd stocktopic
 open http://127.0.0.1:8765
 ```
 
-以后重新配置OpenAI或企业微信群机器人，不需要删除 `.env`，运行：
+以后重新配置Tushare数据源、OpenAI或企业微信群机器人，不需要删除 `.env`，运行：
 
 ```bash
 ./scripts/configure_integrations.sh
 ```
+
+配置了 `TUSHARE_MCP_URL` 时系统优先走MCP中转；未配置时继续兼容 `TUSHARE_TOKEN` 直连。
+`./scripts/doctor.sh` 会通过交易日历执行一次实时数据源探测，并只显示 `mcp` 或 `direct`
+模式，不显示地址和凭据。
 
 公网过渡版使用 `https://stock.bnken.com`，通过Cloudflare Tunnel转发到
 `http://127.0.0.1:8765`。首次打开使用`.env`中的管理用户名和密码登录；验证成功后服务端

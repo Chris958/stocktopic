@@ -34,6 +34,14 @@ validate_wecom_webhook() {
   fi
 }
 
+validate_tushare_mcp_url() {
+  local value="$1"
+  if [[ -n "$value" && ! "$value" =~ ^https?://[^[:space:]#]+$ ]]; then
+    echo "Tushare MCP URL格式无效，必须是完整的http(s)地址且不能包含空格或片段。"
+    exit 1
+  fi
+}
+
 mkdir -p "$LAUNCH_DIR" "$LOG_DIR" "$DATA_DIR"
 "$PYTHON_BIN" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip
@@ -41,7 +49,12 @@ mkdir -p "$LAUNCH_DIR" "$LOG_DIR" "$DATA_DIR"
 
 if [[ ! -f "$APP_DIR/.env" ]]; then
   echo "首次配置：密钥只会保存在Mac mini本地的.env文件中。"
-  read -r -s -p "Tushare Token: " TUSHARE_TOKEN_INPUT; echo
+  read -r -s -p "Tushare MCP URL（推荐，可留空使用直连Token）: " TUSHARE_MCP_URL_INPUT; echo
+  validate_tushare_mcp_url "$TUSHARE_MCP_URL_INPUT"
+  TUSHARE_TOKEN_INPUT=""
+  if [[ -z "$TUSHARE_MCP_URL_INPUT" ]]; then
+    read -r -s -p "Tushare Token: " TUSHARE_TOKEN_INPUT; echo
+  fi
   read -r -s -p "OpenAI API Key: " OPENAI_KEY_INPUT; echo
   read -r -p "OpenAI Base URL [https://api.openai.com/v1]: " OPENAI_BASE_URL_INPUT
   OPENAI_BASE_URL_INPUT="${OPENAI_BASE_URL_INPUT:-https://api.openai.com/v1}"
@@ -52,13 +65,18 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   read -r -p "管理用户名 [admin]: " ADMIN_USER_INPUT
   ADMIN_USER_INPUT="${ADMIN_USER_INPUT:-admin}"
   read -r -s -p "设置管理密码: " ADMIN_PASSWORD_INPUT; echo
-  if [[ -z "$TUSHARE_TOKEN_INPUT" || -z "$ADMIN_PASSWORD_INPUT" ]]; then
-    echo "Tushare Token和管理密码不能为空。"
+  if [[ -z "$TUSHARE_MCP_URL_INPUT" && -z "$TUSHARE_TOKEN_INPUT" ]]; then
+    echo "Tushare MCP URL和Tushare Token至少配置一项。"
+    exit 1
+  fi
+  if [[ -z "$ADMIN_PASSWORD_INPUT" ]]; then
+    echo "管理密码不能为空。"
     exit 1
   fi
   APP_TOKEN="$($VENV_DIR/bin/python -c 'import secrets; print(secrets.token_urlsafe(32))')"
   umask 077
   {
+    printf 'TUSHARE_MCP_URL=%s\n' "$TUSHARE_MCP_URL_INPUT"
     printf 'TUSHARE_TOKEN=%s\n' "$TUSHARE_TOKEN_INPUT"
     printf 'OPENAI_API_KEY=%s\n' "$OPENAI_KEY_INPUT"
     printf 'OPENAI_BASE_URL=%s\n' "$OPENAI_BASE_URL_INPUT"
@@ -94,6 +112,7 @@ append_default() {
 }
 
 append_default "PUBLIC_BASE_URL" "https://stock.bnken.com"
+append_default "TUSHARE_MCP_URL" ""
 append_default "MINIMUM_LIMIT_TOUCHES" "4"
 append_default "MAXIMUM_CANDIDATES_PER_RUN" "0"
 append_default "NOVELTY_LOOKBACK_TRADE_DAYS" "60"

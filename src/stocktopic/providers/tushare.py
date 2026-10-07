@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from datetime import datetime
+from itertools import count
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from ..domain import Quote
 from ..http import open_url
@@ -23,18 +27,48 @@ class TushareError(RuntimeError):
 
 class TushareClient:
     endpoint = "https://api.tushare.pro"
+    mcp_protocol_version = "2024-11-05"
 
-    def __init__(self, token: str, timeout: float = 30.0):
+    def __init__(self, token: str = "", timeout: float = 30.0, mcp_url: str = ""):
         self.token = token.strip()
         self.timeout = timeout
-        if not self.token:
-            raise ValueError("Tushare token cannot be empty")
+        self.mcp_url = mcp_url.strip()
+        self._mcp_session_id = ""
+        self._mcp_ready = False
+        self._mcp_lock = threading.Lock()
+        self._request_ids = count(1)
+        if self.mcp_url:
+            parsed = urlsplit(self.mcp_url)
+            if (
+                parsed.scheme not in {"http", "https"}
+                or not parsed.netloc
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.fragment
+            ):
+                raise ValueError("Tushare MCP URL must be a complete HTTP(S) URL")
+        elif not self.token:
+            raise ValueError("Tushare MCP URL or token must be configured")
+
+    @property
+    def transport(self) -> str:
+        return "mcp" if self.mcp_url else "direct"
 
     def call(
         self,
         api_name: str,
         params: Mapping[str, Any] | None = None,
         fields: str = "",
+    ) -> list[dict[str, Any]]:
+        if self.mcp_url:
+            return self._call_mcp(api_name, params, fields)
+        return self._call_direct(api_name, params, fields)
+
+    def _call_direct(
+        self,
+        api_name: str,
+        params: Mapping[str, Any] | None,
+        fields: str,
     ) -> list[dict[str, Any]]:
         payload = json.dumps(
             {
@@ -63,6 +97,141 @@ class TushareClient:
         field_names = data.get("fields") or []
         items = data.get("items") or []
         return [dict(zip(field_names, values, strict=False)) for values in items]
+
+    def _call_mcp(
+        self,
+        api_name: str,
+        params: Mapping[str, Any] | None,
+        fields: str,
+    ) -> list[dict[str, Any]]:
+        self._ensure_mcp_initialized()
+        arguments = dict(params or {})
+        if "ts_code" in arguments:
+            arguments["symbol"] = arguments.pop("ts_code")
+
+        requested_fields = [value.strip() for value in fields.split(",") if value.strip()]
+        mcp_fields = list(dict.fromkeys(requested_fields))
+        if api_name == "stock_basic" and "ts_code" in mcp_fields:
+            # The relay exposes both native fields under one `symbol` alias. Asking
+            # for both loses the exchange-qualified ts_code value.
+            mcp_fields = [value for value in mcp_fields if value != "symbol"]
+        if mcp_fields:
+            arguments["fields"] = mcp_fields
+
+        response = self._mcp_request(
+            "tools/call",
+            {"name": api_name, "arguments": arguments},
+        )
+        result = response.get("result")
+        if not isinstance(result, Mapping):
+            raise TushareError("mcp_protocol", "MCP relay returned no tool result")
+        content = self._mcp_content(result)
+        if result.get("isError"):
+            message = _mcp_error_text(content) or "tool call failed"
+            raise TushareError("mcp_tool", _redact_secret_text(message, self.mcp_url))
+        envelope = _mcp_envelope(content)
+        code = envelope.get("code")
+        if code != 0:
+            message = _redact_secret_text(
+                str(envelope.get("msg") or "unknown error"),
+                self.mcp_url,
+            )
+            raise TushareError(code, message)
+        data = envelope.get("data") or {}
+        if not isinstance(data, Mapping):
+            raise TushareError("mcp_protocol", "MCP Tushare data is not an object")
+        field_names = data.get("fields") or []
+        items = data.get("items") or []
+        rows = [dict(zip(field_names, values, strict=False)) for values in items]
+        return _restore_mcp_rows(api_name, rows, requested_fields, params or {})
+
+    def _ensure_mcp_initialized(self) -> None:
+        if self._mcp_ready:
+            return
+        with self._mcp_lock:
+            if self._mcp_ready:
+                return
+            response, session_id = self._mcp_post(
+                {
+                    "jsonrpc": "2.0",
+                    "id": next(self._request_ids),
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": self.mcp_protocol_version,
+                        "capabilities": {},
+                        "clientInfo": {"name": "stocktopic", "version": "1"},
+                    },
+                }
+            )
+            if "error" in response:
+                raise _mcp_rpc_error(response["error"])
+            if not isinstance(response.get("result"), Mapping):
+                raise TushareError("mcp_protocol", "MCP relay initialization failed")
+            self._mcp_session_id = session_id
+            self._mcp_post(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": {},
+                },
+                expect_response=False,
+            )
+            self._mcp_ready = True
+
+    def _mcp_request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
+        payload = {
+            "jsonrpc": "2.0",
+            "id": next(self._request_ids),
+            "method": method,
+            "params": dict(params),
+        }
+        response, _ = self._mcp_post(payload)
+        if "error" in response:
+            raise _mcp_rpc_error(response["error"])
+        return response
+
+    def _mcp_post(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        expect_response: bool = True,
+    ) -> tuple[dict[str, Any], str]:
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json; charset=utf-8",
+        }
+        if self._mcp_session_id:
+            headers["Mcp-Session-Id"] = self._mcp_session_id
+        request = urllib.request.Request(
+            self.mcp_url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers=headers,
+        )
+        try:
+            with open_url(request, timeout=self.timeout) as response:
+                body = response.read()
+                session_id = response.headers.get("Mcp-Session-Id", self._mcp_session_id)
+                if not body and not expect_response:
+                    return {}, session_id
+                content_type = response.headers.get("Content-Type", "")
+                return _decode_mcp_response(body, content_type), session_id
+        except urllib.error.HTTPError as error:
+            message = f"MCP relay rejected the request (HTTP {error.code})"
+            raise TushareError(f"mcp_http_{error.code}", message) from error
+        except (urllib.error.URLError, TimeoutError) as error:
+            message = _redact_secret_text(str(error), self.mcp_url)
+            raise TushareError("network", f"MCP relay unavailable: {message}") from error
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError) as error:
+            message = _redact_secret_text(str(error), self.mcp_url)
+            raise TushareError("mcp_protocol", f"Invalid MCP relay response: {message}") from error
+
+    @staticmethod
+    def _mcp_content(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        content = result.get("content") or []
+        if not isinstance(content, list):
+            raise TushareError("mcp_protocol", "MCP tool content is not a list")
+        return [item for item in content if isinstance(item, Mapping)]
 
     def realtime_quotes(self, captured_at: datetime) -> list[Quote]:
         rows = self.call(
@@ -318,6 +487,135 @@ class TushareClient:
                 break
             offset += len(page)
         return rows
+
+
+_STOCK_CODE_APIS = {
+    "ci_index_member",
+    "daily",
+    "daily_basic",
+    "dc_concept_cons",
+    "index_member_all",
+    "kpl_list",
+    "moneyflow",
+    "moneyflow_dc",
+    "moneyflow_ths",
+    "rt_k",
+    "stk_limit",
+    "stock_basic",
+}
+
+
+def _decode_mcp_response(body: bytes, content_type: str) -> dict[str, Any]:
+    text = body.decode("utf-8")
+    if "text/event-stream" not in content_type.lower():
+        value = json.loads(text)
+        if not isinstance(value, dict):
+            raise ValueError("MCP JSON-RPC response is not an object")
+        return value
+
+    events: list[str] = []
+    data_lines: list[str] = []
+    for line in text.splitlines():
+        if not line:
+            if data_lines:
+                events.append("\n".join(data_lines))
+                data_lines = []
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    if data_lines:
+        events.append("\n".join(data_lines))
+    for event in events:
+        value = json.loads(event)
+        if isinstance(value, dict) and ("result" in value or "error" in value):
+            return value
+    raise ValueError("MCP event stream contains no JSON-RPC response")
+
+
+def _mcp_rpc_error(value: Any) -> TushareError:
+    if isinstance(value, Mapping):
+        code = value.get("code", "unknown")
+        message = value.get("message") or "unknown JSON-RPC error"
+    else:
+        code = "unknown"
+        message = value
+    return TushareError(f"mcp_rpc_{code}", _redact_secret_text(str(message), ""))
+
+
+def _mcp_error_text(content: list[Mapping[str, Any]]) -> str:
+    return "; ".join(
+        str(item.get("text") or "").strip()
+        for item in content
+        if item.get("type") == "text" and str(item.get("text") or "").strip()
+    )
+
+
+def _mcp_envelope(content: list[Mapping[str, Any]]) -> Mapping[str, Any]:
+    for item in content:
+        if item.get("type") != "text":
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, Mapping):
+            return value
+    raise TushareError("mcp_protocol", "MCP tool returned no Tushare data envelope")
+
+
+def _restore_mcp_rows(
+    api_name: str,
+    rows: list[dict[str, Any]],
+    requested_fields: list[str],
+    params: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if "ts_code" not in requested_fields:
+        return rows
+    requested_code = str(params.get("ts_code") or "").strip()
+    can_restore_requested = requested_code and not any(
+        marker in requested_code for marker in ("*", ",")
+    )
+    for row in rows:
+        value = row.pop("symbol", row.get("ts_code"))
+        if not value and can_restore_requested:
+            value = requested_code
+        code = str(value or "").strip()
+        if api_name in _STOCK_CODE_APIS:
+            code = _qualified_stock_code(code, str(row.get("exchange") or ""))
+        row["ts_code"] = code
+        if api_name == "stock_basic":
+            row["symbol"] = code.split(".", 1)[0]
+    return rows
+
+
+def _qualified_stock_code(value: str, exchange: str = "") -> str:
+    if not value or "." in value:
+        return value
+    suffix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(exchange.upper(), "")
+    if not suffix and len(value) == 6 and value.isdigit():
+        if value.startswith("6"):
+            suffix = "SH"
+        elif value.startswith(("0", "3")):
+            suffix = "SZ"
+        elif value.startswith(("4", "8", "9")):
+            suffix = "BJ"
+    return f"{value}.{suffix}" if suffix else value
+
+
+def _redact_secret_text(message: str, secret_url: str) -> str:
+    result = message
+    if secret_url:
+        parsed = urlsplit(secret_url)
+        redacted = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "<redacted>", ""))
+        result = result.replace(secret_url, redacted)
+    return re.sub(
+        r"(?i)([?&](?:token|key|api[_-]?key)=)[^&\s'\"]+",
+        r"\1<redacted>",
+        result,
+    )
 
 
 def _dedupe_graph_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

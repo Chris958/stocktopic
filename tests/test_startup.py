@@ -39,3 +39,23 @@ def test_health_is_available_while_reference_data_loads():
                 reference_release.set()
         finally:
             reference_release.set()
+
+
+def test_health_reports_mcp_transport_without_exposing_url():
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        mcp_url = "https://relay.example/mcp?token=test-placeholder"
+        settings = Settings(
+            tushare_token="",
+            db_path=root / "test.sqlite3",
+            archive_dir=root / "archive",
+            tushare_mcp_url=mcp_url,
+        )
+        app = create_app(settings)
+        app.state.service.initialize_storage()
+
+        health = app.state.service.health()
+
+        assert health["integrations"]["tushare"] is True
+        assert health["integrations"]["tushare_transport"] == "mcp"
+        assert mcp_url not in str(health)

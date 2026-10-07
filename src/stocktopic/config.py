@@ -8,13 +8,6 @@ from pathlib import Path
 UNIFIED_OPENAI_MODEL = "gpt-5.6-sol"
 
 
-def _required(name: str) -> str:
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-
 def load_dotenv(path: Path = Path(".env")) -> None:
     """Small dotenv loader so production does not depend on python-dotenv."""
     if not path.exists():
@@ -34,6 +27,7 @@ class Settings:
     tushare_token: str
     db_path: Path
     archive_dir: Path
+    tushare_mcp_url: str = ""
     host: str = "127.0.0.1"
     port: int = 8765
     market_timezone: str = "Asia/Shanghai"
@@ -72,7 +66,12 @@ class Settings:
     @classmethod
     def from_env(cls, require_secrets: bool = True) -> Settings:
         load_dotenv()
-        token = _required("TUSHARE_TOKEN") if require_secrets else os.getenv("TUSHARE_TOKEN", "")
+        token = os.getenv("TUSHARE_TOKEN", "").strip()
+        mcp_url = os.getenv("TUSHARE_MCP_URL", "").strip()
+        if require_secrets and not (mcp_url or token):
+            raise RuntimeError(
+                "Missing required environment variable: TUSHARE_MCP_URL or TUSHARE_TOKEN"
+            )
         db_path = Path(os.getenv("STOCKTOPIC_DB_PATH", "./data/stocktopic.sqlite3"))
         archive_dir = Path(os.getenv("STOCKTOPIC_ARCHIVE_DIR", "./data/archive"))
         admin_password = os.getenv("ADMIN_PASSWORD", "").strip()
@@ -99,6 +98,7 @@ class Settings:
             tushare_token=token,
             db_path=db_path,
             archive_dir=archive_dir,
+            tushare_mcp_url=mcp_url,
             host=os.getenv("STOCKTOPIC_HOST", "127.0.0.1"),
             port=int(os.getenv("STOCKTOPIC_PORT", "8765")),
             anomaly_display_min_severity=float(os.getenv("ANOMALY_DISPLAY_MIN_SEVERITY", "68")),
@@ -144,6 +144,8 @@ class Settings:
 
     def validate_integrations(self) -> list[str]:
         warnings: list[str] = []
+        if not (self.tushare_mcp_url or self.tushare_token):
+            warnings.append("TUSHARE_MCP_URL or TUSHARE_TOKEN missing: market data disabled")
         if not self.openai_api_key:
             warnings.append("OPENAI_API_KEY missing: AI naming and news explanation disabled")
         if not self.wecom_bot_webhook:

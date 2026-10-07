@@ -23,10 +23,24 @@ def read_values() -> dict[str, str]:
     return values
 
 
-def prompt_value(label: str, current: str, *, secret: bool = False) -> str:
-    suffix = " [已配置，回车保留]" if secret and current else f" [{current}]" if current else ""
+def prompt_value(
+    label: str,
+    current: str,
+    *,
+    secret: bool = False,
+    allow_clear: bool = False,
+) -> str:
+    if secret and current:
+        suffix = " [已配置，回车保留"
+        if allow_clear:
+            suffix += "，输入-清空"
+        suffix += "]"
+    else:
+        suffix = f" [{current}]" if current else ""
     prompt = f"{label}{suffix}: "
     value = getpass.getpass(prompt) if secret else input(prompt)
+    if allow_clear and value.strip() == "-":
+        return ""
     return value.strip() or current
 
 
@@ -53,6 +67,18 @@ def main() -> None:
     print("敏感值不会显示；秘密字段直接回车会保留原值。")
     print("AI模型固定为 gpt-5.6-sol；所有AI任务使用同一模型。")
     updates = {
+        "TUSHARE_MCP_URL": prompt_value(
+            "Tushare MCP URL（推荐）",
+            values.get("TUSHARE_MCP_URL", ""),
+            secret=True,
+            allow_clear=True,
+        ),
+        "TUSHARE_TOKEN": prompt_value(
+            "Tushare直连Token（MCP已配置时可留空）",
+            values.get("TUSHARE_TOKEN", ""),
+            secret=True,
+            allow_clear=True,
+        ),
         "OPENAI_API_KEY": prompt_value(
             "OpenAI API Key", values.get("OPENAI_API_KEY", ""), secret=True
         ),
@@ -70,6 +96,17 @@ def main() -> None:
             secret=True,
         ),
     }
+    mcp_url = urlsplit(updates["TUSHARE_MCP_URL"])
+    if updates["TUSHARE_MCP_URL"] and not (
+        mcp_url.scheme in {"http", "https"}
+        and mcp_url.netloc
+        and mcp_url.username is None
+        and mcp_url.password is None
+        and not mcp_url.fragment
+    ):
+        raise SystemExit("Tushare MCP URL必须是完整的http(s)地址，且不能包含用户信息或片段。")
+    if not (updates["TUSHARE_MCP_URL"] or updates["TUSHARE_TOKEN"]):
+        raise SystemExit("Tushare MCP URL和Tushare Token至少配置一项。")
     base = urlsplit(updates["OPENAI_BASE_URL"])
     if updates["OPENAI_API_KEY"] and (base.scheme not in {"http", "https"} or not base.netloc):
         raise SystemExit("OpenAI Base URL必须是完整的http(s)地址。")

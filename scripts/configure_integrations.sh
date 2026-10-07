@@ -13,4 +13,5 @@ fi
 launchctl kickstart -k "gui/$(id -u)/com.chris958.stocktopic"
 
 echo "服务已重启。请运行：$APP_DIR/scripts/doctor.sh"
+echo "Tushare数据源可使用MCP中转；doctor会执行一次不含秘密信息的连通性检查。"
 echo "群机器人可在网页预警页面点击“测试群机器人”。"
