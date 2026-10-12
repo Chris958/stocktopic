@@ -18,6 +18,12 @@ from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import Settings
+from .dashboard_diagnostics import (
+    SCOPE_KEY,
+    DashboardTiming,
+    DashboardTimingMiddleware,
+    DashboardTimingRoute,
+)
 from .service import StockTopicService
 from .theme_graph_view import build_theme_graph
 
@@ -87,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.state.service = service
+    app.router.route_class = DashboardTimingRoute
 
     @app.middleware("http")
     async def authentication(request: Request, call_next):
@@ -137,6 +144,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             response.headers["Cache-Control"] = "no-store, must-revalidate"
         return response
 
+    # Outermost application timing includes the authentication middleware.
+    app.add_middleware(DashboardTimingMiddleware)
+
     static_dir = Path(__file__).with_name("static")
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
@@ -186,17 +196,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return response
 
     @app.get("/api/v1/dashboard")
-    async def dashboard():
-        now = service.clock.china_now()
-        flow_date, flow_slot = service.fund_flow_display_context(now)
-        themes = service.database.list_themes()
-        service.database.attach_theme_fund_flows(themes, flow_date, flow_slot)
-        return {
-            "health": await asyncio.to_thread(service.health),
-            "themes": themes,
-            "alerts": service.database.recent_alerts(100),
-            "backtest": service.test_pool.dashboard(now),
-        }
+    async def dashboard(request: Request):
+        timing = request.scope.get(SCOPE_KEY) or DashboardTiming()
+        endpoint_started = time.perf_counter()
+        try:
+            now = service.clock.china_now()
+            flow_date, flow_slot = timing.phase(
+                "flow_context", lambda: service.fund_flow_display_context(now),
+            )
+            themes = timing.phase("list_themes", service.database.list_themes)
+            timing.counts.update({
+                "themes": len(themes),
+                "members": sum(len(theme.get("members", [])) for theme in themes),
+            })
+            timing.phase("attach_fund_flows", lambda: service.database.attach_theme_fund_flows(
+                themes, flow_date, flow_slot,
+            ))
+            health = await timing.health(service.health)
+            alerts = timing.phase("alerts", lambda: service.database.recent_alerts(100))
+            backtest = timing.phase("backtest", lambda: service.test_pool.dashboard(now))
+            return {"health": health, "themes": themes, "alerts": alerts, "backtest": backtest}
+        finally:
+            timing.elapsed("endpoint_total", endpoint_started)
+            timing.endpoint_done = time.perf_counter()
 
     @app.get("/api/v1/theme-graph")
     async def theme_graph(
