@@ -37,6 +37,8 @@ BROAD_PARENT_TAGS = {
     "消费",
     "金融",
     "金融概念",
+    "文化传媒",
+    "传媒",
 }
 
 
@@ -343,6 +345,69 @@ def install_graph_first_ai_clustering() -> None:
 
 
 def _graph_first_cluster_limit_events(
+    self: Any, trade_date: str, events: list[dict[str, Any]], minimum_members: int = 2,
+) -> list[dict[str, Any]]:
+    from .event_bridge import EventBridgeDetector, verify_event_bridge
+
+    all_local = structured_event_clusters(
+        events, minimum_members=max(2, minimum_members), include_broad_parents=True,
+    )
+    local = structured_event_clusters(events, minimum_members=max(2, minimum_members))
+    all_local = list({item["tag"]: item for item in [*all_local, *local]}.values())
+    early = [item for item in local if 2 <= len(item["member_codes"]) <= 3]
+    detector = EventBridgeDetector()
+    bridges = detector.detect(trade_date, events, all_local)
+    trace = {
+        "trade_date": trade_date, "strong_stock_count": len({e["code"] for e in events}),
+        "local_clusters": [{"tag": item["tag"], "touch_count": item["touch_count"]}
+                           for item in all_local],
+        "bridge_candidate_count": len(bridges), "bridge_screening": detector.trace,
+        "bridges": [], "single_node_formal": [],
+    }
+    self.last_discovery_trace = trace
+    result = []
+    formal_local = structured_event_clusters(events, minimum_members=4,
+                                              include_broad_parents=True)
+    if self.enabled and any(item["tag"] not in {"文化传媒", "传媒"} for item in formal_local):
+        try:
+            result = _verify_formal_graph_clusters(self, trade_date, events, minimum_members)
+            trace["single_node_formal"] = [item["tag"] for item in result]
+            trace["single_node_final"] = "verified" if result else "ai_rejected"
+        except Exception as error:
+            # Early local observations must survive a verifier outage.
+            trace["single_node_final"] = "verification_failed"
+            trace["single_node_error_type"] = type(error).__name__
+    bridge_anchors: set[str] = set()
+    for candidate in sorted(bridges, key=lambda item: (
+        -item["bridge_score"], -item["touch_count"], tuple(item["nodes"]),
+    )):
+        if not self.enabled:
+            trace["bridges"].append({"nodes": candidate["nodes"],
+                                     "final_reject_reason": "ai_disabled"})
+            continue
+        try:
+            cluster, decision = verify_event_bridge(self, candidate, events)
+            if cluster and cluster["tag"] in bridge_anchors:
+                decision["final"] = "superseded_same_anchor"
+                decision["final_reject_reason"] = "stronger_bridge_same_anchor"
+            elif cluster:
+                bridge_anchors.add(cluster["tag"])
+                result.append(cluster)
+            trace["bridges"].append(decision)
+        except Exception as error:
+            trace["bridges"].append({"nodes": candidate["nodes"],
+                                     "final_reject_reason": "verification_failed",
+                                     "error_type": type(error).__name__})
+    trace["verification_failed"] = (
+        trace.get("single_node_final") == "verification_failed"
+        or any(item.get("final_reject_reason") == "verification_failed"
+               for item in trace["bridges"])
+    )
+    formal_tags = {item["tag"] for item in result}
+    return [*result, *(item for item in early if item["tag"] not in formal_tags)]
+
+
+def _verify_formal_graph_clusters(
     self: Any,
     trade_date: str,
     events: list[dict[str, Any]],
@@ -369,7 +434,10 @@ def _graph_first_cluster_limit_events(
         # Critical cost-control rule: never invoke web_search/LLM for the 2-3 stock layer.
         return local_clusters
 
-    graph_candidates = [item for item in local_clusters if len(item["member_codes"]) >= 2][:20]
+    graph_candidates = [
+        item for item in local_clusters
+        if len(item["member_codes"]) >= 4 and item["tag"] not in {"文化传媒", "传媒"}
+    ][:20]
     if not graph_candidates:
         # Fail closed: without a structured graph relationship, do not ask the model
         # to invent a four-stock theme from scratch.
@@ -420,12 +488,13 @@ def _graph_first_cluster_limit_events(
             }
         )
     anchor_tags = {str(item["anchor_tag"]) for item in graph_payload}
+    anchor_members = {item["anchor_tag"]: set(item["member_codes"]) for item in graph_payload}
     prompt = f"""
 你是A股题材图谱验证器。系统已经先用结构化知识图谱完成股票聚合；你只能在这些图谱候选上
 使用web_search补充当日/隔夜催化、验证共同因果链，不能从全市场自由拼凑股票。
 
 正式题材硬门槛：至少{formal_minimum}只输入强势股票共同指向同一具体新增事件/产业逻辑。
-允许把多个相邻图谱节点合并成一个具体事件，但必须有公开信息证明它们属于同一催化链。
+每个输出成员只能来自其anchor_tag对应的单个输入节点。跨节点桥接由独立本地检测器负责。
 
 硬约束：
 1. anchor_tag必须逐字来自“图谱候选”的anchor_tag，不得自创；
@@ -492,7 +561,7 @@ def _graph_first_cluster_limit_events(
             dict.fromkeys(
                 str(code).strip()
                 for code in cluster.get("member_codes", [])
-                if str(code).strip() in allowed_codes
+                if str(code).strip() in anchor_members[anchor]
             )
         )
         if len(codes) < formal_minimum:

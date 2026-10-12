@@ -23,7 +23,7 @@ from .fund_flow import EastmoneyFlowClient
 from .market_clock import MarketClock
 from .providers import TushareClient
 from .scoring import ThemeScorer
-from .theme_graph import structured_event_clusters
+from .theme_policy import policy_structured_event_clusters as structured_event_clusters
 from .themes import ThemeDiscovery
 from .wecom import WeComNotifier
 
@@ -484,12 +484,36 @@ class StockTopicService:
         with self._discovery_lock:
             events = self.database.limit_touch_events(trade_date)
             if len(events) < self.settings.minimum_limit_touches:
+                self.database.set_metadata(
+                    f"discovery_trace_latest:{trade_date}", "below_discovery_floor",
+                )
+                self.database.set_metadata(
+                    f"discovery_trace:{trade_date}:below_discovery_floor",
+                    json.dumps({"trade_date": trade_date, "strong_stock_count": len(events),
+                                "local_clusters": [], "bridge_candidate_count": 0,
+                                "final_reject_reason": "below_discovery_floor"}),
+                )
                 return []
             signature_events = _semantic_signature_events(
                 events, self.settings.minimum_limit_touches
             )
             input_signature = _semantic_event_signature(signature_events)
             cached = self.database.semantic_cluster_run(trade_date, input_signature)
+            trace_key = f"discovery_trace:{trade_date}:{input_signature}"
+            self.database.set_metadata(f"discovery_trace_latest:{trade_date}", input_signature)
+            if not self.database.get_metadata(trace_key):
+                from .event_bridge import EventBridgeDetector
+                local = structured_event_clusters(events, include_broad_parents=True)
+                detector = EventBridgeDetector()
+                bridges = detector.detect(trade_date, events, local)
+                self.database.set_metadata(trace_key, json.dumps({
+                    "trade_date": trade_date, "strong_stock_count": len(events),
+                    "local_clusters": [{"tag": c["tag"], "touch_count": c["touch_count"]}
+                                       for c in local],
+                    "bridge_candidate_count": len(bridges), "bridge_screening": detector.trace,
+                    "bridges": [], "final_reject_reason": (
+                        "ai_disabled" if not self.explainer.enabled else "verification_pending"),
+                }, ensure_ascii=False))
             semantic_clusters: list[dict[str, Any]] | None = None
             if cached and cached.get("status") == "success":
                 semantic_clusters = list(cached.get("clusters") or [])
@@ -505,11 +529,20 @@ class StockTopicService:
                         events,
                         self.settings.minimum_limit_touches,
                     )
+                    trace = getattr(self.explainer, "last_discovery_trace", None)
+                    if trace:
+                        self.database.set_metadata(
+                            f"discovery_trace:{trade_date}:{input_signature}",
+                            json.dumps(trace, ensure_ascii=False),
+                        )
+                        self.database.set_metadata(
+                            f"discovery_trace_latest:{trade_date}", input_signature,
+                        )
                     self.database.save_semantic_cluster_run(
                         trade_date,
                         input_signature,
                         self._ai_model_for_task("semantic_event_clustering"),
-                        "success",
+                        "failed" if trace and trace.get("verification_failed") else "success",
                         semantic_clusters,
                     )
                 except Exception as error:
@@ -525,11 +558,19 @@ class StockTopicService:
                     self._data_pull_failure("semantic_event_clustering", error, observed_at)
                     logger.warning("Semantic event clustering failed: %s", safe)
 
+            if semantic_clusters is None and self.explainer.enabled:
+                semantic_clusters = list(cached.get("clusters") or []) if recent_failed_run else []
             if semantic_clusters is None:
                 # Resilient fallback when AI is disabled or unavailable. It is marked
                 # explicitly so the audit page never presents exact-tag grouping as semantic.
                 return self.discovery.discover_for_date(trade_date, observed_at)
 
+            local_early = [cluster for cluster in structured_event_clusters(
+                events, minimum_members=self.settings.minimum_limit_touches,
+            ) if 2 <= len(cluster["member_codes"]) <= 3]
+            semantic_tags = {cluster["tag"] for cluster in semantic_clusters}
+            semantic_clusters = [*semantic_clusters, *(cluster for cluster in local_early
+                                                      if cluster["tag"] not in semantic_tags)]
             event_by_code = {str(event["code"]): event for event in events}
             enriched = []
             for cluster in semantic_clusters:
@@ -922,6 +963,17 @@ class StockTopicService:
                         failed = _failed_check_labels(core_checks)
                         decision_reason = "未纳入：" + "、".join(failed)
                     admitted = decision_level == "formal"
+                    self.database.set_metadata(
+                        f"admission_trace:{theme_id}",
+                        json.dumps({"trade_date": compact, "theme_id": theme_id,
+                                    "novelty_mode": item.get("novelty_mode"),
+                                    "admission_result": decision_level,
+                                    "checks": core_checks, "final_reject_reason": (
+                                        decision_reason if not admitted else ""),
+                                    "discovery_trace_signature": self.database.get_metadata(
+                                        f"discovery_trace_latest:{compact}")},
+                                   ensure_ascii=False),
+                    )
                     self.database.save_admission_review(
                         theme_id,
                         item,
@@ -990,6 +1042,12 @@ class StockTopicService:
                 except Exception as error:
                     self.database.set_admission_status(
                         theme_id, "analysis_failed", _safe_error(error)
+                    )
+                    self.database.set_metadata(
+                        f"admission_trace:{theme_id}",
+                        json.dumps({"theme_id": theme_id, "trade_date": theme["day1_date"],
+                                    "admission_result": "analysis_failed",
+                                    "final_reject_reason": _safe_error(error)}),
                     )
                     self._data_pull_failure("ai_admission_analysis", error)
                     logger.warning("AI admission analysis failed for theme %s: %s", theme_id, error)
@@ -1557,11 +1615,20 @@ def _parse_board_height(status: Any) -> int:
 
 def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
     """Cache semantic membership while allowing live board status to update separately."""
+    local = structured_event_clusters(events)
+    bridge_codes = {code for c in local if 2 <= len(c["member_codes"]) <= 3
+                    for code in c["member_codes"]} if sum(
+        2 <= len(c["member_codes"]) <= 3 for c in local
+    ) >= 2 else set()
     payload = sorted(
         (
             {
                 "code": event.get("code"),
                 "market": event.get("market"),
+                "limit_up_time": event.get("limit_up_time"),
+                "bridge_board_tag": event.get("board_tag") if event.get("code") in bridge_codes
+                else None,
+                "knowledge_graph_tags": event.get("knowledge_graph_tags", []),
                 "themes": sorted(str(value) for value in event.get("themes", []) if value),
                 "limit_reason": str(event.get("limit_reason") or "")[:240],
                 "concept_tags": sorted(
@@ -1575,7 +1642,7 @@ def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
         key=lambda item: str(item.get("code") or ""),
     )
     return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+        ("event-bridge-p0-v1|" + json.dumps(payload, ensure_ascii=False, sort_keys=True)).encode()
     ).hexdigest()
 
 

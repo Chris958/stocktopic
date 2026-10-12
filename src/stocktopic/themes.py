@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
 from typing import Any
 
@@ -65,6 +66,13 @@ class ThemeDiscovery:
                 touch_count,
                 float(metrics["synchronization_score"]),
                 float(item.get("cluster_confidence") or 0),
+            )
+            self.database.set_metadata(
+                f"discovery_node_trace:{trade_date}:{item['tag']}",
+                json.dumps({"trade_date": trade_date, "anchor_tag": item["tag"],
+                    "touch_count": touch_count, "stage": stage,
+                    "final_reject_reason": "insufficient_synchronization" if stage == "noise"
+                    else "", "bridge": item.get("decision_trace")}, ensure_ascii=False),
             )
             if stage == "noise":
                 continue
@@ -136,7 +144,7 @@ class ThemeDiscovery:
             method = str(item.get("cluster_method") or "exact_tag")
             grouping_reason = (
                 "先由结构化题材图谱聚合，再由外部新闻验证共同事件。"
-                if method == "semantic_event"
+                if method in {"semantic_event", "event_bridge"}
                 else "由结构化题材知识图谱确定性归并，未使用外部搜索创造成员。"
             )
             stage_reason = (
