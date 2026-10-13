@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from concurrent.futures import Executor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,6 +58,25 @@ class DashboardTiming:
             self.elapsed("health_total", submitted)
             if finished is not None:
                 self.elapsed("health_resume", finished)
+
+    async def dashboard_worker(self, executor: Executor, function: Callable[[], Any]) -> Any:
+        submitted = time.perf_counter()
+        finished: float | None = None
+
+        def worker() -> Any:
+            nonlocal finished
+            self.elapsed("dashboard_queue", submitted)
+            try:
+                return self.phase("dashboard_exec", function)
+            finally:
+                finished = time.perf_counter()
+
+        try:
+            return await asyncio.get_running_loop().run_in_executor(executor, worker)
+        finally:
+            self.elapsed("dashboard_total", submitted)
+            if finished is not None:
+                self.elapsed("dashboard_resume", finished)
 
     def server_timing(self) -> str:
         return ", ".join(f"{name};dur={value:.3f}" for name, value in self.metrics.items())

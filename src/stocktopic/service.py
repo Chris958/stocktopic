@@ -1432,11 +1432,11 @@ class StockTopicService:
             elif calendar and time(15, 5) <= now.time() <= time(15, 20):
                 await asyncio.to_thread(self.end_of_day, now)
             if now.second < 25:
+                admission_states = await asyncio.to_thread(self.database.list_admission_states)
                 candidate_ids.extend(
                     int(theme["id"])
-                    for theme in self.database.list_themes()
-                    if theme.get("status") in {"pending", "watching"}
-                    and _admission_candidate_due(theme, now)
+                    for theme in admission_states
+                    if _admission_candidate_due(theme, now)
                 )
                 candidate_ids = list(dict.fromkeys(candidate_ids))
                 if candidate_ids and self.explainer.enabled:

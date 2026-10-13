@@ -8,10 +8,12 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -65,6 +67,7 @@ SESSION_COOKIE = "stocktopic_session"
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     service = StockTopicService(settings)
+    dashboard_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dashboard")
 
     async def run_background_services() -> None:
         try:
@@ -83,7 +86,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             service.stop()
-            await background_services
+            try:
+                await background_services
+            finally:
+                dashboard_executor.shutdown(wait=False, cancel_futures=True)
 
     app = FastAPI(
         title="StockTopic API",
@@ -195,27 +201,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return response
 
+    def build_dashboard(timing: DashboardTiming) -> JSONResponse:
+        now = service.clock.china_now()
+        flow_date, flow_slot = timing.phase(
+            "flow_context", lambda: service.fund_flow_display_context(now),
+        )
+        themes = timing.phase("list_themes", service.database.list_themes)
+        timing.counts.update({
+            "themes": len(themes),
+            "members": sum(len(theme.get("members", [])) for theme in themes),
+        })
+        timing.phase("attach_fund_flows", lambda: service.database.attach_theme_fund_flows(
+            themes, flow_date, flow_slot,
+        ))
+        health = timing.phase("health_exec", service.health)
+        alerts = timing.phase("alerts", lambda: service.database.recent_alerts(100))
+        backtest = timing.phase("backtest", lambda: service.test_pool.dashboard(now))
+        payload = {"health": health, "themes": themes, "alerts": alerts, "backtest": backtest}
+        encoded = timing.phase("jsonable_encoder", lambda: jsonable_encoder(payload))
+        return timing.phase("json_response", lambda: JSONResponse(encoded))
+
     @app.get("/api/v1/dashboard")
     async def dashboard(request: Request):
         timing = request.scope.get(SCOPE_KEY) or DashboardTiming()
         endpoint_started = time.perf_counter()
         try:
-            now = service.clock.china_now()
-            flow_date, flow_slot = timing.phase(
-                "flow_context", lambda: service.fund_flow_display_context(now),
+            return await timing.dashboard_worker(
+                dashboard_executor, lambda: build_dashboard(timing),
             )
-            themes = timing.phase("list_themes", service.database.list_themes)
-            timing.counts.update({
-                "themes": len(themes),
-                "members": sum(len(theme.get("members", [])) for theme in themes),
-            })
-            timing.phase("attach_fund_flows", lambda: service.database.attach_theme_fund_flows(
-                themes, flow_date, flow_slot,
-            ))
-            health = await timing.health(service.health)
-            alerts = timing.phase("alerts", lambda: service.database.recent_alerts(100))
-            backtest = timing.phase("backtest", lambda: service.test_pool.dashboard(now))
-            return {"health": health, "themes": themes, "alerts": alerts, "backtest": backtest}
         finally:
             timing.elapsed("endpoint_total", endpoint_started)
             timing.endpoint_done = time.perf_counter()
@@ -273,7 +286,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "archived",
         }:
             raise HTTPException(status_code=400, detail="Invalid theme status")
-        return {"items": service.database.list_themes(status)}
+        return {"items": await asyncio.to_thread(service.database.list_themes, status)}
 
     @app.post("/api/v1/themes/{theme_id}/pin")
     async def pin_theme(theme_id: int, request: PinRequest):

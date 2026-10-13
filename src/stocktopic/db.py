@@ -1291,6 +1291,15 @@ class Database:
                 )
         return theme_id
 
+    def list_admission_states(self) -> list[dict[str, Any]]:
+        """Scheduler retry checks need state fields, never hydrated theme data."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT id, status, admission_status, admission_reviewed_at "
+                "FROM candidate_themes WHERE status IN ('pending', 'watching')",
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_themes(self, status: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM candidate_themes"
         params: list[Any] = []
@@ -1300,6 +1309,12 @@ class Database:
         sql += " ORDER BY pinned DESC, updated_at DESC"
         with self.connect() as connection:
             themes = [dict(row) for row in connection.execute(sql, params).fetchall()]
+            member_sql = "SELECT DISTINCT tm.code FROM theme_members tm "
+            member_sql += "JOIN candidate_themes ct ON ct.id=tm.theme_id"
+            if status:
+                member_sql += " WHERE ct.status=?"
+            codes = [str(row["code"]) for row in connection.execute(member_sql, params)]
+            board_context = self._load_board_context(connection, codes) if codes else ({}, {})
             for theme in themes:
                 theme["cluster_aliases"] = json.loads(theme.pop("cluster_aliases_json") or "[]")
                 baseline_at = str(theme.get("confirmed_at") or theme["discovered_at"])
@@ -1360,7 +1375,7 @@ class Database:
                     circ_mv = _number(member.get("circ_mv"))
                     member["circ_mv_billion"] = round(circ_mv / 10_000.0, 2) if circ_mv else None
                     theme["members"].append(member)
-                self._attach_board_context(connection, theme)
+                self._attach_board_context(connection, theme, board_context)
                 self._attach_theme_market_summary(theme)
                 score = connection.execute(
                     """
@@ -1618,55 +1633,66 @@ class Database:
                 failed += 1
         return {"awaiting_ai": waiting, "failed": failed}
 
-    def _attach_board_context(self, connection: sqlite3.Connection, theme: dict[str, Any]) -> None:
-        members = theme["members"]
-        codes = [str(member["code"]) for member in members]
-        if not codes:
-            return
-        placeholders = ",".join("?" for _ in codes)
-        rows = connection.execute(
-            f"""
-            WITH ranked AS (
-                SELECT *, ROW_NUMBER() OVER(
-                    PARTITION BY code ORDER BY trade_date DESC, synced_at DESC
-                ) AS rn
-                FROM kpl_events WHERE code IN ({placeholders})
-            )
-            SELECT * FROM ranked WHERE rn<=8 ORDER BY code, trade_date DESC
-            """,
-            codes,
-        ).fetchall()
+    def _load_board_context(
+        self, connection: sqlite3.Connection, codes: list[str],
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, str]]:
+        """Load shared stock context once per list, with bounded SQLite parameters."""
         histories: dict[str, list[dict[str, Any]]] = {}
-        for row in rows:
-            item = dict(row)
-            raw = json.loads(item.pop("raw_json") or "{}")
-            item["themes"] = json.loads(item.pop("themes_json"))
-            item["board_height"] = _board_height(item.get("status"))
-            item["limit_order"] = raw.get("limit_order")
-            item["turnover_rate"] = raw.get("turnover_rate")
-            histories.setdefault(str(item["code"]), []).append(item)
-
+        first_moves: dict[str, str] = {}
+        codes = sorted(set(codes))
+        if not codes:
+            return histories, first_moves
         anomaly_date_row = connection.execute(
             "SELECT MAX(trade_date) AS trade_date FROM anomaly_events"
         ).fetchone()
         anomaly_date = str(anomaly_date_row["trade_date"] or "")
-        first_moves: dict[str, str] = {}
-        if anomaly_date:
-            move_rows = connection.execute(
+        for offset in range(0, len(codes), 400):
+            batch = codes[offset:offset + 400]
+            placeholders = ",".join("?" for _ in batch)
+            rows = connection.execute(
                 f"""
-                SELECT code, MIN(captured_at) AS first_move_at
-                FROM anomaly_events
-                WHERE trade_date=? AND direction='positive'
-                  AND code IN ({placeholders})
-                GROUP BY code
-                """,
-                [anomaly_date, *codes],
+                WITH ranked AS (
+                    SELECT *, ROW_NUMBER() OVER(
+                        PARTITION BY code ORDER BY trade_date DESC, synced_at DESC
+                    ) AS rn
+                    FROM kpl_events WHERE code IN ({placeholders})
+                )
+                SELECT * FROM ranked WHERE rn<=8 ORDER BY code, trade_date DESC
+                """, batch,
             ).fetchall()
-            first_moves = {
-                str(row["code"]): str(row["first_move_at"])
-                for row in move_rows
-                if row["first_move_at"]
-            }
+            for row in rows:
+                item = dict(row)
+                raw = json.loads(item.pop("raw_json") or "{}")
+                item["themes"] = json.loads(item.pop("themes_json"))
+                item["board_height"] = _board_height(item.get("status"))
+                item["limit_order"] = raw.get("limit_order")
+                item["turnover_rate"] = raw.get("turnover_rate")
+                histories.setdefault(str(item["code"]), []).append(item)
+            if anomaly_date:
+                rows = connection.execute(
+                    f"""
+                    SELECT code, MIN(captured_at) AS first_move_at FROM anomaly_events
+                    WHERE trade_date=? AND direction='positive'
+                      AND code IN ({placeholders}) GROUP BY code
+                    """, [anomaly_date, *batch],
+                ).fetchall()
+                first_moves.update({str(row["code"]): str(row["first_move_at"])
+                                    for row in rows if row["first_move_at"]})
+        return histories, first_moves
+
+    def _attach_board_context(
+        self, connection: sqlite3.Connection, theme: dict[str, Any],
+        context: tuple[dict[str, list[dict[str, Any]]], dict[str, str]] | None = None,
+    ) -> None:
+        members = theme["members"]
+        codes = [str(member["code"]) for member in members]
+        if not codes:
+            return
+        histories, shared_moves = context if context is not None else self._load_board_context(
+            connection, codes,
+        )
+        # Follow counts are local to this theme, not the union of all theme members.
+        first_moves = {code: shared_moves[code] for code in codes if code in shared_moves}
 
         limit_members = []
         for member in members:
@@ -2207,16 +2233,40 @@ class Database:
         return [json.loads(row["payload"]) for row in rows]
 
     def attach_theme_fund_flows(self, themes: list[dict], trade_date: str, slot: str) -> None:
+        owners = {
+            "theme": sorted({str(theme["id"]) for theme in themes}),
+            "stock": sorted({str(member["code"]) for theme in themes
+                             for member in theme.get("members", [])}),
+        }
+        histories: dict[tuple[str, str], list[dict]] = {}
+        if not themes:
+            return
+        with self.connect() as connection:
+            for kind, values in owners.items():
+                for offset in range(0, len(values), 400):
+                    batch = values[offset:offset + 400]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = connection.execute(
+                        "SELECT owner, payload FROM flow_history WHERE kind=? AND trade_date=? "
+                        f"AND owner IN ({placeholders}) ORDER BY captured_at DESC,id DESC",
+                        [kind, trade_date, *batch],
+                    ).fetchall()
+                    for row in rows:
+                        histories.setdefault((kind, str(row["owner"])), []).append(
+                            json.loads(row["payload"]),
+                        )
         for theme in themes:
-            rows = self.flow_history("theme", str(theme["id"]), trade_date)
-            daily = next((r for r in rows if r.get("slot") == "close"), None)
-            intraday = next((r for r in rows if r.get("slot") != "close"), None)
-            theme["fund_flow"] = {"daily": daily, "intraday": intraday, "trade_date": trade_date}
+            rows = histories.get(("theme", str(theme["id"])), [])
+            theme["fund_flow"] = {
+                "daily": next((r for r in rows if r.get("slot") == "close"), None),
+                "intraday": next((r for r in rows if r.get("slot") != "close"), None),
+                "trade_date": trade_date,
+            }
             for member in theme.get("members", []):
-                stock_rows = self.flow_history("stock", member["code"], trade_date)
+                rows = histories.get(("stock", str(member["code"])), [])
                 member["fund_flow"] = {
-                    "daily": next((r for r in stock_rows if r.get("slot") == "close"), None),
-                    "intraday": next((r for r in stock_rows if r.get("slot") != "close"), None),
+                    "daily": next((r for r in rows if r.get("slot") == "close"), None),
+                    "intraday": next((r for r in rows if r.get("slot") != "close"), None),
                 }
 
     def attach_test_pool_fund_flows(self, entries: list[dict], trade_date: str, slot: str) -> None:

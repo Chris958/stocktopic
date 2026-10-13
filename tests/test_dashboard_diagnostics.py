@@ -51,10 +51,13 @@ def test_real_dashboard_logs_stages_without_changing_payload(tmp_path, caplog):
         "flow_context",
         "list_themes",
         "attach_fund_flows",
-        "health_queue",
         "health_exec",
-        "health_resume",
-        "health_total",
+        "dashboard_queue",
+        "dashboard_exec",
+        "dashboard_resume",
+        "dashboard_total",
+        "jsonable_encoder",
+        "json_response",
         "alerts",
         "backtest",
         "endpoint_total",
@@ -161,10 +164,12 @@ def test_overlapping_requests_have_independent_ids_and_peak_counts(caplog):
             return {"type": "http.request", "body": b""}
 
         middleware = DashboardTimingMiddleware(app)
-        await asyncio.gather(*[
-            middleware({"type": "http", "path": "/api/v1/dashboard"}, receive, send)
-            for _ in range(2)
-        ])
+        await asyncio.gather(
+            *[
+                middleware({"type": "http", "path": "/api/v1/dashboard"}, receive, send)
+                for _ in range(2)
+            ]
+        )
         assert middleware.inflight == {}
 
     asyncio.run(run())
