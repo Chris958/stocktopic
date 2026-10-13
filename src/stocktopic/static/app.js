@@ -1,5 +1,6 @@
 let savedSections = {};
 let fundFlowPollTimer = null;
+let dashboardLoadInFlight = null;
 try { savedSections = JSON.parse(localStorage.getItem('stocktopicSections') || '{}'); }
 catch (_) { savedSections = {}; }
 const state = {
@@ -167,18 +168,23 @@ document.addEventListener('keydown', event => {
   }
 });
 
-async function load(manual = false) {
-  const refresh = $('#refresh');
-  refresh.classList.add('loading');
-  try {
-    state.data = await api('/api/v1/dashboard');
-    render();
-    if (manual) toast('数据已刷新');
-  } catch (error) {
-    if (state.authenticated) toast(error.message, true);
-  } finally {
-    refresh.classList.remove('loading');
-  }
+function load(manual = false) {
+  if (dashboardLoadInFlight) return dashboardLoadInFlight;
+  dashboardLoadInFlight = (async () => {
+    const refresh = $('#refresh');
+    refresh.classList.add('loading');
+    try {
+      state.data = await api('/api/v1/dashboard');
+      render();
+      window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: state.data }));
+      if (manual) toast('数据已刷新');
+    } catch (error) {
+      if (state.authenticated) toast(error.message, true);
+    } finally {
+      refresh.classList.remove('loading');
+    }
+  })().finally(() => { dashboardLoadInFlight = null; });
+  return dashboardLoadInFlight;
 }
 
 function render() {

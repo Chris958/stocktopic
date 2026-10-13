@@ -1,8 +1,6 @@
 (() => {
-  const DASHBOARD_PATH = '/api/v1/dashboard';
   let refreshTimer = null;
   let cached = null;
-  let cachedAt = 0;
 
   const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, character => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
@@ -25,20 +23,6 @@
     <strong>${escapeHtml(value)}</strong>
     ${note ? `<small>${escapeHtml(note)}</small>` : ''}
   </div>`;
-
-  async function dashboard() {
-    const now = Date.now();
-    if (cached && now - cachedAt < 3000) return cached;
-    const response = await fetch(DASHBOARD_PATH, {
-      cache: 'no-store',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' }
-    });
-    if (!response.ok) throw new Error(`dashboard ${response.status}`);
-    cached = await response.json();
-    cachedAt = now;
-    return cached;
-  }
 
   function themeTitle(theme) {
     return theme.final_name || theme.suggested_name || theme.provisional_name || '';
@@ -156,13 +140,9 @@
     </details>`;
   }
 
-  async function enhance() {
-    let data;
-    try {
-      data = await dashboard();
-    } catch (_) {
-      return;
-    }
+  function enhance() {
+    const data = cached;
+    if (!data) return;
     const themes = Array.isArray(data.themes) ? data.themes : [];
     document.querySelectorAll('.theme-card').forEach(card => {
       if (card.dataset.intelligenceInjected === '1') return;
@@ -184,10 +164,15 @@
   function scheduleEnhance() {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
-      cached = null;
       enhance();
     }, 120);
   }
+
+  // Reuse the authenticated dashboard result; never make a second full request.
+  window.addEventListener('stocktopic:dashboard', event => {
+    cached = event.detail;
+    scheduleEnhance();
+  });
 
   const observer = new MutationObserver(mutations => {
     if (mutations.some(item => item.addedNodes.length || item.removedNodes.length)) scheduleEnhance();
