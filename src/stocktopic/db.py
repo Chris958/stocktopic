@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import Anomaly, Quote
+from .market_clock import MarketClock
 
 
 def utc_now_iso() -> str:
@@ -642,6 +643,92 @@ class Database:
             )
         return len(event_values)
 
+    def upsert_mainboard_limit_events(
+        self, trade_date: str, quotes: Sequence[Quote],
+        limits: dict[str, tuple[float | None, float | None]],
+        history: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> int:
+        """Use observed prices and official daily limits when KPL is late/empty.
+
+        Times are first *observed* touches, never claimed exchange seal times.
+        Do not invent themes, reasons, or board heights. KPL rows take precedence.
+        """
+        day = trade_date.replace("-", "")
+        active = self.active_stock_map()
+        selected = []
+        for quote in quotes:
+            upper = limits.get(quote.code, (None, None))[0]
+            observed = MarketClock.normalize(quote.captured_at)
+            if (active.get(quote.code, {}).get("market") != "主板"
+                    or observed.strftime("%Y%m%d") != day
+                    or MarketClock.session_name(observed) not in {"morning", "afternoon"}
+                    or not upper or upper <= 0 or quote.pre_close <= 0 or quote.close <= 0
+                    or abs(quote.high - upper) > 0.005):
+                continue
+            selected.append((quote, upper, observed))
+        if not selected:
+            return 0
+        with self.connect() as connection:
+            previous = {
+                row["code"]: dict(row) for row in connection.execute(
+                    "SELECT code,limit_up_time,raw_json FROM kpl_events WHERE trade_date=? "
+                    "AND json_extract(raw_json,'$.source')='local_rt_k_limit'",
+                    (day,),
+                )
+            }
+            for quote, upper, observed in selected:
+                board = "涨停" if quote.close >= upper - 0.005 else "炸板"
+                prior = previous.get(quote.code, {})
+                first = prior.get("limit_up_time") or observed.strftime("%H%M%S")
+                prior_raw = json.loads(prior.get("raw_json") or "{}")
+                basis = prior_raw.get("limit_time_basis") or "first_observed_5m"
+                window_start = prior_raw.get("touch_window_start")
+                samples = (history or {}).get(quote.code, [])
+                if not prior and samples:
+                    sample = samples[0]
+                    try:
+                        before = MarketClock.normalize(
+                            datetime.fromisoformat(sample["captured_at"]),
+                        )
+                        if (before.date() == observed.date()
+                                and 0 < (observed - before).total_seconds() <= 360
+                                and 0 < float(sample.get("high") or 0) < upper - 0.005):
+                            basis = "observed_interval_5m"
+                            window_start = before.isoformat(timespec="seconds")
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                raw = json.dumps({
+                    "source": "local_rt_k_limit", "qualification": "official_daily_upper_limit",
+                    "upper_limit": upper, "observed_high": quote.high,
+                    "observed_at": observed.isoformat(timespec="seconds"),
+                    "limit_time_basis": basis, "touch_window_start": window_start,
+                    "touch_window_end": prior_raw.get("touch_window_end") or observed.isoformat(
+                        timespec="seconds"),
+                }, ensure_ascii=False)
+                connection.execute(
+                    "DELETE FROM kpl_events WHERE trade_date=? AND code=? AND board_tag<>? "
+                    "AND json_extract(raw_json,'$.source')='local_rt_k_limit'",
+                    (day, quote.code, board),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO kpl_events(trade_date,code,name,board_tag,themes_json,
+                        limit_up_time,limit_reason,pct_change,realtime_pct_change,
+                        amount,raw_json,synced_at)
+                    VALUES (?,?,?,?,'[]',?,'',?,?,?,?,?)
+                    ON CONFLICT(trade_date,code,board_tag) DO UPDATE SET
+                        limit_up_time=excluded.limit_up_time,
+                        pct_change=excluded.pct_change,
+                        realtime_pct_change=excluded.realtime_pct_change,
+                        amount=excluded.amount,raw_json=excluded.raw_json,
+                        synced_at=excluded.synced_at
+                    WHERE json_extract(kpl_events.raw_json,'$.source')='local_rt_k_limit'
+                    """,
+                    (day, quote.code, quote.name, board, first, quote.pct_change,
+                     quote.pct_change, quote.amount, raw, observed.isoformat(timespec="seconds")),
+                )
+        return len(selected)
+
     def upsert_chinext_growth_events(
         self, trade_date: str, quotes: Sequence[Quote]
     ) -> int:
@@ -850,7 +937,14 @@ class Database:
                        ranked.themes_json, ranked.status, ranked.limit_up_time,
                        ranked.open_time, ranked.last_limit_time, ranked.limit_reason,
                        ranked.pct_change, ranked.realtime_pct_change, ranked.synced_at,
-                       stocks.market
+                       stocks.market,
+                       COALESCE(json_extract(ranked.raw_json,'$.source'),
+                                'tushare_kpl_list') AS signal_source,
+                       COALESCE(json_extract(ranked.raw_json,'$.limit_time_basis'),
+                           CASE json_extract(ranked.raw_json,'$.source')
+                             WHEN 'tushare_rt_k' THEN 'first_observed_5m'
+                             WHEN 'tushare_daily' THEN 'daily_high_time_unknown'
+                             ELSE 'provider_reported' END) AS limit_time_basis
                 FROM ranked LEFT JOIN stocks ON stocks.code=ranked.code
                 WHERE rn=1
                 ORDER BY ranked.limit_up_time, ranked.code
@@ -863,19 +957,26 @@ class Database:
                 placeholders = ",".join("?" for _ in codes)
                 tag_rows = connection.execute(
                     f"""
-                    SELECT code, concept_name AS tag,
+                    WITH latest AS (
+                        SELECT code,MAX(trade_date) AS trade_date
+                        FROM kpl_concept_memberships
+                        WHERE trade_date<=? AND code IN ({placeholders}) GROUP BY code
+                    )
+                    SELECT m.code, m.concept_name AS tag,
                            'tushare_kpl_concept_cons' AS source,
-                           0.9 AS confidence
-                    FROM kpl_concept_memberships
-                    WHERE trade_date=? AND code IN ({placeholders})
-                    ORDER BY hot_num DESC, concept_name
+                           0.9 AS confidence,m.description AS reason,
+                           m.trade_date AS source_trade_date,m.synced_at AS observed_at
+                    FROM kpl_concept_memberships m JOIN latest l
+                      ON m.code=l.code AND m.trade_date=l.trade_date
+                    ORDER BY m.hot_num DESC,m.concept_name
                     """,
                     [trade_date, *codes],
                 ).fetchall()
                 tag_rows.extend(
                     connection.execute(
                         f"""
-                        SELECT code, tag, source, confidence
+                        SELECT code, tag, source, confidence,'' AS reason,
+                               NULL AS source_trade_date,updated_at AS observed_at
                         FROM stock_tags
                         WHERE code IN ({placeholders}) AND tag_type='theme'
                           AND confidence>=0.9
@@ -1211,6 +1312,15 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def discovery_states_for_date(self, trade_date: str) -> dict[str, dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT fingerprint,status,admission_status FROM candidate_themes "
+                "WHERE day1_date=?",
+                (f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",),
+            ).fetchall()
+        return {str(row["fingerprint"]): dict(row) for row in rows}
+
     def upsert_candidate(
         self,
         *,
@@ -1237,6 +1347,8 @@ class Database:
                     cluster_method, cluster_confidence, cluster_aliases_json, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(fingerprint) DO UPDATE SET
+                    provisional_name=CASE WHEN candidate_themes.status='pending'
+                        THEN excluded.provisional_name ELSE candidate_themes.provisional_name END,
                     discovery_reason=excluded.discovery_reason,
                     cluster_method=excluded.cluster_method,
                     cluster_confidence=excluded.cluster_confidence,
@@ -1663,6 +1775,11 @@ class Database:
             for row in rows:
                 item = dict(row)
                 raw = json.loads(item.pop("raw_json") or "{}")
+                item["limit_time_basis"] = raw.get("limit_time_basis") or (
+                    "first_observed_5m" if raw.get("source") == "tushare_rt_k"
+                    else "daily_high_time_unknown" if raw.get("source") == "tushare_daily"
+                    else "provider_reported"
+                )
                 item["themes"] = json.loads(item.pop("themes_json"))
                 item["board_height"] = _board_height(item.get("status"))
                 item["limit_order"] = raw.get("limit_order")
@@ -1720,6 +1837,7 @@ class Database:
             member["latest_board_tag"] = latest.get("board_tag")
             member["latest_limit_trade_date"] = latest.get("trade_date")
             member["first_limit_time"] = latest.get("limit_up_time")
+            member["limit_time_basis"] = latest.get("limit_time_basis")
             member["last_limit_time"] = latest.get("last_limit_time")
             member["open_time"] = latest.get("open_time")
             member["limit_order"] = latest.get("limit_order")

@@ -862,6 +862,10 @@ def _compact_evidence(value: Any) -> dict[str, Any]:
         "board_status": value.get("board_status"),
         "limit_reason": _trim(value.get("limit_reason"), 180),
         "aggregated_reason": _trim(value.get("aggregated_reason"), 220),
+        "canonical_name": _trim(value.get("canonical_name"), 100),
+        "common_logic": _trim(value.get("common_logic"), 350),
+        "signal_source": value.get("signal_source"),
+        "limit_time_basis": value.get("limit_time_basis"),
         "trade_date": value.get("trade_date"),
     }
     return {

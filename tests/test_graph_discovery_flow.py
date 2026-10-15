@@ -149,10 +149,10 @@ def test_graph_verifier_excludes_unrelated_events_and_uses_bounded_workload():
 
     assert "600000.SH" in captured["prompt"]
     assert "688999.SH" not in captured["prompt"]
-    assert captured["reasoning_effort"] == "low"
-    assert captured["search_context_size"] == "low"
-    assert captured["max_output_tokens"] == 5000
-    assert captured["max_tool_calls"] == 4
+    assert captured["reasoning_effort"] == "medium"
+    assert captured["search_context_size"] == "medium"
+    assert captured["max_output_tokens"] == 8000
+    assert captured["max_tool_calls"] == 8
 
 
 def test_four_stock_broad_parent_requires_specific_ai_logic():

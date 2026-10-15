@@ -190,8 +190,8 @@ function load(manual = false) {
 function render() {
   if (!state.data) return;
   const { health, themes, alerts, backtest = { entries: [], summary: {} } } = state.data;
-  const pending = themes.filter(theme => theme.status === 'pending');
-  const watching = themes.filter(theme => theme.status === 'watching');
+  const pending = themes.filter(theme => candidateMatchesFilter(theme, 'reviewing'));
+  const watching = themes.filter(theme => candidateMatchesFilter(theme, 'watching'));
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
   const market = health.market;
   const marketNode = $('#marketState');
@@ -221,18 +221,21 @@ function render() {
   scheduleFundFlowPoll(themes, backtest.entries || []);
 }
 
+function isLocalObservation(theme) {
+  return theme.status === 'pending' && theme.admission_status === 'early_observation';
+}
+
+function candidateMatchesFilter(theme, filter) {
+  if (filter === 'watching') return theme.status === 'watching' || isLocalObservation(theme);
+  if (filter === 'reviewing') return theme.status === 'pending' && !isLocalObservation(theme);
+  if (filter === 'rejected') return theme.status === 'rejected';
+  return ['pending', 'watching', 'rejected'].includes(theme.status);
+}
+
 function renderCandidates() {
   if (!state.data) return;
-  let items = state.data.themes.filter(theme =>
-    ['pending', 'watching', 'rejected'].includes(theme.status)
-  );
-  if (state.candidateFilter === 'watching') {
-    items = items.filter(theme => theme.status === 'watching');
-  } else if (state.candidateFilter === 'reviewing') {
-    items = items.filter(theme => theme.status === 'pending');
-  } else if (state.candidateFilter === 'rejected') {
-    items = items.filter(theme => theme.status === 'rejected');
-  }
+  const items = state.data.themes.filter(theme =>
+    candidateMatchesFilter(theme, state.candidateFilter));
   const priority = { watching: 0, pending: 1, rejected: 2 };
   items.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
   renderThemes('#candidateList', items, 'audit');
@@ -386,13 +389,16 @@ function memberRow(member, position, returnLabel, themeId, tracked) {
     .map(item => `${formatDate(item.trade_date)} ${item.status || item.tag || '普通'}`).join(' · ');
   const board = member.board_status || (member.latest_board_tag ? `近期${member.latest_board_tag}` : '—');
   const sequence = member.limit_sequence ? `第${member.limit_sequence}封板` : '';
+  const sampleTime = ['first_observed_5m', 'observed_interval_5m'].includes(member.limit_time_basis);
+  const boardTime = member.limit_time_basis === 'daily_high_time_unknown' ? ''
+    : `${sampleTime ? '采样观察 ' : ''}${timeLabel(member.first_limit_time)}`;
   const follow = Number(member.follow_count_30m || 0);
   const flowTrigger = memberFundFlowTrigger(member, themeId);
   return `<div class="member-row ${leader ? 'leader-row' : ''}" role="row" title="${escapeHtml(reasons)}">
     <div class="member-name" role="cell"><span class="member-rank">${position}</span><span><strong>${escapeHtml(member.name)}</strong><small>${escapeHtml(member.code)}</small></span>${leader ? '<b class="leader-badge">龙头候选</b>' : ''}</div>
     <div class="member-number ${valueClass(current)}" role="cell"><strong>${formatPct(current)}</strong><small>${escapeHtml(formatPrice(member.current_price))}</small></div>
     <div class="member-number ${valueClass(cumulative)}" role="cell"><strong>${formatPct(cumulative)}</strong><small>${escapeHtml(returnLabel)}累计</small></div>
-    <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, timeLabel(member.first_limit_time)].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
+    <div class="board-cell" role="cell" title="${escapeHtml(boardHistory)}"><strong>${escapeHtml(board)}</strong><small>${escapeHtml([sequence, boardTime].filter(Boolean).join(' · ') || '近5日记录')}</small></div>
     <div class="member-number neutral" role="cell"><strong>${formatMarketCap(member.circ_mv_billion)}</strong><small>${member.turnover_rate != null ? `换手 ${Number(member.turnover_rate).toFixed(1)}%` : '亿元'}</small></div>
     <div class="drive-cell" role="cell"><strong>${follow}</strong><small>30分钟跟随</small></div>
     <div class="track-cell" role="cell">${flowTrigger}<button class="track-button pressable" data-action="track-stock" data-id="${themeId}" data-code="${escapeHtml(member.code)}" ${tracked ? 'disabled' : ''}>${tracked ? '已跟踪' : '跟踪'}</button></div>
@@ -686,11 +692,7 @@ function updateSectionCount() {
   const { themes, alerts, backtest = { entries: [] } } = state.data;
   let count = 0;
   if (state.view === 'candidates') {
-    const map = {
-      watching: ['watching'], reviewing: ['pending'], rejected: ['rejected'],
-      all: ['watching', 'pending', 'rejected']
-    };
-    count = themes.filter(theme => (map[state.candidateFilter] || map.all).includes(theme.status)).length;
+    count = themes.filter(theme => candidateMatchesFilter(theme, state.candidateFilter)).length;
   }
   if (state.view === 'confirmed') {
     count = state.themeFilter === 'archived'
@@ -713,12 +715,14 @@ function admissionLabel(status) {
     awaiting_ai: '等待AI准入审查', analyzing: '正在分析新颖性、催化与持续性',
     analysis_failed: 'AI分析失败，已保留记录并等待重试',
     early_watch: '早期观察 · 证据待确认',
+    early_observation: '本地早期观察 · 催化待验证',
     admitted: '正式题材 · 已通过证据验证',
     not_admitted: '未达到题材准入条件'
   })[status] || '等待准入证据';
 }
 
 function themeStageLabel(theme) {
+  if (isLocalObservation(theme)) return '本地早期观察';
   return ({
     early_watch: '早期观察', formal: '正式题材', rejected: '未入池',
     candidate: 'AI审查中'
@@ -726,6 +730,7 @@ function themeStageLabel(theme) {
 }
 
 function stageDetail(theme) {
+  if (isLocalObservation(theme)) return '2–3只强势股共振 · 共同催化待验证';
   if (theme.theme_level === 'early_watch') return '市场共识成立 · 官方或多源证据待确认';
   if (theme.theme_level === 'formal') return '持续性通过 · 证据已交叉验证';
   if (theme.theme_level === 'rejected') return '达到4票门槛，但未通过后续审查';

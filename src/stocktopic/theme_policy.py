@@ -63,8 +63,8 @@ def policy_structured_event_clusters(
 ) -> list[dict[str, Any]]:
     """Add concrete cross-source theme families on top of exact graph nodes.
 
-    Exact KPL/DC/TDX tags are retained, but nearby concrete tags can be merged when
-    their constituent sets strongly overlap. This repairs cases such as 猪肉 / 生猪 /
+    Exact KPL/DC/TDX tags are retained. Overlap corroborates a semantic relation;
+    it must never create one. This repairs cases such as 猪肉 / 生猪 /
     猪周期 / 生猪养殖 being split into several sub-threshold nodes.
     """
     event_list = [dict(item) for item in events]
@@ -79,13 +79,11 @@ def policy_structured_event_clusters(
 
     # A family candidate supersedes its own proper child nodes. Unrelated exact nodes
     # remain untouched, and an exact node with identical membership stays preferred.
-    exact_member_sets = {
-        frozenset(str(code) for code in item.get("member_codes", [])): item for item in base
-    }
+    exact_nodes = {(item["tag"], frozenset(item["member_codes"])) for item in base}
     accepted_families = [
         item
         for item in families
-        if frozenset(item["member_codes"]) not in exact_member_sets
+        if (item["tag"], frozenset(item["member_codes"])) not in exact_nodes
     ]
     if not accepted_families:
         return base
@@ -96,6 +94,7 @@ def policy_structured_event_clusters(
         item_tag = str(item.get("tag") or "")
         superseded = any(
             item_tag in set(family.get("aliases") or [])
+            and _same_explicit_family(item_tag, family["tag"])
             and item_codes
             and item_codes < set(family["member_codes"])
             for family in accepted_families
@@ -140,12 +139,12 @@ def _build_family_clusters(
             if reason:
                 reasons[tag][code] = reason[:300]
 
-    tags = [
+    tags = sorted(
         tag
         for tag in memberships
         if not graph_module.is_broad_parent_tag(tag)
         and _compact_tag(tag) not in {_compact_tag(value) for value in _GENERIC_BRIDGE_TAGS}
-    ]
+    )
     if len(tags) < 2:
         return []
 
@@ -159,17 +158,21 @@ def _build_family_clusters(
 
     def union(left: str, right: str) -> None:
         a, b = find(left), find(right)
-        if a != b:
+        # Complete linkage: A~B and B~C do not establish A~C. Multi-concept
+        # stocks otherwise turn the whole market into one connected component.
+        left_group = [tag for tag in tags if find(tag) == a]
+        right_group = [tag for tag in tags if find(tag) == b]
+        if a != b and all(linked(x, y) for x in left_group for y in right_group):
             parent[b] = a
+
+    def linked(left: str, right: str) -> bool:
+        return _same_explicit_family(left, right) or _strong_membership_link(
+            left, right, memberships[left], memberships[right],
+        )
 
     for index, left in enumerate(tags):
         for right in tags[index + 1 :]:
-            if _same_explicit_family(left, right) or _strong_membership_link(
-                left,
-                right,
-                memberships[left],
-                memberships[right],
-            ):
+            if linked(left, right):
                 union(left, right)
 
     components: dict[str, list[str]] = defaultdict(list)
@@ -224,7 +227,7 @@ def _build_family_clusters(
                 "growth_count": growth,
                 "failed_count": failed,
                 "common_logic": (
-                    "多个结构化题材节点通过成分股高重合/明确同义关系归并为同一具体题材族："
+                    "多个结构化题材节点通过明确同义/相近名称及成分重合归并为具体题材族："
                     + "、".join(sorted(component))
                     + "。正式阶段仍需外部催化验证。"
                 ),
@@ -234,7 +237,7 @@ def _build_family_clusters(
                 "cluster_confidence": confidence,
                 "cluster_method": "knowledge_graph_family",
                 "catalysts": [],
-                "model": "local-knowledge-graph-family-v1",
+                "model": "local-knowledge-graph-family-v2",
                 "raw": {},
             }
         )
@@ -257,7 +260,7 @@ def _event_tags(event: dict[str, Any]) -> list[tuple[str, float, str]]:
             continue
         confidence = graph_module._number(raw.get("confidence"))
         weight = max(82.0, min(96.0, confidence * 100 if confidence <= 1 else confidence))
-        result.append((tag, weight, ""))
+        result.append((tag, weight, str(raw.get("reason") or "").strip()))
 
     for raw in event.get("knowledge_graph_tags") or []:
         if not isinstance(raw, dict):
@@ -292,7 +295,7 @@ def _strong_membership_link(
         and len(right_key) >= 2
         and (left_key in right_key or right_key in left_key)
     )
-    return (intersection >= 2 and overlap >= 0.5) or (lexical and overlap >= 0.34)
+    return lexical and intersection >= 2 and overlap >= 0.5
 
 
 def _same_explicit_family(left: str, right: str) -> bool:
@@ -377,8 +380,8 @@ def policy_assess_for_admission(
         if item.get("source_url") or item.get("url")
     ][:4]
     search_policy = (
-        "上一步联网聚类或催化刷新已经提供带URL的近期证据。本次只做准入推理，禁止再次联网搜索；"
-        "只能使用下方已验证催化和系统60交易日历史。"
+        "优先复用上一步带URL的证据和系统60交易日历史；若证据过时、因果链或反证不足，"
+        "允许使用web_search补齐共同催化与逐股业务关系，不得扩展股票白名单。"
         if compact_catalysts
         else "当前没有可复用的带URL催化，必须使用web_search补齐近期证据后再判断。"
     )
@@ -399,6 +402,8 @@ def policy_assess_for_admission(
 同一行业过去60日出现过不能单独否决；只有“同一具体催化/同一轮周期逻辑”在窗口内已广泛发酵，
 才应判 old_rotation，并把对应系统历史ID写入 within_window_match_ids。
 若判 new_cycle/new_catalyst，suggested_name 必须写出具体新变化，不能只写猪肉、航运、有色等老行业名。
+图谱anchor是稳定标识，不能当作本轮驱动。沿用触发证据中的canonical_name/common_logic核查
+本轮具体事件；若证据支持AI短剧/IP改编，应保留这一具体逻辑，不能泛化成“人工智能应用”。
 
 证据优先级：政府/监管/交易所/公司公告 > 产业原始信息/权威媒体 > 研报/供应链 > 社交传闻。
 持续性和空间只做条件情景，不得伪装成确定预测。必须给出反证条件。
@@ -445,19 +450,21 @@ def policy_assess_for_admission(
         reasoning_effort="medium",
         task_type="admission_analysis",
         subject_id=str(theme.get("id") or ""),
-        search_context_size="low",
-        max_output_tokens=4500,
-        max_tool_calls=3,
-        web_search=not bool(compact_catalysts),
+        search_context_size="medium",
+        max_output_tokens=6500,
+        max_tool_calls=5,
+        web_search=True,
     )
-    if not sources and compact_catalysts:
-        sources = [
+    if compact_catalysts:
+        known_urls = {source.get("url") for source in sources}
+        sources = [*sources, *[
             {
                 "title": str(item.get("title") or item.get("source") or "已有催化"),
                 "url": str(item["url"]),
             }
             for item in compact_catalysts
-        ]
+            if item["url"] not in known_urls
+        ]]
     normalized_catalysts = ai_module._normalize_catalysts(
         parsed.get("catalysts"), sources
     )

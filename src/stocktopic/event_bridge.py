@@ -7,6 +7,7 @@ import re
 from itertools import combinations
 from typing import Any
 
+from .discovery_ai_policy import DISCOVERY_AI_OPTIONS, MAX_BRIDGE_MEMBERS
 from .theme_graph import is_broad_parent_tag
 from .theme_intelligence import cluster_metrics
 
@@ -22,7 +23,7 @@ def minutes(value: Any) -> int | None:
 
 def anchor_node(nodes: list[dict[str, Any]], events: dict[str, dict]) -> str:
     def rank(node: dict) -> tuple:
-        times = [minutes(events[code].get("limit_up_time")) for code in node["member_codes"]]
+        times = [_launch_minutes(events[code]) for code in node["member_codes"]]
         known = [value for value in times if value is not None]
         return (
             min(known, default=1440),
@@ -34,7 +35,16 @@ def anchor_node(nodes: list[dict[str, Any]], events: dict[str, dict]) -> str:
     return str(min(nodes, key=rank)["tag"])
 
 
+def _launch_minutes(event: dict) -> float | None:
+    if event.get("limit_time_basis") in {"first_observed_5m", "daily_high_time_unknown"}:
+        return None  # A cumulative-high snapshot cannot establish its launch time.
+    return minutes(event.get("limit_up_time"))
+
+
 def _tokens(text: str) -> set[str]:
+    # Generated price-qualification prose is not a business/catalyst reason.
+    text = re.sub(r"创业板(?:盘中|当日)最高涨幅[^；]*[；;]?", "", text)
+    text = text.replace("具体上涨原因结合题材标签、公司关联和当日新闻核查", "")
     # Strip boilerplate: a shared "涨停/产业催化" is not common-event evidence.
     text = re.sub(r"涨停|首板|产业催化|概念|公司|股份|有限公司|受益|异动", "", text.lower())
     result = set(re.findall(r"[a-z0-9]{2,}", text))
@@ -44,7 +54,7 @@ def _tokens(text: str) -> set[str]:
 
 
 class EventBridgeDetector:
-    """Only disjoint concrete local nodes with observed market and textual links."""
+    """Bound concrete local nodes; weaker evidence can request restricted AI review."""
 
     def __init__(self) -> None:
         self.trace: list[dict[str, Any]] = []
@@ -59,8 +69,10 @@ class EventBridgeDetector:
             reason = ""
             if is_broad_parent_tag(tag) or cluster.get("parent_only"):
                 reason = "broad_parent_context_only"
-            elif not 2 <= len(codes) <= 3:
-                reason = "not_subthreshold_concrete_node"
+            elif len(codes) < 2:
+                reason = "node_below_two_members"
+            elif len(codes) > MAX_BRIDGE_MEMBERS:
+                reason = "node_exceeds_member_budget"
             if reason:
                 self.trace.append({"nodes": [tag], "excluded_reason": reason})
             else:
@@ -73,19 +85,28 @@ class EventBridgeDetector:
         for left, right in combinations(range(len(nodes)), 2):
             pair = [nodes[left], nodes[right]]
             scored = self._score(pair, by_code)
-            eligible = (
-                not set(pair[0]["member_codes"]) & set(pair[1]["member_codes"])
-                and scored["text_similarity"] >= 25
-                and scored["time_sync"] is not None
-                and scored["time_sync"] >= 45
-                and scored["bridge_score"] >= 60
-            )
+            unique = set(pair[0]["member_codes"]) | set(pair[1]["member_codes"])
+            route = self._review_route(pair, by_code, scored)
+            gates = {
+                "below_four_unique_members": len(unique) < 4,
+                "member_budget_exceeded": len(unique) > MAX_BRIDGE_MEMBERS,
+                "insufficient_business_text": scored["text_similarity"] < 25 and not route,
+                "missing_launch_times": scored["time_sync"] is None and not route,
+                "insufficient_time_synchronization": (scored["time_sync"] is not None
+                    and scored["time_sync"] < 45 and not route),
+                "bridge_score_below_60": scored["bridge_score"] < 60,
+            }
+            excluded = [reason for reason, failed in gates.items() if failed]
+            eligible = not excluded
             links[left, right] = eligible
             self.trace.append(
                 {
                     "nodes": [node["tag"] for node in pair],
                     **scored,
-                    "excluded_reason": "" if eligible else "insufficient_sync_or_text_or_overlap",
+                    "unique_member_count": len(unique),
+                    "verification_route": route,
+                    "excluded_reasons": excluded,
+                    "excluded_reason": excluded[0] if excluded else "",
                 }
             )
         for size in range(4, 1, -1):
@@ -94,13 +115,16 @@ class EventBridgeDetector:
                     continue
                 selected = [nodes[index] for index in indices]
                 codes = sorted({code for node in selected for code in node["member_codes"]})
-                if not 4 <= len(codes) <= 12:
+                if not 4 <= len(codes) <= MAX_BRIDGE_MEMBERS:
                     continue
                 if any(set(indices) <= existing for existing, _ in result):
                     continue
                 score = self._score(selected, by_code)
                 if score["bridge_score"] < 60:
                     continue
+                pair_routes = [self._review_route([nodes[a], nodes[b]], by_code,
+                               self._score([nodes[a], nodes[b]], by_code))
+                               for a, b in combinations(indices, 2)]
                 candidate = {
                     "trade_date": trade_date,
                     "anchor_tag": anchor_node(selected, by_code),
@@ -111,6 +135,10 @@ class EventBridgeDetector:
                     "bridge_score": score["bridge_score"],
                     "synchronization_score": score["time_sync"],
                     "reasons": score,
+                    "verification_route": "semantic_review" if any(
+                        route != "synchronized_text" for route in pair_routes
+                    ) else "synchronized_text",
+                    "review_routes": sorted(set(pair_routes)),
                     "local_nodes": selected,
                 }
                 result.append((set(indices), candidate))
@@ -118,9 +146,47 @@ class EventBridgeDetector:
                     return [candidate for _, candidate in result]
         return [candidate for _, candidate in result]
 
+    def _review_route(self, nodes: list[dict], events: dict[str, dict], score: dict) -> str:
+        sync, text = score["time_sync"], score["text_similarity"]
+        if sync is not None and sync >= 45 and text >= 25:
+            return "synchronized_text"
+        detailed = all(sum(
+            len(_tokens(str(events[code].get("limit_reason") or "") + " "
+                        + str((node.get("member_reasons") or {}).get(code) or ""))) >= 4
+            for code in node["member_codes"]
+        ) >= 2 for node in nodes)
+        roles = []
+        for node in nodes:
+            counts = {"production": 0, "rights": 0}
+            for code in node["member_codes"]:
+                reason = str(events[code].get("limit_reason") or "") + " " + str(
+                    (node.get("member_reasons") or {}).get(code) or "")
+                if re.search(
+                    r"(?:AI|AIGC|人工智能|生成式).{0,20}(?:影视|视频|漫剧|短剧|剧本|内容生产)"
+                    r"|(?:影视|漫剧|短剧|视频).{0,12}(?:AI|AIGC)", reason, re.I,
+                ):
+                    counts["production"] += 1
+                if re.search(r"(?:IP|版权|著作权|网文|网络文学|剧本).{0,16}"
+                             r"(?:改编|授权|开发|运营|资源)", reason, re.I):
+                    counts["rights"] += 1
+            roles.append({role for role, count in counts.items() if count >= 2})
+        complementary = all(roles) and {"production", "rights"} <= set.union(*roles)
+        if (sync is not None and sync >= 45 and score["graph_relation"] == 100
+                and complementary):
+            return "complementary_business_roles"
+        if not detailed:
+            return ""
+        if (sync is not None and 0 < (score["launch_span_minutes"] or 0) <= 60
+                and text >= 60):
+            return "bounded_relay_review"
+        if sync is None and text >= 60 and score["graph_relation"] == 100:
+            return "business_evidence_unknown_time"
+        return ""
+
     def _score(self, nodes: list[dict], events: dict[str, dict]) -> dict:
-        members = [events[code] for node in nodes for code in node["member_codes"]]
-        times = [minutes(member.get("limit_up_time")) for member in members]
+        members = [events[code] for code in sorted(
+            {code for node in nodes for code in node["member_codes"]})]
+        times = [_launch_minutes(member) for member in members]
         known = [value for value in times if value is not None]
         time_sync = (
             max(0, 100 - (max(known) - min(known)) / 45 * 100)
@@ -128,7 +194,7 @@ class EventBridgeDetector:
                 len(known) >= 2
                 and all(
                     any(
-                        minutes(events[code].get("limit_up_time")) is not None
+                        _launch_minutes(events[code]) is not None
                         for code in node["member_codes"]
                     )
                     for node in nodes
@@ -186,6 +252,7 @@ class EventBridgeDetector:
         score = sum(value * weight for value, weight in available) / sum(w for _, w in available)
         return {
             **{key: value for key, (value, _) in components.items()},
+            "launch_span_minutes": max(known) - min(known) if time_sync is not None else None,
             "bridge_score": round(score, 2),
             "available_weights": {
                 key: weight for key, (value, weight) in components.items() if value is not None
@@ -202,15 +269,18 @@ def verify_event_bridge(
         key: candidate[key]
         for key in ("anchor_tag", "nodes", "member_codes", "bridge_score", "reasons")
     }
+    trace["verification_route"] = candidate.get("verification_route", "synchronized_text")
     nodes = candidate["nodes"]
     if len(codes) < 4:
         return None, {**trace, "final_reject_reason": "below_four_members"}
     if (
         not 2 <= len(nodes) <= 4
-        or len(codes) > 12
+        or len(codes) > MAX_BRIDGE_MEMBERS
         or len(set(codes)) != len(codes)
         or any(is_broad_parent_tag(node) for node in nodes)
-        or any(len(candidate["node_members"].get(node, [])) < 2 for node in nodes)
+        or any(len(set(candidate["node_members"].get(node, []))) < 2 for node in nodes)
+        or not set(codes) <= {event["code"] for event in events}
+        or any(not set(candidate["node_members"][node]) <= set(codes) for node in nodes)
     ):
         return None, {**trace, "final_reject_reason": "invalid_local_bridge_bounds"}
     payload = {
@@ -220,7 +290,10 @@ def verify_event_bridge(
     payload["members"] = [
         {
             "code": event["code"],
+            "name": event.get("name"),
             "limit_reason": event.get("limit_reason"),
+            "limit_up_time": event.get("limit_up_time"),
+            "limit_time_basis": event.get("limit_time_basis"),
             "graph_reasons": {
                 node["tag"]: (node.get("member_reasons") or {}).get(event["code"])
                 for node in candidate["local_nodes"]
@@ -229,10 +302,14 @@ def verify_event_bridge(
         for event in events
         if event["code"] in codes
     ]
+    payload["verification_route"] = candidate.get("verification_route", "synchronized_text")
+    payload["evidence_limits"] = candidate.get("reasons", {})
     prompt = """你是受限的事件桥接验证器，Market First, News Second。
 只判断 merge、partial_merge 或 reject。节点和成员已由本地确定，禁止增加输入外股票/节点，
 禁止全市场选股或为凑4只扩池。web_search仅验证交易日共同新增催化，逐股核查理由。
 partial_merge只保留明确接受节点及其成员；至少两个节点、每节点至少2只、总数至少4只。
+成员重叠只能按唯一股票计数。semantic_review表示本地证据需要语义复核：
+不同业务角色、接力或未知启动时间均不能自行证明共同催化；禁止补造时间或夸大同步。
 无可靠共同催化证据则reject。anchor_tag不得改变。只返回JSON：
 {"decision":"merge|partial_merge|reject","canonical_name":"具体事件名",
 "common_logic":"共同因果链","accepted_nodes":[],"member_codes":[],
@@ -246,10 +323,7 @@ partial_merge只保留明确接受节点及其成员；至少两个节点、每�
         prompt,
         task_type="semantic_event_clustering",
         subject_id=candidate["trade_date"],
-        reasoning_effort="low",
-        search_context_size="low",
-        max_output_tokens=4000,
-        max_tool_calls=4,
+        **DISCOVERY_AI_OPTIONS,
     )
     decision = parsed.get("decision")
     accepted = parsed.get("accepted_nodes") or []

@@ -221,7 +221,7 @@ class OpenAIEndpointTests(TestCase):
         self.assertEqual(result["within_window_match_ids"], [])
         self.assertIn("更早历史只能作为产业背景", captured["prompt"])
 
-    def test_policy_admission_reuses_verified_catalyst_without_second_web_search(self):
+    def test_policy_admission_reuses_evidence_and_allows_supplementary_research(self):
         client = OpenAIThemeExplainer("key", "model")
         captured = {}
 
@@ -249,6 +249,7 @@ class OpenAIEndpointTests(TestCase):
                     "catalysts": [
                         {
                             "title": "产品发布",
+                            "summary": "厂商发布新一代产品",
                             "url": "https://example.com/release",
                             "source": "公司",
                             "evidence_level": "官方确认",
@@ -256,7 +257,7 @@ class OpenAIEndpointTests(TestCase):
                         }
                     ],
                 },
-                [],
+                [{"title": "补充资料", "url": "https://example.com/supplement"}],
             )
 
         client._call_prompt = answer
@@ -285,10 +286,11 @@ class OpenAIEndpointTests(TestCase):
             [],
         )
 
-        self.assertFalse(captured["web_search"])
-        self.assertEqual(captured["max_output_tokens"], 4500)
-        self.assertIn("禁止再次联网搜索", captured["prompt"])
-        self.assertEqual(result["sources"][0]["url"], "https://example.com/release")
+        self.assertTrue(captured["web_search"])
+        self.assertEqual(captured["max_output_tokens"], 6500)
+        self.assertIn("允许使用web_search补齐", captured["prompt"])
+        self.assertIn("https://example.com/release", {s["url"] for s in result["sources"]})
+        self.assertEqual(result["catalysts"][0]["url"], "https://example.com/release")
 
     def test_responses_request_has_task_specific_token_controls_and_usage_recording(self):
         recorded = []
