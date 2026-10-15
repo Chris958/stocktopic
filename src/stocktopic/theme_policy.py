@@ -380,8 +380,8 @@ def policy_assess_for_admission(
         if item.get("source_url") or item.get("url")
     ][:4]
     search_policy = (
-        "上一步联网聚类或催化刷新已经提供带URL的近期证据。本次只做准入推理，禁止再次联网搜索；"
-        "只能使用下方已验证催化和系统60交易日历史。"
+        "优先复用上一步带URL的证据和系统60交易日历史；若证据过时、因果链或反证不足，"
+        "允许使用web_search补齐共同催化与逐股业务关系，不得扩展股票白名单。"
         if compact_catalysts
         else "当前没有可复用的带URL催化，必须使用web_search补齐近期证据后再判断。"
     )
@@ -450,19 +450,21 @@ def policy_assess_for_admission(
         reasoning_effort="medium",
         task_type="admission_analysis",
         subject_id=str(theme.get("id") or ""),
-        search_context_size="low",
-        max_output_tokens=4500,
-        max_tool_calls=3,
-        web_search=not bool(compact_catalysts),
+        search_context_size="medium",
+        max_output_tokens=6500,
+        max_tool_calls=5,
+        web_search=True,
     )
-    if not sources and compact_catalysts:
-        sources = [
+    if compact_catalysts:
+        known_urls = {source.get("url") for source in sources}
+        sources = [*sources, *[
             {
                 "title": str(item.get("title") or item.get("source") or "已有催化"),
                 "url": str(item["url"]),
             }
             for item in compact_catalysts
-        ]
+            if item["url"] not in known_urls
+        ]]
     normalized_catalysts = ai_module._normalize_catalysts(
         parsed.get("catalysts"), sources
     )

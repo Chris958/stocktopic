@@ -1312,6 +1312,15 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def discovery_states_for_date(self, trade_date: str) -> dict[str, dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT fingerprint,status,admission_status FROM candidate_themes "
+                "WHERE day1_date=?",
+                (f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]}",),
+            ).fetchall()
+        return {str(row["fingerprint"]): dict(row) for row in rows}
+
     def upsert_candidate(
         self,
         *,

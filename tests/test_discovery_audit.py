@@ -37,9 +37,9 @@ def rows(groups, reason="AI影视内容生产新模型"):
     "groups,expected",
     [
         ([("影视", 2, 9, 35), ("版权", 2, 9, 38)], 1),
-        ([("影视", 4, 9, 35), ("版权", 2, 9, 38)], 0),
+        ([("影视", 4, 9, 35), ("版权", 2, 9, 38)], 1),
         ([("影视", 3, 9, 35), ("版权", 1, 9, 38)], 0),
-        ([("影视", 2, 9, 35), ("版权", 2, 10, 5)], 0),
+        ([("影视", 2, 9, 35), ("版权", 2, 10, 5)], 1),
     ],
 )
 def test_audit_reproduces_current_bridge_coverage_limits(groups, expected):
@@ -50,13 +50,15 @@ def test_audit_reproduces_current_bridge_coverage_limits(groups, expected):
     if groups[-1][2] == 10:
         pair = detector.trace[0]
         assert pair["bridge_score"] >= 60
-        assert pair["time_sync"] < 45  # Score alone is not the actual hard gate.
+        assert pair["time_sync"] < 45
+        assert pair["verification_route"] == "bounded_relay_review"
 
 
-def test_overlap_and_different_role_words_can_be_rejected_despite_same_event_hypothesis():
+def test_overlap_is_deduplicated_but_unlinked_different_role_words_stay_out():
     events = rows([("影视", 3, 9, 35), ("版权", 2, 9, 38)])
     events[0]["themes"].append("版权")
-    assert EventBridgeDetector().detect(DAY, events, structured_event_clusters(events)) == []
+    candidate = EventBridgeDetector().detect(DAY, events, structured_event_clusters(events))[0]
+    assert len(candidate["member_codes"]) == 5
     events = rows([("影视", 2, 9, 35), ("版权", 2, 9, 38)])
     for item in events:
         item["limit_reason"] = "AIGC影视制作平台" if "影视" in item["themes"] else "网文IP授权"

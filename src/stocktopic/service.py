@@ -19,6 +19,12 @@ from .anomaly import AnomalyDetector
 from .backtest import PaperTradeTracker
 from .config import Settings
 from .db import Database
+from .discovery_ai_policy import (
+    DISCOVERY_AI_OPTIONS,
+    MAX_BRIDGE_MEMBERS,
+    MAX_NEGATIVE_REVIEWS_PER_INPUT,
+    NEGATIVE_REVIEW_MINUTES,
+)
 from .domain import StockContext
 from .fund_flow import EastmoneyFlowClient
 from .market_clock import MarketClock
@@ -527,11 +533,51 @@ class StockTopicService:
             cached = self.database.semantic_cluster_run(trade_date, input_signature)
             trace_key = f"discovery_trace:{trade_date}:{input_signature}"
             self.database.set_metadata(f"discovery_trace_latest:{trade_date}", input_signature)
+            from .event_bridge import EventBridgeDetector
+            local = structured_event_clusters(events, include_broad_parents=True)
+            detector = EventBridgeDetector()
+            bridges = detector.detect(trade_date, events, local)
+            local_early_now = [c for c in local if not c.get("parent_only")
+                               and 2 <= len(c["member_codes"]) <= 3]
+            if local_early_now:
+                states = self.database.discovery_states_for_date(trade_date)
+                local_early_now = [c for c in local_early_now if (
+                    not (state := states.get(self.discovery.fingerprint_for_date(
+                        trade_date, c["tag"])))
+                    or (state["status"] == "pending"
+                        and state["admission_status"] == "early_observation")
+                )]
+                # Observations reach storage/UI/notifications before any slower AI work.
+                self._save_discovery(trade_date, observed_at, local_early_now)
+            has_verification_input = bool(bridges) or any(
+                len(c["member_codes"]) >= 4 and c["tag"] not in {"文化传媒", "传媒"}
+                for c in local
+            )
+            review_key = f"discovery_negative_reviews:{trade_date}:{input_signature}"
+            reviews = int(self.database.get_metadata(review_key) or 0)
+            previous_trace = json.loads(self.database.get_metadata(trace_key) or "{}")
+            review_scope = {
+                "anchors": sorted({v["anchor_tag"] for v in previous_trace.get(
+                    "single_node_verifications", []) if v.get("reject_reason")}),
+                "bridges": [b["nodes"] for b in previous_trace.get("bridges", [])
+                            if b.get("ai_bridge_decision") == "reject"
+                            or (b.get("final_reject_reason")
+                                and b.get("final") != "superseded_same_anchor")],
+            }
+            previous_formal = [c for c in (cached or {}).get("clusters") or []
+                               if len(set(c.get("member_codes") or [])) >= 4]
+            unresolved = bool(review_scope["anchors"] or review_scope["bridges"])
+            recheck = bool(
+                self.explainer.enabled and cached and cached.get("status") == "success"
+                and (not previous_formal or unresolved)
+                and has_verification_input
+                and trade_date == observed_at.strftime("%Y%m%d")
+                and self.clock.session_name(observed_at) in {"morning", "afternoon"}
+                and reviews < MAX_NEGATIVE_REVIEWS_PER_INPUT
+                and not _within_retry_cooldown(cached.get("created_at"), observed_at,
+                                              minutes=NEGATIVE_REVIEW_MINUTES)
+            )
             if not self.database.get_metadata(trace_key):
-                from .event_bridge import EventBridgeDetector
-                local = structured_event_clusters(events, include_broad_parents=True)
-                detector = EventBridgeDetector()
-                bridges = detector.detect(trade_date, events, local)
                 self.database.set_metadata(trace_key, json.dumps({
                     "trade_date": trade_date, "strong_stock_count": len(events),
                     "input_coverage": coverage,
@@ -542,7 +588,7 @@ class StockTopicService:
                         "ai_disabled" if not self.explainer.enabled else "verification_pending"),
                 }, ensure_ascii=False))
             semantic_clusters: list[dict[str, Any]] | None = None
-            if cached and cached.get("status") == "success":
+            if cached and cached.get("status") == "success" and not recheck:
                 semantic_clusters = list(cached.get("clusters") or [])
             recent_failed_run = bool(
                 cached
@@ -550,15 +596,39 @@ class StockTopicService:
                 and _within_retry_cooldown(cached.get("created_at"), observed_at, minutes=30)
             )
             if semantic_clusters is None and self.explainer.enabled and not recent_failed_run:
+                review_run = None
+                if recheck:
+                    reviews += 1
+                    self.database.set_metadata(review_key, str(reviews))
+                    self.database.set_metadata(
+                        f"discovery_review_history:{trade_date}:{input_signature}:{reviews}",
+                        self.database.get_metadata(trace_key) or "{}",
+                    )
+                    review_run = self.database.begin_run("discovery_ai_recheck")
                 try:
                     semantic_clusters = self.explainer.cluster_limit_events(
                         trade_date,
                         events,
                         self.settings.minimum_limit_touches,
+                        **({"review_scope": review_scope} if recheck and unresolved else {}),
                     )
+                    if recheck and previous_formal:
+                        new_tags = {c["tag"] for c in semantic_clusters}
+                        semantic_clusters.extend(
+                            c for c in previous_formal if c["tag"] not in new_tags)
                     trace = getattr(self.explainer, "last_discovery_trace", None)
                     if trace:
                         trace["input_coverage"] = coverage
+                        if recheck:
+                            trace["retained_verified_clusters"] = [
+                                {"tag": c["tag"], "member_codes": c["member_codes"],
+                                 "retained_from_cache": True} for c in previous_formal
+                            ]
+                            trace["negative_cache_recheck"] = {
+                                "reason": "new_catalyst_check_after_negative_cache",
+                                "count": reviews, "previous_run_at": cached.get("created_at"),
+                                "observed_at": observed_at.isoformat(timespec="seconds"),
+                            }
                         self.database.set_metadata(
                             f"discovery_trace:{trade_date}:{input_signature}",
                             json.dumps(trace, ensure_ascii=False),
@@ -573,6 +643,15 @@ class StockTopicService:
                         "failed" if trace and trace.get("verification_failed") else "success",
                         semantic_clusters,
                     )
+                    if review_run is not None:
+                        self.database.finish_run(
+                            review_run,
+                            "failed" if trace and trace.get("verification_failed") else "success",
+                            len(semantic_clusters), json.dumps({
+                                "trade_date": trade_date, "input_signature": input_signature,
+                                "recheck_count": reviews,
+                            }),
+                        )
                 except Exception as error:
                     safe = _safe_error(error)
                     self.database.save_semantic_cluster_run(
@@ -584,6 +663,8 @@ class StockTopicService:
                         safe,
                     )
                     self._data_pull_failure("semantic_event_clustering", error, observed_at)
+                    if review_run is not None:
+                        self.database.finish_run(review_run, "failed", detail=safe)
                     logger.warning("Semantic event clustering failed: %s", safe)
 
             if semantic_clusters is None and self.explainer.enabled:
@@ -1631,12 +1712,16 @@ class StockTopicService:
                 ),
                 "policy": {
                     "semantic_cluster_cache": "trade_date+input_signature",
+                    "discovery_research": DISCOVERY_AI_OPTIONS,
+                    "negative_cache_recheck_minutes": NEGATIVE_REVIEW_MINUTES,
+                    "negative_cache_max_extra_reviews_per_input": MAX_NEGATIVE_REVIEWS_PER_INPUT,
                     "semantic_signature_scope": "graph_candidate_members",
                     "watching_catalyst_refreshes_per_day": 2,
                     "confirmed_catalyst_refreshes_per_day": 1,
                     "pending_separate_catalyst_refresh": False,
                     "reassess_only_when_new_catalyst": True,
                     "admission_reuses_verified_catalysts": True,
+                    "admission_can_supplement_search": True,
                     "streaming_requests": True,
                     "read_timeout_immediate_retries": 1,
                     "timeout_seconds": self.settings.openai_timeout_seconds,
@@ -1688,9 +1773,9 @@ def _parse_board_height(status: Any) -> int:
 def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
     """Cache semantic membership while allowing live board status to update separately."""
     local = structured_event_clusters(events)
-    bridge_codes = {code for c in local if 2 <= len(c["member_codes"]) <= 3
+    bridge_codes = {code for c in local if 2 <= len(c["member_codes"]) <= MAX_BRIDGE_MEMBERS
                     for code in c["member_codes"]} if sum(
-        2 <= len(c["member_codes"]) <= 3 for c in local
+        2 <= len(c["member_codes"]) <= MAX_BRIDGE_MEMBERS for c in local
     ) >= 2 else set()
     payload = sorted(
         (
@@ -1716,7 +1801,7 @@ def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
         key=lambda item: str(item.get("code") or ""),
     )
     return hashlib.sha256(
-        ("event-bridge-p0-v2|" + json.dumps(payload, ensure_ascii=False, sort_keys=True)).encode()
+        ("event-bridge-p0-v3|" + json.dumps(payload, ensure_ascii=False, sort_keys=True)).encode()
     ).hexdigest()
 
 
@@ -1741,7 +1826,7 @@ def _semantic_signature_events(
     )
     candidate_codes = {
         str(code)
-        for cluster in clusters[:20]
+        for cluster in clusters
         for code in cluster.get("member_codes", [])
         if str(code) in codes
     }

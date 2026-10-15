@@ -141,6 +141,7 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                                 "final_reject_reason",
                                 "canonical_name",
                                 "error_type",
+                                "verification_route",
                             )
                         }
                         for item in decisions
@@ -148,6 +149,9 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                     "single_node_formal": trace.get("single_node_formal"),
                     "single_node_final": trace.get("single_node_final"),
                     "single_node_verifications": trace.get("single_node_verifications"),
+                    "negative_cache_recheck": trace.get("negative_cache_recheck"),
+                    "review_scope": trace.get("review_scope"),
+                    "retained_verified_clusters": trace.get("retained_verified_clusters"),
                     "verification_failed": trace.get("verification_failed"),
                     "final_reject_reason": trace.get("final_reject_reason"),
                 }
@@ -245,6 +249,7 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                     "member_codes",
                     "bridge_score",
                     "reasons",
+                    "verification_route",
                 )
             }
             for b in bridges

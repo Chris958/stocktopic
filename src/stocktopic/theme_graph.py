@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from .discovery_ai_policy import BRIDGE_VERIFICATION_WORKERS, DISCOVERY_AI_OPTIONS
 
 SOURCE_PRIORITY = {
     "dc_concept": 100,
@@ -349,6 +351,7 @@ def install_graph_first_ai_clustering() -> None:
 
 def _graph_first_cluster_limit_events(
     self: Any, trade_date: str, events: list[dict[str, Any]], minimum_members: int = 2,
+    *, review_scope: dict | None = None,
 ) -> list[dict[str, Any]]:
     from .event_bridge import EventBridgeDetector, verify_event_bridge
 
@@ -360,6 +363,9 @@ def _graph_first_cluster_limit_events(
     early = [item for item in local if 2 <= len(item["member_codes"]) <= 3]
     detector = EventBridgeDetector()
     bridges = detector.detect(trade_date, events, all_local)
+    if review_scope is not None:
+        review_bridges = {tuple(sorted(nodes)) for nodes in review_scope.get("bridges", [])}
+        bridges = [c for c in bridges if tuple(sorted(c["nodes"])) in review_bridges]
     trace = {
         "trade_date": trade_date, "strong_stock_count": len({e["code"] for e in events}),
         "local_clusters": [{"tag": item["tag"], "touch_count": item["touch_count"],
@@ -370,12 +376,19 @@ def _graph_first_cluster_limit_events(
         "bridges": [], "single_node_formal": [],
     }
     self.last_discovery_trace = trace
+    if review_scope is not None:
+        trace["review_scope"] = review_scope
     result = []
     formal_local = structured_event_clusters(events, minimum_members=4,
                                               include_broad_parents=True)
+    if review_scope is not None:
+        formal_local = [c for c in formal_local if c["tag"] in review_scope.get("anchors", [])]
     if self.enabled and any(item["tag"] not in {"文化传媒", "传媒"} for item in formal_local):
         try:
-            result = _verify_formal_graph_clusters(self, trade_date, events, minimum_members)
+            result = _verify_formal_graph_clusters(
+                self, trade_date, events, minimum_members,
+                allowed_anchors=set(review_scope.get("anchors", [])) if review_scope else None,
+            )
             trace["single_node_formal"] = [item["tag"] for item in result]
             trace["single_node_verifications"] = getattr(self, "last_graph_verification", [])
             trace["single_node_final"] = "verified" if result else "ai_rejected"
@@ -383,27 +396,35 @@ def _graph_first_cluster_limit_events(
             # Early local observations must survive a verifier outage.
             trace["single_node_final"] = "verification_failed"
             trace["single_node_error_type"] = type(error).__name__
-    bridge_anchors: set[str] = set()
-    for candidate in sorted(bridges, key=lambda item: (
+    ordered_bridges = sorted(bridges, key=lambda item: (
         -item["bridge_score"], -item["touch_count"], tuple(item["nodes"]),
-    )):
-        if not self.enabled:
-            trace["bridges"].append({"nodes": candidate["nodes"],
-                                     "final_reject_reason": "ai_disabled"})
-            continue
+    ))
+
+    def verify_one(candidate: dict) -> tuple[dict | None, dict]:
         try:
-            cluster, decision = verify_event_bridge(self, candidate, events)
-            if cluster and cluster["tag"] in bridge_anchors:
-                decision["final"] = "superseded_same_anchor"
-                decision["final_reject_reason"] = "stronger_bridge_same_anchor"
-            elif cluster:
-                bridge_anchors.add(cluster["tag"])
-                result.append(cluster)
-            trace["bridges"].append(decision)
+            return verify_event_bridge(self, candidate, events)
         except Exception as error:
-            trace["bridges"].append({"nodes": candidate["nodes"],
-                                     "final_reject_reason": "verification_failed",
-                                     "error_type": type(error).__name__})
+            return None, {"nodes": candidate["nodes"],
+                          "final_reject_reason": "verification_failed",
+                          "error_type": type(error).__name__}
+
+    outcomes = []
+    if self.enabled and ordered_bridges:
+        with ThreadPoolExecutor(max_workers=BRIDGE_VERIFICATION_WORKERS) as executor:
+            # map preserves local-score order even when requests finish out of order.
+            outcomes = list(executor.map(verify_one, ordered_bridges))
+    elif not self.enabled:
+        trace["bridges"] = [{"nodes": c["nodes"], "final_reject_reason": "ai_disabled"}
+                            for c in ordered_bridges]
+    bridge_anchors: set[str] = set()
+    for cluster, decision in outcomes:
+        if cluster and cluster["tag"] in bridge_anchors:
+            decision["final"] = "superseded_same_anchor"
+            decision["final_reject_reason"] = "stronger_bridge_same_anchor"
+        elif cluster:
+            bridge_anchors.add(cluster["tag"])
+            result.append(cluster)
+        trace["bridges"].append(decision)
     trace["verification_failed"] = (
         trace.get("single_node_final") == "verification_failed"
         or any(item.get("final_reject_reason") == "verification_failed"
@@ -418,6 +439,7 @@ def _verify_formal_graph_clusters(
     trade_date: str,
     events: list[dict[str, Any]],
     minimum_members: int = 2,
+    *, allowed_anchors: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Use local graph for 2-3 stocks and web/AI only from four stocks onward."""
     from . import ai as ai_module
@@ -443,6 +465,7 @@ def _verify_formal_graph_clusters(
     graph_candidates = [
         item for item in local_clusters
         if len(item["member_codes"]) >= 4 and item["tag"] not in {"文化传媒", "传媒"}
+        and (allowed_anchors is None or item["tag"] in allowed_anchors)
     ][:20]
     if not graph_candidates:
         # Fail closed: without a structured graph relationship, do not ask the model
@@ -545,12 +568,9 @@ def _verify_formal_graph_clusters(
 
     raw, parsed, sources = self._call_prompt(
         prompt,
-        reasoning_effort="low",
         task_type="semantic_event_clustering",
         subject_id=trade_date,
-        search_context_size="low",
-        max_output_tokens=5000,
-        max_tool_calls=4,
+        **DISCOVERY_AI_OPTIONS,
     )
     clusters = parsed.get("clusters")
     if not isinstance(clusters, list):

@@ -36,6 +36,10 @@ class ThemeDiscovery:
     def discover(self, now: datetime) -> list[int]:
         return self.discover_for_date(now.strftime("%Y%m%d"), now)
 
+    @staticmethod
+    def fingerprint_for_date(trade_date: str, tag: str) -> str:
+        return hashlib.sha256(f"event-cluster-v4|{trade_date}|{tag}".encode()).hexdigest()
+
     def discover_for_date(
         self,
         trade_date: str,
@@ -105,9 +109,7 @@ class ThemeDiscovery:
             # Keep the fingerprint stable while a 2-3 stock early cluster grows into
             # a >=4-stock formal candidate on the same trading day. Formal AI output
             # preserves this graph anchor tag and only refines canonical_name/logic.
-            fingerprint = hashlib.sha256(
-                f"event-cluster-v4|{trade_date}|{tag}".encode()
-            ).hexdigest()
+            fingerprint = self.fingerprint_for_date(trade_date, tag)
             ordered = sorted(
                 item["members"],
                 key=lambda member: (
