@@ -30,6 +30,7 @@ class ThemeDiscovery:
         # and in the graph-first AI verifier.
         self.minimum_limit_touches = max(2, minimum_limit_touches)
         self.minimum_early_touches = max(2, minimum_early_touches)
+        self.last_early_observations: list[dict[str, Any]] = []
         install_graph_first_ai_clustering()
 
     def discover(self, now: datetime) -> list[int]:
@@ -41,6 +42,7 @@ class ThemeDiscovery:
         now: datetime,
         semantic_clusters: list[dict[str, Any]] | None = None,
     ) -> list[int]:
+        self.last_early_observations = []
         eligible = semantic_clusters
         if eligible is None:
             # Even when AI is disabled/unavailable, use the persisted graph tags
@@ -123,6 +125,8 @@ class ThemeDiscovery:
                         "source_themes": member.get("themes", []),
                         "concept_tags": member.get("concept_tags", []),
                         "board_tag": member.get("board_tag"),
+                        "signal_source": member.get("signal_source"),
+                        "limit_time_basis": member.get("limit_time_basis"),
                         "board_status": member.get("status"),
                         "limit_reason": member.get("limit_reason"),
                         "aggregated_reason": member_reasons.get(str(member["code"])),
@@ -132,6 +136,7 @@ class ThemeDiscovery:
                         "trade_date": trade_date,
                         "cluster_method": item.get("cluster_method", "exact_tag"),
                         "common_logic": item.get("common_logic"),
+                        "canonical_name": item.get("canonical_name"),
                         "discovery_stage": stage,
                         "synchronization_score": metrics.get("synchronization_score"),
                         "breadth_score": metrics.get("breadth_score"),
@@ -180,7 +185,10 @@ class ThemeDiscovery:
             )
             theme_id = self.database.upsert_candidate(
                 fingerprint=fingerprint,
-                provisional_name=f"{tag}待审",
+                provisional_name=(
+                    f"{item.get('canonical_name') or tag}"
+                    + ("待审" if stage == "formal_candidate" else "观察")
+                ),
                 shared_tag=tag,
                 direction="positive",
                 discovered_at=discovered.isoformat(timespec="seconds"),
@@ -194,6 +202,9 @@ class ThemeDiscovery:
             )
             self.database.save_theme_catalysts(theme_id, item.get("catalysts") or [])
             theme = self.database.get_theme(theme_id)
+            if (theme and theme.get("status") == "pending"
+                    and theme.get("admission_status") == "early_observation"):
+                self.last_early_observations.append(theme)
             if (
                 theme
                 and theme.get("status") == "pending"

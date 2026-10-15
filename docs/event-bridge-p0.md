@@ -5,7 +5,7 @@
 The old graph verifier ran when the **whole market** supplied four strong stocks,
 even if each concrete local node had only two or three. Its output replaced local
 early observations, including when it returned an empty list. Family clustering
-handles synonyms and overlapping constituents (including 猪肉/生猪/猪周期), but not
+requires semantic/name agreement corroborated by overlap (including 猪肉/生猪/猪周期), but not
 disjoint sub-industry nodes connected by the same new event.
 
 This patch keeps Market First, News Second. It adds no Level-2 signals, success-rate
@@ -77,7 +77,10 @@ applies while local early observations remain available.
 To diagnose a date, read its latest signature and corresponding discovery trace,
 then node traces and each created theme's admission trace/review. This distinguishes
 no concrete nodes, insufficient local bridge evidence, AI rejection, discovery
-noise and admission rejection. No new UI or schema is required for P0.
+noise and admission rejection. No new schema is required for P0. The follow-up
+[AI-content omission repair](ai-content-discovery-review.md) also makes local
+observations visible, adds deduplicated notifications, restores business reasons,
+and provides a deterministic official-price main-board input fallback.
 
 Example read-only query using the existing SQLite database (substitute date):
 

@@ -248,6 +248,9 @@ def structured_event_clusters(
             confidence = _number(raw.get("confidence"))
             weight = max(82.0, min(96.0, confidence * 100 if confidence <= 1 else confidence))
             memberships[tag][code] = max(memberships[tag].get(code, 0.0), weight)
+            reason = str(raw.get("reason") or "").strip()
+            if reason:
+                reasons[tag][code] = reason[:600]
             source = str(raw.get("source") or "").strip()
             if source:
                 aliases[tag].add(source)
@@ -359,7 +362,9 @@ def _graph_first_cluster_limit_events(
     bridges = detector.detect(trade_date, events, all_local)
     trace = {
         "trade_date": trade_date, "strong_stock_count": len({e["code"] for e in events}),
-        "local_clusters": [{"tag": item["tag"], "touch_count": item["touch_count"]}
+        "local_clusters": [{"tag": item["tag"], "touch_count": item["touch_count"],
+                            "member_codes": item["member_codes"],
+                            "parent_only": bool(item.get("parent_only"))}
                            for item in all_local],
         "bridge_candidate_count": len(bridges), "bridge_screening": detector.trace,
         "bridges": [], "single_node_formal": [],
@@ -372,6 +377,7 @@ def _graph_first_cluster_limit_events(
         try:
             result = _verify_formal_graph_clusters(self, trade_date, events, minimum_members)
             trace["single_node_formal"] = [item["tag"] for item in result]
+            trace["single_node_verifications"] = getattr(self, "last_graph_verification", [])
             trace["single_node_final"] = "verified" if result else "ai_rejected"
         except Exception as error:
             # Early local observations must survive a verifier outage.
@@ -528,7 +534,8 @@ def _verify_formal_graph_clusters(
         }}
       ]
     }}
-  ]
+  ],
+  "rejected_nodes": [{{"anchor_tag":"未接受的输入节点", "reason":"具体不通过原因"}}]
 }}
 
 交易日：{trade_date}
@@ -613,6 +620,21 @@ def _verify_formal_graph_clusters(
                 "raw": raw,
             }
         )
+    rejected = {
+        str(item.get("anchor_tag")): str(item.get("reason") or "")[:500]
+        for item in (parsed.get("rejected_nodes") or [])
+        if isinstance(item, dict) and str(item.get("anchor_tag")) in anchor_tags
+    }
+    self.last_graph_verification = [
+        {"anchor_tag": anchor, "input_member_count": len(anchor_members[anchor]),
+         "accepted_clusters": [
+             {"canonical_name": item["canonical_name"], "member_codes": item["member_codes"]}
+             for item in result if anchor == item["aliases"][0]
+         ],
+         "reject_reason": rejected.get(anchor, "ai_did_not_return_qualified_cluster") if not any(
+             anchor == item["aliases"][0] for item in result) else ""}
+        for anchor in sorted(anchor_tags)
+    ]
     return result
 
 

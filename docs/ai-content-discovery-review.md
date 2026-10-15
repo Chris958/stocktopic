@@ -1,151 +1,121 @@
-# AI short-drama / IP discovery review — 2026-10-15
+# AI短剧 / IP 漏判复盘与 P0 修复（2026-10-15）
 
-## Evidence boundary
+## 证据边界
 
-Public `/health` at 10:00:30 China time reported successful 4,413-stock collection,
-no integration warnings, and zero new candidates in the Oct 14 end-of-day replay
-for Oct 14 and Oct 13. This does not prove any particular stock was in strong input,
-which filter rejected it, or whether an older candidate already existed.
+依据生产只读导出 `ai-content-discovery-audit.json`，覆盖
+20261009、20261012、20261013、20261014、20261015。
+文件 SHA256：`670cdf9151b562c52e761315b1c3d72398022e1972053a9f938f574595042675`。
+原始生产导出不提交仓库，测试只使用最小合成样本。
 
-Production authenticated candidate/trace data is not available in this workspace.
-Do not attribute Oct 9/12/13/14's specific miss to one gate until exporting it.
-The diagnostic module only reads SQLite in mode=ro/query_only, never re-runs AI or
-admission, and keeps persisted past decisions separate from current reconstruction.
-KPL event/tag updates are mutable: a reconstruction from current rows is not a
-point-in-time market replay. Later news must not be used as earlier evidence.
+必须区分持久化的历史决策与根据当前数据库重建的节点。
+KPL事件、标签、成员和状态会更新；10月9日/12日行里存在后续同步时间，不能据此宣称
+系统当时盘中已获得这些输入，更不能用后来新闻证明当时已经可交易。
+主题导出是当前状态，含前120个自然日的相关记录；每日期最多64个trace/语义运行、
+每题材最近3次review，本次trace未触及64条截断上限。
 
-## Confirmed code gaps (reproduced with synthetic inputs)
+“初版传媒”未匹配到股票；“出版传媒”已单独匹配601999.SH。不能默认为其他出版股。
 
-1. EventBridgeDetector only accepts nodes with two/three members; a four-member
-   concrete node cannot bridge with a two/three-member sibling even if its own
-   formal AI verification rejects a too-broad explanation.
-2. Clusters are built with >=2 members. A 3+1 structure never reaches bridge AI.
-3. Bridge nodes must be disjoint; overlapping concrete roles fail despite >=4
-   **unique** stocks. Existing overlap family logic covers some, not all, overlaps.
-4. Time score >=45 is a separate hard gate. With the 45-minute spread formula it
-   requires all launch times within 24.75 minutes. A 30-minute relay sample scores
-   65.75 overall and still fails.
-5. Pairwise Chinese-bigram/Latin-token similarity does not encode complementary
-   business roles. AIGC production and literary-IP adaptation can be causally
-   connected while sharing no tokens. Every pair in a multi-node candidate must
-   pass, further limiting supply-chain recall.
-6. kpl_concept_memberships stores description, but limit_touch_events selects only
-   tag/source/confidence. Concept reasons are not forwarded to scoring; the graph
-   concept-tag branch also discards reasons. The graph reason class is present,
-   but its enrich_events method is not wired into this discovery read path.
-7. Pure local two/three-stock observations persist as pending/early_observation.
-   The default frontend watching filter only selects status=watching. Such records
-   are hidden in the reviewing tab, lack a specific early_observation label, and
-   do not call the existing post-admission early-watch notification path.
-8. Successful negative AI results can be cached indefinitely under unchanged market
-   signatures, even after catalyst evidence changes. Concept descriptions are
-   absent from the signature too. Failed requests retry, but valid negative
-   decisions are not the same as failed requests.
-9. Current trace exclusion text groups multiple gates; single-node verifications
-   do not preserve per-anchor rejected evidence. Current metadata/run rows also
-   overwrite signatures on retry, so they are not a complete historical audit.
+## 生产事实
 
-Existing admission already supports new_theme/new_cycle/new_catalyst/old_rotation.
-Changing the prompt to mention new_catalyst again alone will not repair missing
-input evidence or the upstream candidate universe.
+| 日期 | 导出时强势输入数 | 五只指定股的输入情况 | 关键记录 |
+| --- | ---: | --- | --- |
+| 10月9日 | 110 | 欢瑞、慈文、掌阅存在；荣信、出版传媒缺席 | 当前重建将108只合成DeepSeek概念；历史14:30曾生成26股DeepSeek族，14:36准入拒绝 |
+| 10月12日 | 91 | 欢瑞、慈文、掌阅存在；荣信、出版传媒缺席 | 当前重建将86只合成飞行汽车；当日15:32保存的输入只有29只，飞行汽车族22只 |
+| 10月13日 | 32 | 五只均缺席，目标KPL行为空 | 09:45生成华智数媒、果麦文化的“短剧产业”本地观察，未产生预警 |
+| 10月14日 | 24 | 五只均缺席，目标KPL行为空 | 13:11:26已有正式AI内容题材，novelty_mode=new_catalyst；13:11:31正式预警标记推送成功 |
+| 10月15日（导出时） | 8 | 五只均缺席，目标KPL行为空 | 没有这些目标股的新正式候选 |
 
-## Correct business model for diagnosis
+10月14日正式题材ID2383，名称“人工智能+内容生产与智能体软件应用落地”。
+初始验证成员为富春股份、芒果超媒、果麦文化、海看股份；准入后当前共9名成员，
+不含用户指定的五只。其共同逻辑明确提及AI漫剧/AI短剧及IP，但名称过泛、时间也晚。
+数据库的pushed_wecom=1仅证明接口发送成功，不证明用户已经看到消息。
 
-Relevant concrete hypothesis: AI-assisted audiovisual content production and IP
-adaptation commercialization, with upstream IP/script rights, production/tools,
-and distribution roles. Broad media/publishing labels alone do not establish a
-specific event or membership. A rights holder is not automatically an AI-drama
-beneficiary without its business/evidence connection. Canonical event identity,
-causal role and company exposure must be distinct fields.
+因此不能归结为“系统从未纳入AI内容”或“传媒是老行业所以一律拒绝”。
+10月13日另一DeepSeek候选确实以old_rotation被拒，而10月14日new_catalyst已通过。
+个别AI失败也存在，但无法解释所有阶段的遗漏。
 
-Prior information (company platform, copyright assets) supports membership; the
-current market starts the detector. Current platform/product/overseas growth data
-may verify a new catalyst. Small current revenue is a risk/exposure fact, not proof
-that market resonance did not happen. Formal admission evidence gates still apply.
+## 根因及已实施的修复
 
-Sources reviewed:
+### 1. 重叠连锁合并吞掉具体事件
 
-- [Ciwen abnormal fluctuation announcement](https://static.cninfo.com.cn/finalpage/2026-10-13/1225602370.PDF):
-  Oct 9/12 price deviation and the fact AIGC had not produced revenue as disclosed.
-- [Ciwen platform announcement coverage, Sept 27](https://stcn.com/article/detail/4199845.html):
-  script-to-film platform and IP development, available before Oct 9.
-- [People's Daily, March 23](https://paper.people.com.cn/rmrbhwb/pc/content/202603/23/content_30146543.html):
-  adaptation rights, platform incentives and IP monetization as pre-existing context.
-- [Xinhua on AI comics](https://app.xinhuanet.com/news/article.html?articleId=bfd0572519e04e5917f61a606721f04e):
-  existing reading-platform IP pools and distribution models.
-- [Rongxin company-news coverage, Oct 13 evening](https://static.weeklyonstock.com/26/1013/qdy200839.html):
-  a book-to-AI-animation adaptation example. This report cannot substantiate Oct 9
-  detection using information not yet public then.
-- [Oct 12 09:32 market report](https://www.caiwennews.com/article/1645163.shtml):
-  contemporaneous market cluster; not a replacement for per-stock recorded input.
+旧family逻辑仅需共同成员>=2且覆盖较小节点>=50%，再用union-find传递合并。
+多个概念重叠可以将AI影视、AI硬件、电池、农业等连续连通，生成巨型“题材族”；
+同时删除原有子节点。AI随后面对宽泛杂合输入，桥接器也看不到原来具体节点。
 
-The user's “初版传媒” name is unresolved; don't silently equate it with 出版传媒,
-新华文轩, 新经典 or 中信出版. Export requested names and report unresolved ones.
+修复：重叠只能佐证语义关系，必须先有明确同义或相近名称；族内每一对节点都要符合
+关系，防止传递漂移。只有明确同义族可替代其子节点；其他具体节点继续保留。
+猪肉/生猪/猪周期既有明确族规则保持不变。
 
-## Proposed repair sequence (not applied to runtime in this diagnostic PR)
+### 2. 主板发现依赖KPL，已有行情未兜底
 
-1. Export the actual first-wave dates once. Establish for each stock/node whether
-   failure was before strong-input, graph normalization, bridge, AI verification,
-   admission, UI or notification. Keep API failures distinct from rejected logic.
-2. Repair observation visibility and a deduplicated local-observation notification
-   path. Two/three strong members still use only deterministic local logic and no
-   AI. Explicitly distinguish this level from post-admission evidence watch.
-3. Carry source descriptions/reasons, source date and knowledge validity through
-   graph construction, scoring, verifier payload, signature and trace.
-4. Add versioned local event/role relations with evidence and observed_at. Normalize
-   AI comics/drama terminology cautiously; “publishing” alone never qualifies.
-   A 3+1 industry split can form one locally evidenced concrete event node with
-   four members, rather than violating the bridge's >=2-per-node rule. Three/one
-   isolated stocks without that evidence stay outside formal AI.
-5. For bridges, remove the **upper** three-member eligibility ceiling and dedupe
-   overlaps by unique stock count, retaining >=2 per accepted node, >=4 total,
-   <=4 nodes, bounded members and all original AI/admission safety gates. Extend
-   the verifier and regression fixtures together; detector changes alone are not
-   sufficient. Overlap cannot double-count market breadth.
-6. Replace the accidental ~25-minute all-stock cutoff with separately measured
-   simultaneous and relay patterns, with explicit bounded windows, board strength,
-   validated role edges and causal corroboration. Calibrate on prior data and
-   unrelated synchronized sectors; do not simply lower thresholds to fit this case.
-7. Preserve market observations when formal verification/admission rejects. For
-   genuinely new evidence, retry only existing >=4 candidates under a bounded
-   budget/backoff and evidence-aware cache; never invoke AI for 2–3 observations.
-8. Add coverage accounting: every strong input has a visible disposition. Missing
-   graph evidence, lack of catalyst or unavailable AI creates a pending explanation,
-   not a silently empty interface. Use existing metadata/service_runs initially.
+导出能证明目标输入缺席，不能单凭缺席判断其当时未涨停、或断言供应商故障。
+旧发现入口只读kpl_events；本地五分钟行情已经用于异动，但主板触板没有同等落入发现入口。
+KPL空返回还可能被记为成功，行情采集正常不等于题材输入覆盖完整。
 
-Acceptance is first_seen -> observation_visible -> alert_created -> notification
-result -> formal_candidate -> admission, each timestamped with input/rule version.
-Use true historical inputs at 5-minute intervals where available. Do not reconstruct
-an earlier trade opportunity using end-of-day tags/news/prices. Zero omissions
-cannot be promised; visible reasons and bounded review of uncovered signals can.
+修复：仅对现有股票池主板，使用已有rt_k的最高价与官方当日涨停价按半分钱容差核对；
+必须有有效价格、当日交易时段及官方涨停价，不按普通9%上涨猜测触板。
+封住/打开分别保存涨停/炸板，局部行情不覆盖KPL业务理由和连板信息。
+时间标为`first_observed_5m`，只代表采样首次观察，不冒充精确封板时刻。
+仅当此前六分钟内有未触板快照，才能界定`observed_interval_5m`触板区间供桥接使用；
+启动时的累计最高价、日线回补的未知触板时间不能证明同步，桥接不使用这些时间。
+集合竞价、其他日期、缺失涨停价、创业板均不走这一主板规则。
 
-## Read-only production export without changing the running branch
+KPL空/不可用记为degraded，metadata和health显示源状态；KPL异常时已有本地强势输入
+仍可触发发现。现有历史回补仍使用日度KPL及创业板日线；本次不捏造过去的主板触板样本。
 
-From the Mac mini repository, fetch only the audit branch, then execute the reviewed
-module from that ref in a separate Python process. This does not checkout files,
-restart the service, write to SQLite, ingest data, call AI or send notifications.
+### 3. 已存储的业务描述在发现入口丢失
 
-```bash
-cd /Users/chris/stocktopic
-git fetch origin diag/ai-content-discovery
-.venv/bin/python - \
-  --dates 20261009 20261012 20261013 20261014 20261015 \
-  --names 慈文传媒 欢瑞世纪 掌阅科技 荣信文化 出版传媒 初版传媒 \
-  > ai-content-discovery-audit.json <<'PY'
-import subprocess
-source = subprocess.check_output([
-    'git', 'show',
-    'origin/diag/ai-content-discovery:src/stocktopic/discovery_audit.py',
-], text=True)
-exec(compile(source, 'discovery_audit.py', 'exec'),
-     {'__name__': '__main__', '__package__': 'stocktopic'})
-PY
-```
+生产已有掌阅的IP/衍生改编版权、欢瑞的AI短剧、荣信的内容+IP+AI等描述。
+旧limit_touch_events只带标签名，且概念分支不传reason，跨行业互补逻辑因此缺证。
 
-Share ai-content-discovery-audit.json. It omits credentials and raw AI responses;
-it includes target business descriptions, candidate names/reasons and status.
-Related theme records include earlier themes within 120 calendar days and show
-current state; they are not historical per-date snapshots. The current exported
-UI visibility flag follows the frontend filter at this
-review's version; it must be updated if UI filtering changes later. Defaults cap
-trace/runs at 64 per day and reviews at 3 per theme; a cap flag indicates truncation.
+修复：携带请求日期当日或之前最近概念快照的description、来源日期及同步时间，
+传入图谱成员理由、AI和缓存签名。理由变更失效缓存，相同描述的再次同步不触发重复调用。
+已有全局stock_tags本身没有完整时间版本；历史重建仍不能视为严格时点回放。
+图谱验证的canonical_name/common_logic继续传给准入，稳定anchor不再替代具体本轮逻辑。
+
+### 4. 早期观察落库但默认不可见、没有预警
+
+ID2272于10月13日09:45保存为pending/early_observation，成员2只，无review、无alert。
+旧前端默认“早期观察”只显示watching，并把pending统一展示为AI审查中。
+
+修复：默认观察列表和计数纳入本地2–3股观察，单独标识催化待验证；与AI审查中分开。
+增加本地观察提醒，按交易日+唯一成员集合去重，避免相同成员多个别名重复通知。
+跨日/盘后历史回放不发送追溯机会提醒。这一层不调用AI、不宣称已验证共同催化。
+
+### 5. 同步不等于共同催化，trace不能混成一个原因
+
+历史“影视概念+短剧产业”曾得79.86分，但其实只有同样两只股票，不能凑成四只。
+创业板自动生成的涨幅说明还曾被算成共同业务文本，产生90%–100%伪相似。
+
+修复：剔除自动生成的价格资格模板；分别记录唯一成员不足、成员重叠、业务文本不足、
+时间缺失、时间同步不足、总分不足。单节点AI拒绝可保存逐anchor理由；输入trace记录
+主板/创业板数量、信号源数量及KPL状态，继续使用已有metadata/service_runs。
+
+## 新流程及保持的门槛
+
+1. 五分钟有效行情 -> 主板官方触板/创业板既有强势逻辑 + KPL业务补充。
+2. 本地图谱保留具体节点 -> 有语义约束的family。
+3. 2–3只：本地观察、展示、去重提醒，零AI。
+4. 单节点>=4：既有graph-first AI验证；多个各2–3股的互斥具体节点：既有本地评分桥接。
+5. 通过验证 -> formal_candidate -> 既有admission_analysis；new_catalyst等门槛不降低。
+6. 最终正式/观察/拒绝与输入和排除原因可追踪；题材ID仍用日期+稳定anchor。
+
+不增加数据库迁移，不使用全市场AI选股，不加入P1资金共振、历史成功率、角色迁移或交易计划。
+
+## 验证与剩余限制
+
+合成回归覆盖：无关高重叠不能成族、传递连接不能吞节点、业务理由与语义缓存、
+主板精确触板及炸板/KPL优先、缺失/越界价格与时段、KPL空/失败、本地三股无AI且提醒去重、
+四股同ID升级且必须准入、历史回放不推送、前端观察筛选、模板文本误共振和逐节点拒绝。
+原有Event Bridge A–G、猪肉族、2–3股no-AI、>=4图谱AI测试继续保留。
+
+剩余保守边界：bridge仍仅支持各2–3只、互不重叠节点；时间/文本证据稀疏、跨时段接力、
+3+1异行业且缺少同一具体本地节点、以及只有同样成员的多个标签，都不因此自动升正式。
+成功的负面AI缓存目前依赖输入/业务理由变化失效，未引入定时新闻驱动重审。
+这些限制须继续明确记录；不能承诺所有机会永不遗漏，也不能用事后标签证明抓住首波。
+
+## 只读导出
+
+运维可以运行 `python -m stocktopic.discovery_audit --dates ... --names ...`。
+不写数据库、不迁移、不联网、不重新调用AI、不发送通知；保留持久化决策和当前重建的区别。
+导出最多64个trace/语义运行及每题材3次review。导出中的默认观察可见性随本次UI修复更新。

@@ -22,7 +22,7 @@ def minutes(value: Any) -> int | None:
 
 def anchor_node(nodes: list[dict[str, Any]], events: dict[str, dict]) -> str:
     def rank(node: dict) -> tuple:
-        times = [minutes(events[code].get("limit_up_time")) for code in node["member_codes"]]
+        times = [_launch_minutes(events[code]) for code in node["member_codes"]]
         known = [value for value in times if value is not None]
         return (
             min(known, default=1440),
@@ -34,7 +34,16 @@ def anchor_node(nodes: list[dict[str, Any]], events: dict[str, dict]) -> str:
     return str(min(nodes, key=rank)["tag"])
 
 
+def _launch_minutes(event: dict) -> float | None:
+    if event.get("limit_time_basis") in {"first_observed_5m", "daily_high_time_unknown"}:
+        return None  # A cumulative-high snapshot cannot establish its launch time.
+    return minutes(event.get("limit_up_time"))
+
+
 def _tokens(text: str) -> set[str]:
+    # Generated price-qualification prose is not a business/catalyst reason.
+    text = re.sub(r"创业板(?:盘中|当日)最高涨幅[^；]*[；;]?", "", text)
+    text = text.replace("具体上涨原因结合题材标签、公司关联和当日新闻核查", "")
     # Strip boilerplate: a shared "涨停/产业催化" is not common-event evidence.
     text = re.sub(r"涨停|首板|产业催化|概念|公司|股份|有限公司|受益|异动", "", text.lower())
     result = set(re.findall(r"[a-z0-9]{2,}", text))
@@ -73,19 +82,27 @@ class EventBridgeDetector:
         for left, right in combinations(range(len(nodes)), 2):
             pair = [nodes[left], nodes[right]]
             scored = self._score(pair, by_code)
-            eligible = (
-                not set(pair[0]["member_codes"]) & set(pair[1]["member_codes"])
-                and scored["text_similarity"] >= 25
-                and scored["time_sync"] is not None
-                and scored["time_sync"] >= 45
-                and scored["bridge_score"] >= 60
-            )
+            unique = set(pair[0]["member_codes"]) | set(pair[1]["member_codes"])
+            gates = {
+                "below_four_unique_members": len(unique) < 4,
+                "overlapping_node_members": bool(
+                    set(pair[0]["member_codes"]) & set(pair[1]["member_codes"])),
+                "insufficient_business_text": scored["text_similarity"] < 25,
+                "missing_launch_times": scored["time_sync"] is None,
+                "insufficient_time_synchronization": (
+                    scored["time_sync"] is not None and scored["time_sync"] < 45),
+                "bridge_score_below_60": scored["bridge_score"] < 60,
+            }
+            excluded = [reason for reason, failed in gates.items() if failed]
+            eligible = not excluded
             links[left, right] = eligible
             self.trace.append(
                 {
                     "nodes": [node["tag"] for node in pair],
                     **scored,
-                    "excluded_reason": "" if eligible else "insufficient_sync_or_text_or_overlap",
+                    "unique_member_count": len(unique),
+                    "excluded_reasons": excluded,
+                    "excluded_reason": excluded[0] if excluded else "",
                 }
             )
         for size in range(4, 1, -1):
@@ -120,7 +137,7 @@ class EventBridgeDetector:
 
     def _score(self, nodes: list[dict], events: dict[str, dict]) -> dict:
         members = [events[code] for node in nodes for code in node["member_codes"]]
-        times = [minutes(member.get("limit_up_time")) for member in members]
+        times = [_launch_minutes(member) for member in members]
         known = [value for value in times if value is not None]
         time_sync = (
             max(0, 100 - (max(known) - min(known)) / 45 * 100)
@@ -128,7 +145,7 @@ class EventBridgeDetector:
                 len(known) >= 2
                 and all(
                     any(
-                        minutes(events[code].get("limit_up_time")) is not None
+                        _launch_minutes(events[code]) is not None
                         for code in node["member_codes"]
                     )
                     for node in nodes

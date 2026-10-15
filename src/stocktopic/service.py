@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import time as elapsed_time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time, timedelta
 from typing import Any
@@ -446,11 +447,28 @@ class StockTopicService:
             for tag in ("涨停", "炸板", "跌停"):
                 rows.extend(self.provider.kpl_list(trade_date, tag))
             count = self.database.upsert_kpl_events(rows)
-            self.database.finish_run(run_id, "success", count)
+            coverage = {
+                "trade_date": trade_date, "row_count": count,
+                "boards": dict(Counter(str(row.get("tag") or "") for row in rows)),
+                "state": "available" if any(row.get("tag") in {"涨停", "炸板"}
+                                           for row in rows) else "empty_strong_feed",
+                "checked_at": self.clock.china_now().isoformat(timespec="seconds"),
+            }
+            detail = json.dumps(coverage, ensure_ascii=False)
+            self.database.set_metadata(f"kpl_event_coverage:{trade_date}", detail)
+            self.database.finish_run(
+                run_id, "success" if coverage["state"] == "available" else "degraded",
+                count, detail,
+            )
             return count
         except Exception as error:
-            self.database.finish_run(run_id, "degraded", detail=str(error))
-            logger.warning("KPL event sync degraded: %s", error)
+            safe = _safe_error(error)
+            self.database.finish_run(run_id, "degraded", detail=safe)
+            self.database.set_metadata(f"kpl_event_coverage:{trade_date}", json.dumps({
+                "trade_date": trade_date, "state": "unavailable", "error": safe,
+                "checked_at": self.clock.china_now().isoformat(timespec="seconds"),
+            }, ensure_ascii=False))
+            logger.warning("KPL event sync degraded: %s", safe)
             self._data_pull_failure("sync_kpl_events", error)
             return -1
 
@@ -483,6 +501,13 @@ class StockTopicService:
         observed_at = self.clock.normalize(now or self.clock.china_now())
         with self._discovery_lock:
             events = self.database.limit_touch_events(trade_date)
+            coverage = {
+                "source_counts": dict(Counter(e.get("signal_source", "unknown") for e in events)),
+                "mainboard_count": sum(e.get("market") == "主板" for e in events),
+                "chinext_count": sum(e.get("market") == "创业板" for e in events),
+                "kpl_sync": json.loads(self.database.get_metadata(
+                    f"kpl_event_coverage:{trade_date}") or "null"),
+            }
             if len(events) < self.settings.minimum_limit_touches:
                 self.database.set_metadata(
                     f"discovery_trace_latest:{trade_date}", "below_discovery_floor",
@@ -491,6 +516,7 @@ class StockTopicService:
                     f"discovery_trace:{trade_date}:below_discovery_floor",
                     json.dumps({"trade_date": trade_date, "strong_stock_count": len(events),
                                 "local_clusters": [], "bridge_candidate_count": 0,
+                                "input_coverage": coverage,
                                 "final_reject_reason": "below_discovery_floor"}),
                 )
                 return []
@@ -508,6 +534,7 @@ class StockTopicService:
                 bridges = detector.detect(trade_date, events, local)
                 self.database.set_metadata(trace_key, json.dumps({
                     "trade_date": trade_date, "strong_stock_count": len(events),
+                    "input_coverage": coverage,
                     "local_clusters": [{"tag": c["tag"], "touch_count": c["touch_count"]}
                                        for c in local],
                     "bridge_candidate_count": len(bridges), "bridge_screening": detector.trace,
@@ -531,6 +558,7 @@ class StockTopicService:
                     )
                     trace = getattr(self.explainer, "last_discovery_trace", None)
                     if trace:
+                        trace["input_coverage"] = coverage
                         self.database.set_metadata(
                             f"discovery_trace:{trade_date}:{input_signature}",
                             json.dumps(trace, ensure_ascii=False),
@@ -563,7 +591,7 @@ class StockTopicService:
             if semantic_clusters is None:
                 # Resilient fallback when AI is disabled or unavailable. It is marked
                 # explicitly so the audit page never presents exact-tag grouping as semantic.
-                return self.discovery.discover_for_date(trade_date, observed_at)
+                return self._save_discovery(trade_date, observed_at)
 
             local_early = [cluster for cluster in structured_event_clusters(
                 events, minimum_members=self.settings.minimum_limit_touches,
@@ -598,11 +626,43 @@ class StockTopicService:
                         ),
                     }
                 )
-            return self.discovery.discover_for_date(
+            return self._save_discovery(
                 trade_date,
                 observed_at,
                 semantic_clusters=enriched,
             )
+
+    def _save_discovery(
+        self, trade_date: str, observed_at: datetime,
+        semantic_clusters: list[dict[str, Any]] | None = None,
+    ) -> list[int]:
+        candidate_ids = self.discovery.discover_for_date(
+            trade_date, observed_at, semantic_clusters=semantic_clusters,
+        )
+        # Replay writes audit records without sending retrospective opportunity alerts.
+        if (trade_date != observed_at.strftime("%Y%m%d")
+                or self.clock.session_name(observed_at) not in {"morning", "afternoon"}):
+            return candidate_ids
+        for theme in self.discovery.last_early_observations:
+            members = [m for m in theme.get("members", []) if m.get("active", 1)]
+            if not 2 <= len(members) <= 3:
+                continue
+            # Exact aliases with identical members should produce one notification.
+            member_key = hashlib.sha256(
+                "|".join(sorted(m["code"] for m in members)).encode(),
+            ).hexdigest()[:20]
+            name = str(theme["shared_tag"])
+            self._send_alert(
+                dedupe_key=f"local_observation:{trade_date}:{member_key}",
+                category="local_observation", severity="high",
+                title=f"本地早期观察：{name}", theme_id=int(theme["id"]),
+                body=(f"{len(members)}只当日强势股形成具体节点共振："
+                      + "、".join(f"{m['name']}({m['code']})" for m in members)
+                      + "\n本地确定性观察，尚未验证共同催化；未进入正式题材。"
+                      + f"\n{theme.get('discovery_reason') or ''}"
+                      + f"\n查看：{self.settings.public_base_url}"),
+            )
+        return candidate_ids
 
     def backfill_recent_trade_days(
         self,
@@ -767,6 +827,9 @@ class StockTopicService:
                         )
                     )
                 self.database.save_quotes(quotes, trade_date, state.slot)
+                mainboard_touch_count = self.database.upsert_mainboard_limit_events(
+                    compact, quotes, limits, history,
+                )
                 chinext_growth_count = self.database.upsert_chinext_growth_events(
                     compact, quotes
                 )
@@ -787,7 +850,7 @@ class StockTopicService:
                 discovery_trade_date: str | None = None
                 if started.minute % self.settings.cluster_interval_minutes == 0:
                     kpl_count = self.sync_kpl_events(compact)
-                    if kpl_count >= 0:
+                    if kpl_count >= 0 or mainboard_touch_count or chinext_growth_count:
                         discovery_trade_date = compact
                 scored_ids = self.scorer.score_confirmed(started)
                 self._evaluate_theme_alerts(started, scored_ids, stale=False)
@@ -797,6 +860,7 @@ class StockTopicService:
                     len(quotes),
                     f"internal_events={len(anomalies)}, invalid_quotes={len(invalid_quotes)}, "
                     f"chinext_growth={chinext_growth_count}, "
+                    f"mainboard_touches={mainboard_touch_count}, "
                     f"candidates={len(candidate_ids)}, live_pool={live_pool}",
                 )
                 return {
@@ -806,6 +870,7 @@ class StockTopicService:
                     "internal_events": len(anomalies),
                     "invalid_quotes": len(invalid_quotes),
                     "chinext_growth_signals": chinext_growth_count,
+                    "mainboard_touch_signals": mainboard_touch_count,
                     "candidate_ids": candidate_ids,
                     "discovery_trade_date": discovery_trade_date,
                     "scored_ids": scored_ids,
@@ -1510,6 +1575,12 @@ class StockTopicService:
             if self.settings.tushare_rt_k_enabled
             else "rt_k_disabled_by_configuration"
         )
+        kpl_coverage = json.loads(self.database.get_metadata(
+            f"kpl_event_coverage:{compact}") or "null")
+        warnings = self.settings.validate_integrations()
+        if (kpl_coverage and kpl_coverage.get("state") in {"empty_strong_feed", "unavailable"}
+                and state.is_open_day and now.time() >= time(9, 35)):
+            warnings.append("KPL强势股数据为空或不可用；主板覆盖依赖本地行情触板记录，请检查数据源")
         return {
             "status": "ok" if database_ready else "degraded",
             "version": __version__,
@@ -1523,6 +1594,7 @@ class StockTopicService:
             },
             "universe_count": self.database.active_stock_count(),
             "latest_quote_run": latest,
+            "discovery_input_coverage": kpl_coverage,
             "integrations": {
                 "tushare": True,
                 "tushare_transport": self.provider.transport,
@@ -1601,7 +1673,7 @@ class StockTopicService:
                 "minimum_expected_duration_days": (self.settings.minimum_expected_duration_days),
                 "leader_upside_threshold_pct": self.settings.leader_upside_threshold_pct,
             },
-            "warnings": self.settings.validate_integrations(),
+            "warnings": warnings,
         }
 
 
@@ -1626,13 +1698,15 @@ def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
                 "code": event.get("code"),
                 "market": event.get("market"),
                 "limit_up_time": event.get("limit_up_time"),
+                "limit_time_basis": event.get("limit_time_basis"),
                 "bridge_board_tag": event.get("board_tag") if event.get("code") in bridge_codes
                 else None,
                 "knowledge_graph_tags": event.get("knowledge_graph_tags", []),
                 "themes": sorted(str(value) for value in event.get("themes", []) if value),
                 "limit_reason": str(event.get("limit_reason") or "")[:240],
                 "concept_tags": sorted(
-                    str(item.get("tag"))
+                    (str(item.get("tag")), str(item.get("reason") or "")[:600],
+                     str(item.get("source_trade_date") or ""))
                     for item in event.get("concept_tags", [])
                     if item.get("tag")
                 ),
@@ -1642,7 +1716,7 @@ def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
         key=lambda item: str(item.get("code") or ""),
     )
     return hashlib.sha256(
-        ("event-bridge-p0-v1|" + json.dumps(payload, ensure_ascii=False, sort_keys=True)).encode()
+        ("event-bridge-p0-v2|" + json.dumps(payload, ensure_ascii=False, sort_keys=True)).encode()
     ).hexdigest()
 
 

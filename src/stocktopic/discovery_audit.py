@@ -116,6 +116,7 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                     "signature": row["key"].rsplit(":", 1)[-1],
                     "saved_at": row["updated_at"],
                     "strong_stock_count": trace.get("strong_stock_count"),
+                    "input_coverage": trace.get("input_coverage"),
                     "local_clusters": [
                         item
                         for item in trace.get("local_clusters", [])
@@ -146,6 +147,7 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                     ],
                     "single_node_formal": trace.get("single_node_formal"),
                     "single_node_final": trace.get("single_node_final"),
+                    "single_node_verifications": trace.get("single_node_verifications"),
                     "verification_failed": trace.get("verification_failed"),
                     "final_reject_reason": trace.get("final_reject_reason"),
                 }
@@ -184,7 +186,10 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
             if not _relevant([item, members], codes, keywords):
                 continue
             item["members"] = members
-            item["visible_in_current_default_watch_tab"] = item["status"] == "watching"
+            item["visible_in_current_default_watch_tab"] = (
+                item["status"] == "watching" or (item["status"] == "pending"
+                and item["admission_status"] == "early_observation")
+            )
             item["is_local_early_observation"] = item["admission_status"] == "early_observation"
             item["reviews"] = [
                 dict(review)
