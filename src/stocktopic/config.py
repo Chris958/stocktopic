@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 UNIFIED_OPENAI_MODEL = "gpt-5.6-sol"
@@ -69,6 +69,8 @@ class Settings:
     openai_cluster_model: str = UNIFIED_OPENAI_MODEL
     openai_timeout_seconds: float = 120.0
     wecom_bot_webhook: str = ""
+    feishu_bot_webhook: str = field(default="", repr=False)
+    feishu_bot_secret: str = field(default="", repr=False)
     admin_username: str = "admin"
     admin_password: str = ""
     app_api_token: str = ""
@@ -142,6 +144,8 @@ class Settings:
                 min(300.0, float(os.getenv("OPENAI_TIMEOUT_SECONDS", "120"))),
             ),
             wecom_bot_webhook=os.getenv("WECOM_BOT_WEBHOOK", "").strip(),
+            feishu_bot_webhook=os.getenv("FEISHU_BOT_WEBHOOK", "").strip(),
+            feishu_bot_secret=os.getenv("FEISHU_BOT_SECRET", "").strip(),
             admin_username=os.getenv("ADMIN_USERNAME", "admin").strip(),
             admin_password=admin_password,
             app_api_token=app_api_token,
@@ -165,8 +169,8 @@ class Settings:
             warnings.append("TUSHARE_MCP_URL or TUSHARE_TOKEN missing: market data disabled")
         if not self.openai_api_key:
             warnings.append("OPENAI_API_KEY missing: AI naming and news explanation disabled")
-        if not self.wecom_bot_webhook:
-            warnings.append("WeCom group robot webhook not configured: push disabled")
+        if not self.feishu_bot_webhook:
+            warnings.append("Feishu group robot webhook not configured: push disabled")
         return warnings
 
 

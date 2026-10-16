@@ -9,13 +9,13 @@ from stocktopic.api import create_app
 from stocktopic.config import Settings
 
 
-class FailingWeComNotifier:
+class FailingFeishuNotifier:
     enabled = True
 
     def send_text(self, title, body):
         raise RuntimeError(
-            "request failed: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?"
-            "key=sensitive-bot-key&errcode=93000 invalid webhook url"
+            "request failed: https://open.feishu.cn/open-apis/bot/v2/hook/"
+            "sensitive-bot-key code=19001 invalid webhook url"
         )
 
 
@@ -36,7 +36,7 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=0.12.7-discovery2" in page.text
+        assert "app.js?v=0.12.7-feishu1" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")
@@ -156,8 +156,10 @@ def test_api_auth_and_csrf_guard():
         assert duplicate.status_code == 200
         assert duplicate.json()["created"] is False
 
-        app.state.service.notifier = FailingWeComNotifier()
-        response = client.post("/api/v1/admin/wecom-test", headers=basic)
-        assert response.status_code == 502
-        assert "errcode=93000" in response.json()["detail"]
-        assert "sensitive-bot-key" not in response.text
+        app.state.service.notifier = FailingFeishuNotifier()
+        for path in ("/api/v1/admin/feishu-test", "/api/v1/admin/wecom-test"):
+            response = client.post(path, headers=basic)
+            assert response.status_code == 502
+            assert "code=19001" in response.json()["detail"]
+            assert "sensitive-bot-key" not in response.text
+        assert "sensitive-bot-key" not in app.state.service.health()["latest_feishu_error"]

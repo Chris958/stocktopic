@@ -26,6 +26,7 @@ from .dashboard_diagnostics import (
     DashboardTimingMiddleware,
     DashboardTimingRoute,
 )
+from .feishu import redact_feishu_webhook
 from .service import StockTopicService
 from .theme_graph_view import build_theme_graph
 
@@ -418,30 +419,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             source="manual",
         )
 
-    @app.post("/api/v1/admin/wecom-test")
-    async def wecom_test():
+    @app.post("/api/v1/admin/feishu-test")
+    @app.post("/api/v1/admin/wecom-test", include_in_schema=False)
+    async def feishu_test():
         if not service.notifier.enabled:
-            raise HTTPException(status_code=503, detail="WeCom group robot not configured")
+            raise HTTPException(status_code=503, detail="飞书机器人未配置")
         try:
             await asyncio.to_thread(
                 service.notifier.send_text,
                 "StockTopic连接测试",
-                "Mac mini题材情绪系统已成功连接企业微信群机器人。",
+                "Mac mini题材情绪系统已成功连接飞书机器人。本地早期观察仅在网页展示。",
             )
         except Exception as error:
             safe = _safe_integration_error(error)
-            service.database.set_metadata("last_wecom_error", safe)
-            logger.warning("WeCom connection test failed: %s", safe)
+            service.database.set_metadata("last_feishu_error", safe)
+            logger.warning("Feishu connection test failed: %s", safe)
             raise HTTPException(
                 status_code=502,
-                detail=f"企业微信群机器人发送失败：{safe}",
+                detail=f"飞书机器人发送失败：{safe}",
             ) from error
-        service.database.set_metadata("last_wecom_error", "")
+        service.database.set_metadata("last_feishu_error", "")
         service.database.set_metadata(
-            "last_wecom_success_at",
+            "last_feishu_success_at",
             service.clock.china_now().isoformat(timespec="seconds"),
         )
-        return {"ok": True}
+        return {"ok": True, "channel": "feishu"}
 
     return app
 
@@ -527,7 +529,7 @@ def _valid_session_token(settings: Settings, token: str) -> bool:
 
 
 def _safe_integration_error(error: Exception) -> str:
-    message = str(error)
+    message = redact_feishu_webhook(str(error))
     message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)

@@ -26,13 +26,13 @@ from .discovery_ai_policy import (
     NEGATIVE_REVIEW_MINUTES,
 )
 from .domain import StockContext
+from .feishu import FeishuNotifier, redact_feishu_webhook
 from .fund_flow import EastmoneyFlowClient
 from .market_clock import MarketClock
 from .providers import TushareClient
 from .scoring import ThemeScorer
 from .theme_policy import policy_structured_event_clusters as structured_event_clusters
 from .themes import ThemeDiscovery
-from .wecom import WeComNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,9 @@ class StockTopicService:
             timeout=settings.openai_timeout_seconds,
             usage_callback=self.database.record_ai_usage,
         )
-        self.notifier = WeComNotifier(settings.wecom_bot_webhook)
+        self.notifier = FeishuNotifier(
+            settings.feishu_bot_webhook, secret=settings.feishu_bot_secret,
+        )
         self.clock = MarketClock()
         self._collector_lock = threading.Lock()
         self._discovery_lock = threading.Lock()
@@ -717,33 +719,10 @@ class StockTopicService:
         self, trade_date: str, observed_at: datetime,
         semantic_clusters: list[dict[str, Any]] | None = None,
     ) -> list[int]:
-        candidate_ids = self.discovery.discover_for_date(
+        # Local early_observation is page-only, even during a live trading session.
+        return self.discovery.discover_for_date(
             trade_date, observed_at, semantic_clusters=semantic_clusters,
         )
-        # Replay writes audit records without sending retrospective opportunity alerts.
-        if (trade_date != observed_at.strftime("%Y%m%d")
-                or self.clock.session_name(observed_at) not in {"morning", "afternoon"}):
-            return candidate_ids
-        for theme in self.discovery.last_early_observations:
-            members = [m for m in theme.get("members", []) if m.get("active", 1)]
-            if not 2 <= len(members) <= 3:
-                continue
-            # Exact aliases with identical members should produce one notification.
-            member_key = hashlib.sha256(
-                "|".join(sorted(m["code"] for m in members)).encode(),
-            ).hexdigest()[:20]
-            name = str(theme["shared_tag"])
-            self._send_alert(
-                dedupe_key=f"local_observation:{trade_date}:{member_key}",
-                category="local_observation", severity="high",
-                title=f"本地早期观察：{name}", theme_id=int(theme["id"]),
-                body=(f"{len(members)}只当日强势股形成具体节点共振："
-                      + "、".join(f"{m['name']}({m['code']})" for m in members)
-                      + "\n本地确定性观察，尚未验证共同催化；未进入正式题材。"
-                      + f"\n{theme.get('discovery_reason') or ''}"
-                      + f"\n查看：{self.settings.public_base_url}"),
-            )
-        return candidate_ids
 
     def backfill_recent_trade_days(
         self,
@@ -1437,23 +1416,28 @@ class StockTopicService:
         theme_id: int | None = None,
         code: str | None = None,
     ) -> None:
+        if category == "local_observation":
+            return
         alert_id = self.database.create_alert(
             dedupe_key, category, severity, title, body, theme_id, code
         )
-        if alert_id is None or not self.notifier.enabled:
+        if alert_id is None:
+            return
+        self.database.set_metadata(f"alert_push_channel:{alert_id}", "feishu")
+        if not self.notifier.enabled:
             return
         try:
             self.notifier.send_text(title, body)
             self.database.mark_alert_pushed(alert_id)
-            self.database.set_metadata("last_wecom_error", "")
+            self.database.set_metadata("last_feishu_error", "")
             self.database.set_metadata(
-                "last_wecom_success_at", self.clock.china_now().isoformat(timespec="seconds")
+                "last_feishu_success_at", self.clock.china_now().isoformat(timespec="seconds")
             )
         except Exception as error:
             safe = _safe_error(error)
             self.database.mark_alert_pushed(alert_id, safe)
-            self.database.set_metadata("last_wecom_error", safe)
-            logger.warning("WeCom push failed: %s", safe)
+            self.database.set_metadata("last_feishu_error", safe)
+            logger.warning("Feishu push failed: %s", safe)
 
     def end_of_day(self, now: datetime | None = None) -> dict[str, Any]:
         now = self.clock.normalize(now or self.clock.china_now())
@@ -1682,7 +1666,9 @@ class StockTopicService:
                 "tushare_rt_k_enabled": self.settings.tushare_rt_k_enabled,
                 "openai": self.explainer.enabled,
                 "eastmoney_intraday": self.database.get_metadata("eastmoney_intraday_probe"),
-                "wecom_group_robot": self.notifier.enabled,
+                "feishu_group_robot": self.notifier.enabled,
+                "notification_channel": "feishu",
+                "wecom_group_robot": False,
                 "apns": False,
             },
             "latest_catalyst_refresh_at": self.database.get_metadata("last_catalyst_refresh_at"),
@@ -1738,6 +1724,8 @@ class StockTopicService:
             },
             "daily_metrics_trade_date": self.database.get_metadata("daily_metrics_synced_date"),
             "latest_wecom_error": self.database.get_metadata("last_wecom_error"),
+            "latest_feishu_error": self.database.get_metadata("last_feishu_error"),
+            "last_feishu_success_at": self.database.get_metadata("last_feishu_success_at"),
             "last_database_integrity_check": self.database.get_metadata(
                 "last_database_integrity_check"
             ),
@@ -1838,7 +1826,7 @@ def _semantic_signature_events(
 
 
 def _safe_error(error: Exception) -> str:
-    message = str(error)
+    message = redact_feishu_webhook(str(error))
     message = re.sub(r"(?i)(access_token=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)(corpsecret=)[^&\s]+", r"\1***", message)
     message = re.sub(r"(?i)([?&]key=)[^&\s]+", r"\1***", message)

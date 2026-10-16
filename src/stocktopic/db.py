@@ -2301,6 +2301,7 @@ class Database:
             return int(cursor.lastrowid) if cursor.rowcount else None
 
     def mark_alert_pushed(self, alert_id: int, error: str | None = None) -> None:
+        # Legacy column name is retained as a generic delivery flag; metadata records the channel.
         with self.connect() as connection:
             connection.execute(
                 "UPDATE alerts SET pushed_wecom=?, push_error=? WHERE id=?",
@@ -2310,7 +2311,11 @@ class Database:
     def recent_alerts(self, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM alerts ORDER BY created_at DESC LIMIT ?", (limit,)
+                """SELECT a.*, a.pushed_wecom AS pushed,
+                   COALESCE(m.value, CASE WHEN a.pushed_wecom=1 OR a.push_error IS NOT NULL
+                       THEN 'wecom' ELSE '' END) AS push_channel
+                   FROM alerts a LEFT JOIN metadata m ON m.key='alert_push_channel:' || a.id
+                   ORDER BY a.created_at DESC, a.id DESC LIMIT ?""", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
 

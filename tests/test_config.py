@@ -51,3 +51,22 @@ def test_invalid_rt_k_boolean_is_rejected():
     with patch.dict(os.environ, values, clear=True):
         with pytest.raises(RuntimeError, match="TUSHARE_RT_K_ENABLED"):
             Settings.from_env()
+
+
+def test_feishu_secret_is_loaded_without_falling_back_to_wecom():
+    values = {
+        "FEISHU_BOT_WEBHOOK": "https://open.feishu.cn/open-apis/bot/v2/hook/test-private",
+        "FEISHU_BOT_SECRET": "test-signing-secret",
+        "WECOM_BOT_WEBHOOK": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=legacy-test",
+    }
+    with patch.dict(os.environ, values, clear=True):
+        settings = Settings.from_env(require_secrets=False)
+    assert settings.feishu_bot_webhook == values["FEISHU_BOT_WEBHOOK"]
+    assert settings.feishu_bot_secret == "test-signing-secret"
+    assert values["FEISHU_BOT_WEBHOOK"] not in repr(settings)
+    assert "test-signing-secret" not in repr(settings)
+    assert not any("push disabled" in warning for warning in settings.validate_integrations())
+    with patch.dict(os.environ, {"WECOM_BOT_WEBHOOK": values["WECOM_BOT_WEBHOOK"]}, clear=True):
+        settings = Settings.from_env(require_secrets=False)
+    assert settings.feishu_bot_webhook == ""
+    assert any("Feishu" in warning for warning in settings.validate_integrations())

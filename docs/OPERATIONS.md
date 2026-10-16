@@ -16,10 +16,10 @@ curl http://127.0.0.1:8765/health
 - `calendar_unknown_fail_closed`：交易日历同步失败，系统主动停止实时采集。
 - `coverage abnormal`：Tushare返回的有效主板与创业板行情低于当前股票池80%（且至少2000只），本周期不参与计算。
 - `data_stale`：全市场累计成交量和成交额没有变化，本周期信号熔断。
-- `latest_wecom_error`：最近一次企业微信群机器人失败的阶段、errcode和处理建议；空字符串表示最近一次发送成功。
+- `latest_feishu_error`：最近一次飞书机器人失败的错误码及处理建议；`last_feishu_success_at`记录最近成功发送时间。旧`latest_wecom_error`仅为历史兼容字段。
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
 - `discovery_input_coverage`：当日KPL涨停/炸板源状态；`empty_strong_feed`或`unavailable`意味着输入覆盖需检查，即使行情采集任务成功。盘中主板可用本地行情+官方涨停价兜底；缺少官方涨停价不能凑数。
-- `local_observation`预警：2–3股本地观察的独立提醒，不代表已通过AI或正式准入；历史回放不补发机会提醒。
+- 本地`early_observation`：2–3股共振仅在网页展示，不创建预警、不发机器人通知。AI审查后的`early_watch`、正式题材、机会、风险和数据故障仍推送飞书。
 - `ai_usage.policy.discovery_research`记录当前研究预算；`negative_cache_recheck_minutes`与`negative_cache_max_extra_reviews_per_input`记录负面复核频率和单输入上限。`service_runs`的`discovery_ai_recheck`区分新催化复核与接口失败重试。
 - `admission_policy`：当前生效的共同事件4只强势股票、主板涨停/炸板与创业板涨幅超过10%、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
 - `test_pool`：测试票池记录数量和最近一次Tushare正式日线同步任务。
@@ -70,7 +70,7 @@ curl -u '你的管理用户名' \
 
 停止服务，编辑 `.env`，再重新启动。不要把 `.env` 内容发到聊天、Issue或GitHub。
 
-需要重新配置OpenAI或企业微信群机器人时，推荐使用交互脚本，秘密字段输入时不会回显，直接回车会
+需要重新配置OpenAI或飞书机器人时，推荐使用交互脚本，秘密字段输入时不会回显，直接回车会
 保留原值：
 
 ```bash
@@ -92,18 +92,16 @@ curl -u '你的管理用户名' \
 资金模块复用同一Tushare数据通道；`moneyflow`、`moneyflow_dc`、`moneyflow_ths`需分别具有
 权限。调度与迁移见 [资金流说明](FUND_FLOW.md)。
 
-新版只需要企业微信群机器人生成的完整Webhook：
+通知已统一切换飞书，旧`WECOM_BOT_WEBHOOK`不再参与发送，也不会自动回退。
+在Mac上仅更新通知配置并重启，其他数据源、AI及管理账号保持原值：
 
-```dotenv
-WECOM_BOT_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的机器人Key
+```bash
+./scripts/configure_integrations.sh --feishu-only
 ```
 
-在目标企业微信群中添加机器人、复制完整Webhook，然后运行配置脚本并在网页“预警”页点击
-“测试群机器人”。系统不再读取旧版 `WECOM_CORP_ID`、`WECOM_AGENT_ID`、`WECOM_SECRET`、
-`WECOM_TO_USER`，也不调用获取Token和自建应用消息接口，因此不需要企业可信IP。
-
-Webhook中的Key等同密码：只能放在权限为600的`.env`中，不要发送到聊天、日志、Issue或GitHub。
-系统只接受`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...`格式，错误信息在进入页面或日志前会隐藏Key。网络错误、429和上游5xx会短暂重试；`93000`通常表示Webhook或机器人Key无效。
+Webhook采用隐藏输入，写入权限为600的`.env`。若机器人未开启签名校验，签名密钥提示直接回车。
+在网页“预警”页点击“测试飞书机器人”验证实际发送。配置项、错误码及历史送达兼容说明见
+[飞书通知说明](NOTIFICATIONS.md)。
 
 若旧版本出现 `CERTIFICATE_VERIFY_FAILED`，先更新项目并重新运行安装脚本。系统统一使用随项目
 安装的 `certifi` 根证书库，并保持主机名与证书链校验开启；不要使用关闭SSL校验的代码绕过。
