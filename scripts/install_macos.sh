@@ -26,11 +26,11 @@ LOG_DIR="$APP_DIR/logs"
 DATA_DIR="$APP_DIR/data"
 VENV_DIR="$APP_DIR/.venv"
 
-validate_wecom_webhook() {
+validate_feishu_webhook() {
   local value="$1"
-  if [[ -n "$value" && ! "$value" =~ ^https://qyapi\.weixin\.qq\.com(:443)?/cgi-bin/webhook/send\?key=[^[:space:]\&]+$ ]]; then
-    echo "企业微信群机器人Webhook格式无效，请复制机器人生成的完整HTTPS地址。"
-    exit 1
+  if [[ -n "$value" ]]; then
+    printf '%s' "$value" | "$VENV_DIR/bin/python" -c \
+      'import sys; from stocktopic.feishu import validate_feishu_webhook; validate_feishu_webhook(sys.stdin.read())'
   fi
 }
 
@@ -65,8 +65,9 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   OPENAI_BASE_URL_INPUT="${OPENAI_BASE_URL_INPUT:-https://api.openai.com/v1}"
   OPENAI_MODEL_INPUT="gpt-5.6-sol"
   echo "OpenAI模型固定为：$OPENAI_MODEL_INPUT"
-  read -r -s -p "企业微信群机器人完整Webhook（可留空）: " WECOM_BOT_WEBHOOK_INPUT; echo
-  validate_wecom_webhook "$WECOM_BOT_WEBHOOK_INPUT"
+  read -r -s -p "飞书机器人完整Webhook（可留空）: " FEISHU_BOT_WEBHOOK_INPUT; echo
+  validate_feishu_webhook "$FEISHU_BOT_WEBHOOK_INPUT"
+  read -r -s -p "飞书签名密钥（未启用签名校验时留空）: " FEISHU_BOT_SECRET_INPUT; echo
   read -r -p "管理用户名 [admin]: " ADMIN_USER_INPUT
   ADMIN_USER_INPUT="${ADMIN_USER_INPUT:-admin}"
   read -r -s -p "设置管理密码: " ADMIN_PASSWORD_INPUT; echo
@@ -87,7 +88,8 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     printf 'OPENAI_API_KEY=%s\n' "$OPENAI_KEY_INPUT"
     printf 'OPENAI_BASE_URL=%s\n' "$OPENAI_BASE_URL_INPUT"
     printf 'OPENAI_MODEL=%s\n' "$OPENAI_MODEL_INPUT"
-    printf 'WECOM_BOT_WEBHOOK=%s\n' "$WECOM_BOT_WEBHOOK_INPUT"
+    printf 'FEISHU_BOT_WEBHOOK=%s\n' "$FEISHU_BOT_WEBHOOK_INPUT"
+    printf 'FEISHU_BOT_SECRET=%s\n' "$FEISHU_BOT_SECRET_INPUT"
     printf 'ADMIN_USERNAME=%s\n' "$ADMIN_USER_INPUT"
     printf 'ADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD_INPUT"
     printf 'APP_API_TOKEN=%s\n' "$APP_TOKEN"
@@ -153,15 +155,9 @@ if grep -q '^SESSION_COOKIE_DAYS=30$' "$APP_DIR/.env"; then
   echo "已将登录Cookie升级为400天滚动有效期；正常使用时会自动续期。"
 fi
 
-if ! grep -q '^WECOM_BOT_WEBHOOK=' "$APP_DIR/.env"; then
-  WECOM_BOT_WEBHOOK_INPUT=""
-  echo "新版推送已改为企业微信群机器人，不再使用CorpID/AgentID/Secret/UserID。"
-  if [[ -t 0 ]]; then
-    read -r -s -p "请粘贴企业微信群机器人完整Webhook（可留空后再配置）: " WECOM_BOT_WEBHOOK_INPUT; echo
-  fi
-  validate_wecom_webhook "$WECOM_BOT_WEBHOOK_INPUT"
-  printf '\nWECOM_BOT_WEBHOOK=%s\n' "$WECOM_BOT_WEBHOOK_INPUT" >> "$APP_DIR/.env"
-fi
+# Upgrades never reuse the old WeCom webhook or prompt for unrelated integrations.
+append_default "FEISHU_BOT_WEBHOOK" ""
+append_default "FEISHU_BOT_SECRET" ""
 
 if grep -q '^MAXIMUM_CANDIDATES_PER_RUN=4$' "$APP_DIR/.env"; then
   sed -i '' 's/^MAXIMUM_CANDIDATES_PER_RUN=4$/MAXIMUM_CANDIDATES_PER_RUN=0/' "$APP_DIR/.env"

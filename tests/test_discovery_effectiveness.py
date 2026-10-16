@@ -170,7 +170,7 @@ def test_local_observations_are_saved_before_any_bridge_ai(tmp_path):
         themes = service.database.list_themes()
         assert len(themes) == 2
         assert all(t["admission_status"] == "early_observation" for t in themes)
-        assert len(service.database.recent_alerts(10)) == 2
+        assert service.database.recent_alerts(10) == []
         checks.append(True)
         return original(*args, **kwargs)
 

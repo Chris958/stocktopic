@@ -34,7 +34,7 @@ const views = {
   alerts: {
     kicker: '系统预警',
     title: '重要机会与数据故障',
-    description: '新题材、风险和数据拉取异常会记录企业微信群机器人送达状态。'
+    description: '题材、风险和数据异常推送至飞书；本地早期观察仅在网页展示。'
   }
 };
 
@@ -150,7 +150,7 @@ $$('[data-backtest-filter]').forEach(button => button.addEventListener('click', 
 
 $('#refresh').addEventListener('click', () => load(true));
 $('#accountButton').addEventListener('click', event => openSheet('logout', {}, event.currentTarget));
-$('#wecomTest').addEventListener('click', event => openSheet('wecom', {}, event.currentTarget));
+$('#feishuTest').addEventListener('click', event => openSheet('feishu', {}, event.currentTarget));
 $('#sheetBackdrop').addEventListener('click', closeSheet);
 $$('[data-close-sheet]').forEach(button => button.addEventListener('click', closeSheet));
 document.addEventListener('keydown', event => {
@@ -622,9 +622,9 @@ function sheetContent(action, title) {
       kicker: '移除题材', title: `归档“${title}”`, submit: '移除并归档',
       hint: '题材会从当前列表移除，历史数据保留，可在“已归档”中恢复。'
     },
-    wecom: {
-      kicker: '通知通道', title: '测试企业微信群机器人', submit: '发送测试消息',
-      hint: '失败时会显示取Token、可信IP、接收账号或网络阶段的具体errcode。'
+    feishu: {
+      kicker: '通知通道', title: '测试飞书机器人', submit: '发送测试消息',
+      hint: '发送一条连接测试消息；失败时显示飞书错误码和处理建议。'
     },
     logout: {
       kicker: '当前账户', title: '退出 StockTopic', submit: '退出登录',
@@ -654,15 +654,15 @@ $('#sheetForm').addEventListener('submit', async event => {
       await api(`/api/v1/themes/${theme.id}/explain`, { method: 'POST' });
     } else if (action === 'archive') {
       await api(`/api/v1/themes/${theme.id}/archive`, { method: 'POST' });
-    } else if (action === 'wecom') {
-      await api('/api/v1/admin/wecom-test', { method: 'POST' });
+    } else if (action === 'feishu') {
+      await api('/api/v1/admin/feishu-test', { method: 'POST' });
     } else if (action === 'logout') {
       await api('/api/v1/auth/logout', { method: 'POST' });
       closeSheet(); showLogin(); toast('已退出当前账户'); return;
     }
     closeSheet();
     await load();
-    toast(action === 'wecom' ? '群机器人测试消息已送达' : '操作已完成');
+    toast(action === 'feishu' ? '飞书机器人测试消息已送达' : '操作已完成');
   } catch (error) {
     $('#sheetHint').textContent = error.message;
     toast(error.message, true);
@@ -674,10 +674,11 @@ $('#sheetForm').addEventListener('submit', async event => {
 
 function renderAlerts(items) {
   $('#alertList').innerHTML = items.length ? items.map(item => {
-    const delivery = item.pushed_wecom
-      ? '<span class="delivery-ok">群机器人已送达</span>'
+    const channel = item.push_channel === 'feishu' ? '飞书' : '企业微信';
+    const delivery = (item.pushed ?? item.pushed_wecom)
+      ? `<span class="delivery-ok">${channel}已送达</span>`
       : item.push_error
-        ? `<span class="delivery-failed" title="${escapeHtml(item.push_error)}">群机器人失败</span>`
+        ? `<span class="delivery-failed" title="${escapeHtml(item.push_error)}">${channel}失败</span>`
         : '<span class="delivery-pending">未推送</span>';
     return `<article class="event-card">
       <time class="event-time">${escapeHtml(formatDataTime(item.created_at))}</time>

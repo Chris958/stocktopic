@@ -143,7 +143,7 @@ def test_unknown_first_observation_cannot_manufacture_bridge_time_synchronizatio
     assert len(detector.detect(DAY, events, policy_structured_event_clusters(events))) == 1
 
 
-def test_three_local_stocks_alert_once_without_ai_then_four_require_formal_review(service):
+def test_three_local_stocks_are_silent_without_ai_then_four_require_formal_review(service):
     db = service.database
     calls = []
     messages = []
@@ -171,11 +171,10 @@ def test_three_local_stocks_alert_once_without_ai_then_four_require_formal_revie
     early = db.list_themes()[0]
     assert early["admission_status"] == "early_observation"
     assert calls == []
-    assert len(messages) == 1
-    assert "本地早期观察" in messages[0][0]
-    assert db.recent_alerts(10)[0]["pushed_wecom"] == 1
+    assert messages == []
+    assert db.recent_alerts(10) == []
     service.discover_trade_date(DAY, NOW + timedelta(minutes=5))
-    assert len(messages) == 1
+    assert messages == []
     db.upsert_mainboard_limit_events(DAY, [quote(3)], limits)
     ids = service.discover_trade_date(DAY, NOW + timedelta(minutes=10))
     assert ids == [early["id"]]  # Same stable anchor/theme ID as it grows.
@@ -184,6 +183,7 @@ def test_three_local_stocks_alert_once_without_ai_then_four_require_formal_revie
     candidate = db.get_theme(ids[0])
     assert candidate["status"] == "pending"  # Admission has not been bypassed.
     assert candidate["admission_status"] == "awaiting_ai"
+    assert messages == []  # Formal admission must succeed before a notification is emitted.
     compact = _compact_evidence(candidate["members"][0]["evidence"])
     assert compact["canonical_name"] == "AI短剧IP内容生产催化"
     assert compact["common_logic"] == "AI漫剧制作带动IP改编授权"

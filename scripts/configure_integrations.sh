@@ -9,9 +9,9 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-"$PYTHON_BIN" "$APP_DIR/scripts/configure_integrations.py"
+"$PYTHON_BIN" "$APP_DIR/scripts/configure_integrations.py" "$@"
 launchctl kickstart -k "gui/$(id -u)/com.chris958.stocktopic"
 
 echo "服务已重启。请运行：$APP_DIR/scripts/doctor.sh"
 echo "Tushare默认使用官方Token直连，也可选MCP；doctor会执行一次不含秘密信息的连通性检查。"
-echo "群机器人可在网页预警页面点击“测试群机器人”。"
+echo "飞书机器人可在网页预警页面点击“测试飞书机器人”。"

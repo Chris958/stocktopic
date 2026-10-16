@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import argparse
 import getpass
 import os
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
+
+from stocktopic.feishu import FeishuDeliveryError, validate_feishu_webhook
 
 APP_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = APP_DIR / ".env"
@@ -80,11 +83,14 @@ def upsert(lines: list[str], updates: dict[str, str]) -> list[str]:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="安全更新本机集成配置")
+    parser.add_argument("--feishu-only", action="store_true", help="只更新飞书机器人配置")
+    args = parser.parse_args()
     values = read_values()
     print("===== STOCKTOPIC INTEGRATION CONFIG =====")
     print("敏感值不会显示；秘密字段直接回车会保留原值。")
     print("AI模型固定为 gpt-5.6-sol；所有AI任务使用同一模型。")
-    updates = {
+    updates = {} if args.feishu_only else {
         "TUSHARE_TOKEN": prompt_value(
             "Tushare官方Token（推荐）",
             values.get("TUSHARE_TOKEN", ""),
@@ -113,12 +119,27 @@ def main() -> None:
         "OPENAI_CATALYST_MODEL": "gpt-5.6-sol",
         "OPENAI_ADMISSION_MODEL": "gpt-5.6-sol",
         "OPENAI_CLUSTER_MODEL": "gpt-5.6-sol",
-        "WECOM_BOT_WEBHOOK": prompt_value(
-            "企业微信群机器人完整Webhook",
-            values.get("WECOM_BOT_WEBHOOK", ""),
-            secret=True,
-        ),
     }
+    updates.update({
+        "FEISHU_BOT_WEBHOOK": prompt_value(
+            "飞书机器人完整Webhook",
+            values.get("FEISHU_BOT_WEBHOOK", ""), secret=True, allow_clear=True,
+        ),
+        "FEISHU_BOT_SECRET": prompt_value(
+            "飞书签名密钥（仅启用签名校验时填写，可留空）",
+            values.get("FEISHU_BOT_SECRET", ""), secret=True, allow_clear=True,
+        ),
+    })
+    if any("\n" in value or "\r" in value for value in updates.values()):
+        raise SystemExit("配置值不能包含换行。")
+    try:
+        if updates["FEISHU_BOT_WEBHOOK"]:
+            validate_feishu_webhook(updates["FEISHU_BOT_WEBHOOK"])
+    except FeishuDeliveryError as error:
+        raise SystemExit(str(error)) from None
+    if args.feishu_only:
+        write_updates(updates)
+        return
     mcp_url = urlsplit(updates["TUSHARE_MCP_URL"])
     if updates["TUSHARE_MCP_URL"] and not (
         mcp_url.scheme in {"http", "https"}
@@ -133,28 +154,10 @@ def main() -> None:
     base = urlsplit(updates["OPENAI_BASE_URL"])
     if updates["OPENAI_API_KEY"] and (base.scheme not in {"http", "https"} or not base.netloc):
         raise SystemExit("OpenAI Base URL必须是完整的http(s)地址。")
-    webhook = urlsplit(updates["WECOM_BOT_WEBHOOK"])
-    webhook_query = parse_qs(webhook.query, keep_blank_values=True)
-    try:
-        webhook_port = webhook.port
-    except ValueError:
-        webhook_port = -1
-    if updates["WECOM_BOT_WEBHOOK"] and not (
-        webhook.scheme == "https"
-        and webhook.hostname == "qyapi.weixin.qq.com"
-        and webhook_port in {None, 443}
-        and webhook.username is None
-        and webhook.password is None
-        and not webhook.fragment
-        and webhook.path == "/cgi-bin/webhook/send"
-        and set(webhook_query) == {"key"}
-        and len(webhook_query["key"]) == 1
-        and webhook_query["key"][0].strip()
-    ):
-        raise SystemExit("企业微信群机器人Webhook格式无效，请复制机器人生成的完整HTTPS地址。")
-    if any("\n" in value or "\r" in value for value in updates.values()):
-        raise SystemExit("配置值不能包含换行。")
+    write_updates(updates)
 
+
+def write_updates(updates: dict[str, str]) -> None:
     lines = ENV_PATH.read_text(encoding="utf-8").splitlines()
     new_lines = upsert(lines, updates)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".env.", dir=APP_DIR, text=True)
