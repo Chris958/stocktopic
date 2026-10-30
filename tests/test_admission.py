@@ -140,7 +140,7 @@ def test_candidate_is_auto_admitted_only_after_ai_and_member_validation():
             "600003.SH",
             "600004.SH",
         }
-        assert service.notifier.messages[0][0] == "正式题材：液冷超节点"
+        assert service.notifier.messages[0][0] == "正式题材：算力"
 
 
 class SupplyChainAdmissionExplainer(PassingAdmissionExplainer):
@@ -223,7 +223,7 @@ def test_supply_chain_theme_enters_early_watch_and_pushes_without_formal_confirm
         assert theme["theme_level"] == "early_watch"
         assert theme["evidence_grade"] == "supply_chain_unconfirmed"
         assert theme["admission_review"]["decision_level"] == "early_watch"
-        assert service.notifier.messages[0][0] == "早期观察：英伟达PTFE正交背板"
+        assert service.notifier.messages[0][0] == "早期观察：PCB"
 
 
 class RepeatedThemeExplainer(PassingAdmissionExplainer):

@@ -34,6 +34,7 @@ from .market_clock import MarketClock
 from .market_cycles import MarketCycleTracker
 from .providers import TushareClient
 from .scoring import ThemeScorer
+from .theme_directions import DirectionDeferred, ThemeDirectionPool
 from .theme_policy import policy_structured_event_clusters as structured_event_clusters
 from .themes import ThemeDiscovery
 
@@ -69,6 +70,7 @@ class StockTopicService:
         self.clock = MarketClock()
         self.data_readiness = DiscoveryDataReadiness(self)
         self.market_cycles = MarketCycleTracker(self.database)
+        self.direction_pool = ThemeDirectionPool(self.database)
         self._collector_lock = threading.Lock()
         self._discovery_lock = threading.Lock()
         self._ai_lock = threading.Lock()
@@ -93,6 +95,7 @@ class StockTopicService:
     def initialize_storage(self) -> None:
         self.settings.ensure_directories()
         self.database.initialize()
+        self.direction_pool.normalize_existing(self.clock.china_now())
         recovered_ai = self.database.recover_interrupted_ai_analyses()
         if recovered_ai:
             self.database.set_metadata(
@@ -529,6 +532,7 @@ class StockTopicService:
         observed_at = self.clock.normalize(now or self.clock.china_now())
         with self._discovery_lock:
             events = self.database.limit_touch_events(trade_date)
+            known_directions = self.direction_pool.observe(trade_date, observed_at, events)
             local = structured_event_clusters(events, include_broad_parents=True)
             limit_readiness = json.loads(self.database.get_metadata(
                 f"daily_limit_readiness:{trade_date}") or "null")
@@ -540,7 +544,7 @@ class StockTopicService:
             if complete is None and (kpl_coverage or {}).get("state") == "available":
                 complete = True
             self.market_cycles.observe(
-                trade_date, observed_at, events, local,
+                trade_date, observed_at, events, [*local, *known_directions],
                 coverage_complete=complete,
             )
             coverage = {
@@ -567,6 +571,13 @@ class StockTopicService:
                 events, self.settings.minimum_limit_touches
             )
             input_signature = _semantic_event_signature(signature_events)
+            if known_directions:
+                input_signature = hashlib.sha256(json.dumps({
+                    "events": input_signature, "direction_policy": 1,
+                    "nodes": [{k: c.get(k) for k in (
+                        "tag", "member_codes", "known_direction_id", "archive_epoch",
+                    )} for c in known_directions],
+                }, sort_keys=True).encode()).hexdigest()
             cached = self.database.semantic_cluster_run(trade_date, input_signature)
             trace_key = f"discovery_trace:{trade_date}:{input_signature}"
             self.database.set_metadata(f"discovery_trace_latest:{trade_date}", input_signature)
@@ -585,7 +596,7 @@ class StockTopicService:
                 )]
                 # Observations reach storage/UI/notifications before any slower AI work.
                 self._save_discovery(trade_date, observed_at, local_early_now)
-            has_verification_input = bool(bridges) or any(
+            has_verification_input = bool(bridges or known_directions) or any(
                 len(c["member_codes"]) >= 4 and c["tag"] not in {"文化传媒", "传媒"}
                 for c in local
             )
@@ -647,6 +658,8 @@ class StockTopicService:
                         events,
                         self.settings.minimum_limit_touches,
                         **({"review_scope": review_scope} if recheck and unresolved else {}),
+                        **({"known_direction_clusters": known_directions}
+                           if known_directions else {}),
                     )
                     if recheck and previous_formal:
                         new_tags = {c["tag"] for c in semantic_clusters}
@@ -754,6 +767,10 @@ class StockTopicService:
         semantic_clusters: list[dict[str, Any]] | None = None,
     ) -> list[int]:
         # Local early_observation is page-only, even during a live trading session.
+        if semantic_clusters is not None:
+            semantic_clusters = self.direction_pool.prepare_clusters(
+                trade_date, observed_at, semantic_clusters,
+            )
         return self.discovery.discover_for_date(
             trade_date, observed_at, semantic_clusters=semantic_clusters,
         )
@@ -953,6 +970,9 @@ class StockTopicService:
                 signal_coverage = self.data_readiness.signal_coverage(
                     compact, started, quotes, limits,
                 )
+                self.direction_pool.observe(
+                    compact, started, self.database.limit_touch_events(compact),
+                )
                 scored_ids = self.scorer.score_confirmed(started)
                 self._evaluate_theme_alerts(started, scored_ids, stale=False)
                 self.database.finish_run(
@@ -1000,7 +1020,11 @@ class StockTopicService:
                 theme = themes.get(theme_id)
                 if not theme or theme.get("status") not in {"pending", "watching"}:
                     continue
+                if len({m["code"] for m in theme.get("members", []) if m.get("active", 1)}) < 4:
+                    continue
                 try:
+                    direction_context = self.direction_pool.admission_context(theme)
+                    theme["direction_context"] = direction_context
                     self.database.set_admission_status(
                         theme_id, "analyzing", "正在进行60交易日新颖性与持续性审查"
                     )
@@ -1028,6 +1052,17 @@ class StockTopicService:
                     aliases.append(str(theme["shared_tag"]))
                     stock_pool = self.database.eligible_members_for_tags(aliases, limit=80)
                     item = self.explainer.assess_for_admission(theme, history, stock_pool)
+                    # A manual archive while AI is running must survive this response.
+                    with self.database.connect() as con:
+                        current_status = con.execute(
+                            "SELECT status FROM candidate_themes WHERE id=?", (theme_id,),
+                        ).fetchone()[0]
+                    if current_status not in {"pending", "watching"}:
+                        continue
+                    item["event_name"] = (item.get("event_name")
+                        or direction_context.get("event_name") or item["suggested_name"])
+                    item["suggested_name"] = direction_context.get("name") or item["suggested_name"]
+                    continuation = bool(direction_context.get("target_id"))
                     valid_history_ids = {int(match["id"]) for match in history}
                     cited_history_ids = {
                         int(value)
@@ -1089,14 +1124,15 @@ class StockTopicService:
                         >= self.settings.leader_upside_threshold_pct
                     )
                     core_checks = {
-                        "new_theme": bool(item.get("is_new_theme")),
+                        "new_theme": continuation or bool(item.get("is_new_theme")),
                         "novelty_confidence": float(item.get("novelty_confidence") or 0)
-                        >= self.settings.novelty_confidence_threshold,
+                        >= self.settings.novelty_confidence_threshold or continuation,
                         "catalyst_confidence": float(item.get("catalyst_confidence") or 0)
                         >= self.settings.catalyst_confidence_threshold,
                         "source_available": source_count >= 1,
                         "duration_or_upside": duration_gate or upside_gate,
                         "valid_leader": str(item.get("leader_candidate_code") or "") in valid_codes,
+                        "market_breadth": len(set(trigger_codes)) >= 4,
                     }
                     evidence_grade = _admission_evidence_grade(item.get("catalysts", []))
                     core_passed = all(core_checks.values())
@@ -1110,7 +1146,8 @@ class StockTopicService:
                             else "多源产业证据交叉验证"
                         )
                         decision_reason = (
-                            "正式题材：市场共识、持续性与新颖性通过，且已有"
+                            ("正式方向延续/再发酵：当日共振、关系与持续性通过，沿用已有方向；"
+                             if continuation else "正式题材：市场共识、持续性与新颖性通过，且已有")
                             + evidence_reason
                         )
                     elif core_passed:
@@ -1131,10 +1168,26 @@ class StockTopicService:
                         failed = _failed_check_labels(core_checks)
                         decision_reason = "未纳入：" + "、".join(failed)
                     admitted = decision_level == "formal"
+                    outcome = None
+                    if admitted:
+                        self.database.add_validated_members(
+                            theme_id, validated_members, self.clock.china_now().isoformat(),
+                        )
+                        # Finalize before recording a successful admission. A changed
+                        # archive must leave a deferred trace rather than a false formal review.
+                        outcome = self.direction_pool.admit(
+                            theme, direction_context, item, self.clock.china_now(),
+                        )
                     self.database.set_metadata(
                         f"admission_trace:{theme_id}",
                         json.dumps({"trade_date": compact, "theme_id": theme_id,
                                     "novelty_mode": item.get("novelty_mode"),
+                                    "admission_route": (
+                                        "direction_continuation" if direction_context.get(
+                                            "known_formal") else "direction_reactivation"
+                                        if continuation else "new_direction"),
+                                    "novelty_required": not continuation,
+                                    "direction_context": direction_context,
                                     "admission_result": decision_level,
                                     "checks": core_checks, "final_reject_reason": (
                                         decision_reason if not admitted else ""),
@@ -1169,26 +1222,42 @@ class StockTopicService:
                     self.database.save_theme_catalysts(theme_id, item.get("catalysts", []))
                     self.database.set_suggested_name(theme_id, item["suggested_name"])
                     if decision_level in {"formal", "early_watch"}:
-                        self.database.add_validated_members(
-                            theme_id,
-                            validated_members,
-                            self.clock.china_now().isoformat(timespec="seconds"),
-                        )
+                        if not admitted:
+                            self.database.add_validated_members(
+                                theme_id, validated_members,
+                                self.clock.china_now().isoformat(timespec="seconds"),
+                            )
                         if decision_level == "formal":
-                            self.discovery.confirm(
-                                theme_id,
-                                item["suggested_name"],
-                                float(item.get("catalyst_confidence") or 0),
-                                f"预估{item['expected_duration_days']}个交易日",
-                            )
+                            target_id = outcome["theme_id"]
+                            if target_id != theme_id:
+                                saved_trace = json.loads(self.database.get_metadata(
+                                    f"admission_trace:{theme_id}") or "{}")
+                                self.database.set_metadata(
+                                    f"admission_trace:{target_id}", json.dumps({
+                                    **saved_trace, "theme_id": target_id,
+                                    "event_candidate_id": theme_id,
+                                        "reentry_key": outcome["reentry_key"],
+                                    }, ensure_ascii=False))
+                                self.database.save_ai_explanation(target_id, explanation)
+                                self.database.save_theme_catalysts(
+                                    target_id, item.get("catalysts", []),
+                                )
+                                self.database.save_admission_review(
+                                    target_id, item, history, validated_members, admitted,
+                                    decision_level, decision_reason,
+                                )
                             self.database.set_admission_status(
-                                theme_id, "admitted", decision_reason, evidence_grade
+                                target_id, "admitted", decision_reason, evidence_grade
                             )
-                            confirmed = self.database.get_theme(theme_id) or {}
+                            confirmed = self.database.get_theme(target_id) or {}
                             score = self.scorer.calculate(confirmed, self.clock.china_now())
                             if score:
-                                self.database.save_score(theme_id, score)
-                            self._send_new_theme_alert(theme_id, item, confirmed, "formal")
+                                self.database.save_score(target_id, score)
+                            if outcome["activated"]:
+                                item["reentry_key"] = outcome["reentry_key"]
+                                item["formal_reentry"] = outcome["reactivated"] and bool(
+                                    direction_context.get("known_formal"))
+                                self._send_new_theme_alert(target_id, item, confirmed, "formal")
                         else:
                             self.database.set_theme_status(
                                 theme_id,
@@ -1207,6 +1276,12 @@ class StockTopicService:
                         self.database.set_admission_status(
                             theme_id, "not_admitted", decision_reason, evidence_grade
                         )
+                except DirectionDeferred as error:
+                    self.database.set_admission_status(theme_id, "direction_deferred", str(error))
+                    self.database.set_metadata(f"admission_trace:{theme_id}", json.dumps({
+                        "theme_id": theme_id, "admission_result": "direction_deferred",
+                        "final_reject_reason": str(error),
+                    }))
                 except Exception as error:
                     self.database.set_admission_status(
                         theme_id, "analysis_failed", _safe_error(error)
@@ -1381,10 +1456,12 @@ class StockTopicService:
             f"查看：{self.settings.public_base_url}"
         )
         self._send_alert(
-            dedupe_key=f"theme_level:{level}:{theme_id}",
+            dedupe_key=f"theme_level:{level}:{theme_id}"
+            + (f":reentry:{review['reentry_key']}" if review.get("reentry_key") else ""),
             category="formal_theme" if level == "formal" else "early_watch_theme",
             severity="critical" if level == "formal" else "high",
-            title=(f"正式题材：{name}" if level == "formal" else f"早期观察：{name}"),
+            title=(f"正式题材重新入池：{name}" if review.get("formal_reentry")
+                   else f"正式题材：{name}" if level == "formal" else f"早期观察：{name}"),
             body=body,
             theme_id=theme_id,
         )
@@ -1817,6 +1894,11 @@ class StockTopicService:
                 "novelty_window_approx_calendar_days": 90,
                 "minimum_expected_duration_days": (self.settings.minimum_expected_duration_days),
                 "leader_upside_threshold_pct": self.settings.leader_upside_threshold_pct,
+                "pool_identity": "investable_direction",
+                "archived_directions_keep_tracking": True,
+                "continuation_novelty_veto": False,
+                "archived_reentry_minimum_strong_stocks": 4,
+                "automatic_member_addition": "local_graph_and_same_day_strength",
             },
             "warnings": warnings,
         }
@@ -1994,5 +2076,6 @@ def _failed_check_labels(checks: dict[str, bool]) -> list[str]:
         "source_available": "没有可核验新闻来源",
         "duration_or_upside": "未满足持续3日或龙头30%情景空间",
         "valid_leader": "龙头候选缺少确定性股票证据",
+        "market_breadth": "当日强势股不足4只",
     }
     return [labels.get(key, key) for key, passed in checks.items() if not passed]

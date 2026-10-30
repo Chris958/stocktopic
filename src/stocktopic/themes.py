@@ -110,6 +110,13 @@ class ThemeDiscovery:
             # a >=4-stock formal candidate on the same trading day. Formal AI output
             # preserves this graph anchor tag and only refines canonical_name/logic.
             fingerprint = self.fingerprint_for_date(trade_date, tag)
+            direction_context = item.get("direction_context") or {}
+            review_identity = (direction_context.get("review_identity")
+                               or direction_context.get("archive_epoch"))
+            if review_identity:
+                fingerprint = hashlib.sha256(
+                    f"{fingerprint}|reentry|{review_identity}".encode()
+                ).hexdigest()
             ordered = sorted(
                 item["members"],
                 key=lambda member: (
@@ -185,10 +192,20 @@ class ThemeDiscovery:
             admission_status = (
                 "awaiting_ai" if stage == "formal_candidate" else "early_observation"
             )
+            reopen = False
+            if direction_context.get("evidence_revision"):
+                with self.database.connect() as con:
+                    previous = con.execute("SELECT id,status FROM candidate_themes "
+                                           "WHERE fingerprint=?", (fingerprint,)).fetchone()
+                if previous and previous["status"] == "rejected":
+                    old_context = json.loads(self.database.get_metadata(
+                        f"direction_event:{previous['id']}") or "{}")
+                    reopen = (old_context.get("evidence_revision")
+                              != direction_context["evidence_revision"])
             theme_id = self.database.upsert_candidate(
                 fingerprint=fingerprint,
                 provisional_name=(
-                    f"{item.get('canonical_name') or tag}"
+                    f"{item.get('direction_name') or item.get('canonical_name') or tag}"
                     + ("待审" if stage == "formal_candidate" else "观察")
                 ),
                 shared_tag=tag,
@@ -201,7 +218,14 @@ class ThemeDiscovery:
                 cluster_method=method,
                 cluster_confidence=float(item.get("cluster_confidence") or 0),
                 cluster_aliases=item.get("aliases") or [tag],
+                reopen_rejected=reopen,
+                replace_trigger_members=(stage == "formal_candidate"
+                                         and method in {"semantic_event", "event_bridge"}),
             )
+            if direction_context:
+                self.database.set_metadata(f"direction_event:{theme_id}", json.dumps(
+                    direction_context, ensure_ascii=False,
+                ))
             self.database.save_theme_catalysts(theme_id, item.get("catalysts") or [])
             theme = self.database.get_theme(theme_id)
             if (theme and theme.get("status") == "pending"

@@ -313,6 +313,7 @@ partial_merge只保留明确接受节点及其成员；至少两个节点、每�
 不同业务角色、接力或未知启动时间均不能自行证明共同催化；禁止补造时间或夸大同步。
 无可靠共同催化证据则reject。anchor_tag不得改变。置信度使用0_100量纲，例如93。只返回JSON：
 {"decision":"merge|partial_merge|reject","canonical_name":"具体事件名",
+"direction_name":"由输入业务与common_logic支持的共同产业大方向，例如机器人",
 "common_logic":"共同因果链","accepted_nodes":[],"member_codes":[],
 "member_reasons":[{"code":"","reason":""}],
 "catalysts":[{"title":"标题","summary":"与共同事件关系","url":"实际搜索URL",
@@ -387,6 +388,7 @@ partial_merge只保留明确接受节点及其成员；至少两个节点、每�
     return {
         "tag": anchor,
         "canonical_name": name,
+        "direction_name": str(parsed.get("direction_name") or ""),
         "common_logic": logic,
         "member_codes": sorted(set(returned)),
         "member_reasons": reasons,

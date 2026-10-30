@@ -10,12 +10,16 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .board_status import parse_board_status
+from .theme_directions import label_direction
 from .theme_graph import is_broad_parent_tag
 
 STATE_KEY = "market_cycles_v1"
 
 
 def cycle_family(tag: str) -> str:
+    direction = label_direction(tag)
+    if direction:
+        return direction
     text = re.sub(r"(?:概念|板块)$", "", tag).strip()
     # Market context only. These aliases never merge investable event nodes or
     # authorize an AI member outside its original local node.
@@ -217,7 +221,8 @@ class MarketCycleTracker:
                 continue
             if latest["trade_date"] not in recent:
                 continue
-            related = [r for r in refs if cycle_family(r["shared_tag"]) == cycle["family"]]
+            related = [r for r in refs if cycle_family(r["shared_tag"]) == cycle["family"]
+                       or cycle_family(r["name"]) == cycle["family"]]
             admitted = [r for r in related if r["qualified_event"]]
             if (
                 latest["touch_count"] < 4
@@ -230,7 +235,6 @@ class MarketCycleTracker:
                 r
                 for r in admitted
                 if r["status"] in {"confirmed", "watching"}
-                and r["day1_date"].replace("-", "") >= cycle["start_trade_date"]
             ]
             history = [
                 {

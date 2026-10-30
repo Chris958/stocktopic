@@ -144,7 +144,7 @@ def test_missing_market_coverage_is_not_treated_as_cycle_cooling(service):
     assert cycle["latest"]["promotion_count"] is None
 
 
-def test_archived_formal_event_is_context_and_is_never_automatically_restored(service):
+def test_market_observation_alone_does_not_restore_archived_event(service):
     theme_id = service.database.upsert_candidate(
         fingerprint="old",
         provisional_name="具体机器人事件",

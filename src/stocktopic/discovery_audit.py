@@ -216,6 +216,13 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
             if not _relevant([item, members], codes, keywords):
                 continue
             item["members"] = members
+            for prefix in ("direction_state", "direction_event", "direction_archive"):
+                saved_direction = con.execute("SELECT value FROM metadata WHERE key=?",
+                                              (f"{prefix}:{item['id']}",)).fetchone()
+                item[prefix] = _json(saved_direction[0], {}) if saved_direction else {}
+            daily_tracking = con.execute("SELECT value FROM metadata WHERE key=?",
+                                         (f"direction_tracking:{day}:{item['id']}",)).fetchone()
+            item["direction_tracking"] = _json(daily_tracking[0], {}) if daily_tracking else {}
             item["visible_in_current_default_watch_tab"] = (
                 item["status"] == "watching" or (item["status"] == "pending"
                 and item["admission_status"] == "early_observation")
@@ -238,6 +245,10 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                 key: trace.get(key)
                 for key in (
                     "novelty_mode",
+                    "admission_route",
+                    "novelty_required",
+                    "direction_context",
+                    "event_candidate_id",
                     "admission_result",
                     "checks",
                     "final_reject_reason",

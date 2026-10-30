@@ -23,8 +23,8 @@ const views = {
   },
   confirmed: {
     kicker: '重点题材库',
-    title: '已经通过多源证据验证',
-    description: '正式题材通过持续性审查与官方信息或多源产业证据交叉验证。'
+    title: '跟踪已经形成共识的大方向',
+    description: '机器人等方向持续跟踪，具体事件作为催化；每日按本地证据更新强势成员。'
   },
   backtest: {
     kicker: '测试票池',
@@ -246,7 +246,7 @@ function renderMarketCycles() {
     const current = cycle.latest;
     const ladder = Object.entries(current.board_ladder || {}).sort((a, b) => Number(b[0]) - Number(a[0]))
       .map(([height, count]) => `${height}板 ${count}只`).join(' · ');
-    const admission = cycle.event_admission === 'linked_active_event' ? '关联已准入事件'
+    const admission = cycle.event_admission === 'linked_active_event' ? '关联已准入方向'
       : cycle.event_admission === 'historical_event_only' ? '有关联历史题材，当前事件待验证'
       : '共同催化待验证';
     const comparison = current.comparison_trade_date && current.new_strong_count != null
@@ -344,6 +344,7 @@ function themeCard(theme, mode) {
   const rejected = theme.status === 'rejected';
   const archived = mode === 'archived';
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
+  const eventName = theme.direction_state?.latest_event_name || theme.direction_context?.event_name;
   const activeMembers = theme.members.filter(member => member.active);
   const returnLabel = pending || watching || rejected ? '触发后' : '入库后';
   const backtest = state.data?.backtest || { entries: [] };
@@ -405,13 +406,14 @@ function themeCard(theme, mode) {
     actions = `<div class="card-actions">
       <button class="secondary-button pressable" data-action="toggle-pin" data-id="${theme.id}">${theme.pinned ? '取消置顶' : '置顶'}</button>
       <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">更新新闻催化</button>
-      <button class="text-button danger pressable" data-action="archive" data-id="${theme.id}">移除并归档</button>
+      <button class="text-button danger pressable" data-action="archive" data-id="${theme.id}">归档并继续跟踪</button>
     </div>`;
   } else if (archived) {
     actions = `<div class="card-actions"><button class="secondary-button pressable" data-action="restore" data-id="${theme.id}">恢复到题材库</button></div>`;
   }
   return `<article class="theme-card ${theme.pinned ? 'pinned-theme' : ''} stage-${escapeHtml(theme.theme_level || theme.status)}">
     <div class="theme-head"><div><div class="theme-title">${theme.pinned ? '<span class="pin-mark">置顶</span>' : ''}${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
+    ${eventName ? `<p class="catalyst-summary">当前催化：${escapeHtml(eventName)}</p>` : ''}
     ${statusHtml}${scoreHtml}${reviewHtml}${decisionHtml}${summaryHtml}${fundFlowHtml}${stockDetails}
     <p class="theme-footnote">Day 1 ${escapeHtml(theme.day1_date)} · 行情 ${escapeHtml(formatDataTime(summary.market_data_at))} · 市值 ${escapeHtml(formatDate(summary.metric_trade_date))}</p>
     ${newsDetails}${actions}
@@ -658,8 +660,8 @@ function sheetContent(action, title) {
       hint: '将搜索近期及海外隔夜催化，保存来源、时间和证据等级。'
     },
     archive: {
-      kicker: '移除题材', title: `归档“${title}”`, submit: '移除并归档',
-      hint: '题材会从当前列表移除，历史数据保留，可在“已归档”中恢复。'
+      kicker: '归档题材', title: `归档“${title}”`, submit: '归档并继续跟踪',
+      hint: '暂时移出当前池并保留历史。后续四股再共振并通过验证时，可自动重新入池；也可手动恢复。'
     },
     feishu: {
       kicker: '通知通道', title: '测试飞书机器人', submit: '发送测试消息',

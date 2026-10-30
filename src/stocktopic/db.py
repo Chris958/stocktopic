@@ -339,6 +339,100 @@ class Database:
             ).fetchall()
         return {row["market"]: row["n"] for row in rows}
 
+    def direction_tracking_rows(self) -> list[dict]:
+        """Lightweight previously admitted pools, including manually archived pools."""
+        with self.connect() as con:
+            rows = [dict(r) for r in con.execute(
+                "SELECT t.*, (t.status='confirmed' OR t.theme_level='formal' "
+                "OR t.admission_status='admitted' OR EXISTS "
+                "(SELECT 1 FROM theme_admission_reviews r "
+                "WHERE r.theme_id=t.id AND r.decision_level='formal')) AS qualified_formal "
+                "FROM candidate_themes t WHERE t.status IN ('confirmed','watching','archived')"
+            )]
+            members = {}
+            for row in con.execute(
+                "SELECT theme_id,code,name,active FROM theme_members WHERE active=1"
+            ):
+                members.setdefault(row["theme_id"], []).append(dict(row))
+            states = {int(r["key"].split(":")[1]): json.loads(r["value"])
+                      for r in con.execute("SELECT key,value FROM metadata "
+                                           "WHERE key LIKE 'direction_state:%'")}
+        for row in rows:
+            row["members"] = members.get(row["id"], [])
+            row["direction_state"] = states.get(row["id"], {})
+        return rows
+
+    def name_theme_direction(self, theme_id: int, name: str) -> None:
+        with self.connect() as con:
+            con.execute("UPDATE candidate_themes SET final_name=?,suggested_name=? "
+                        "WHERE id=? AND (final_name IS NULL OR final_name<>?)",
+                        (name, name, theme_id, name))
+
+    def update_direction_members(self, theme_id: int, members: Sequence[dict], seen_at: str) -> int:
+        with self.connect() as con:
+            old = {r[0] for r in con.execute(
+                "SELECT code FROM theme_members WHERE theme_id=?", (theme_id,),
+            )}
+            con.executemany(
+                "INSERT INTO theme_members(theme_id,code,name,membership_source,evidence_json,"
+                "first_seen_at,last_seen_at,active,role) VALUES (?,?,?,?,?,?,?,1,?) "
+                "ON CONFLICT(theme_id,code) DO UPDATE SET name=excluded.name,"
+                "evidence_json=excluded.evidence_json,last_seen_at=excluded.last_seen_at,active=1,"
+                "role=COALESCE(excluded.role,theme_members.role)",
+                [(theme_id, m["code"], m["name"], m.get("membership_source", "direction_event"),
+                  json.dumps(m.get("evidence", {}), ensure_ascii=False), seen_at, seen_at,
+                  m.get("role")) for m in members],
+            )
+        return len({m["code"] for m in members} - old)
+
+    def adopt_direction_event(
+        self, target_id: int, source_id: int, name: str, observed_at: str,
+        archive_epoch: str | None, strength: float, duration: str,
+    ) -> dict | None:
+        """Atomically attach an admitted event, without undoing a newer user archive."""
+        with self.connect() as con:
+            target = con.execute("SELECT * FROM candidate_themes WHERE id=?", (target_id,)
+                                 ).fetchone()
+            source = con.execute("SELECT * FROM candidate_themes WHERE id=?", (source_id,)
+                                 ).fetchone()
+            if (not target or not source or source["status"] not in {
+                    "pending", "watching", "confirmed"}
+                    or target["status"] in {"merged", "rejected"}):
+                return None
+            reactivated = target["status"] == "archived"
+            if reactivated and (not archive_epoch or target["archived_at"] != archive_epoch):
+                return None
+            if target_id != source_id:
+                con.execute(
+                    "INSERT INTO theme_members(theme_id,code,name,membership_source,evidence_json,"
+                    "first_seen_at,last_seen_at,active,role) SELECT ?,code,name,'direction_event',"
+                    "evidence_json,first_seen_at,last_seen_at,active,role FROM theme_members "
+                    "WHERE theme_id=? AND active=1 ON CONFLICT(theme_id,code) DO UPDATE SET "
+                    "evidence_json=excluded.evidence_json,"
+                    "first_seen_at=MIN(first_seen_at,excluded.first_seen_at),"
+                    "last_seen_at=MAX(last_seen_at,excluded.last_seen_at),active=1,"
+                    "role=COALESCE(excluded.role,theme_members.role)", (target_id, source_id),
+                )
+                con.execute(
+                    "INSERT OR IGNORE INTO theme_catalysts(theme_id,fingerprint,title,summary,"
+                    "source_name,source_url,published_at,catalyst_type,evidence_level,source_kind,"
+                    "captured_at) SELECT ?,fingerprint,title,summary,source_name,source_url,"
+                    "published_at,catalyst_type,evidence_level,source_kind,captured_at "
+                    "FROM theme_catalysts WHERE theme_id=?", (target_id, source_id),
+                )
+                con.execute("UPDATE candidate_themes SET status='merged',merged_into_id=?,"
+                            "admission_status='attached_to_direction',updated_at=? WHERE id=?",
+                            (target_id, observed_at, source_id))
+            con.execute(
+                "UPDATE candidate_themes SET status='confirmed',theme_level='formal',"
+                "admission_status='admitted',final_name=?,suggested_name=?,archived_at=NULL,"
+                "catalyst_strength=?,catalyst_duration=?,updated_at=?,"
+                "confirmed_at=CASE WHEN confirmed_at IS NULL "
+                "THEN ? ELSE confirmed_at END WHERE id=?",
+                (name, name, strength, duration, observed_at, observed_at, target_id),
+            )
+        return {"reactivated": reactivated, "activated": target["status"] != "confirmed"}
+
     def previous_limit_streaks(self, day: str, codes: list[str]) -> dict[str, int | None]:
         """Known previous closing streak, using only prices dated before the target day."""
         dates = [d for d in self.open_trade_dates(day, 22) if d < day][:20]
@@ -1431,6 +1525,8 @@ class Database:
         cluster_method: str = "exact_tag",
         cluster_confidence: float = 0.0,
         cluster_aliases: Sequence[str] = (),
+        reopen_rejected: bool = False,
+        replace_trigger_members: bool = False,
     ) -> int:
         now = utc_now_iso()
         with self.connect() as connection:
@@ -1449,9 +1545,17 @@ class Database:
                     cluster_confidence=excluded.cluster_confidence,
                     cluster_aliases_json=excluded.cluster_aliases_json,
                     admission_status=CASE
-                        WHEN candidate_themes.status='pending' THEN excluded.admission_status
+                        WHEN candidate_themes.status='pending' OR
+                            (candidate_themes.status='rejected' AND ?)
+                            THEN excluded.admission_status
                         ELSE candidate_themes.admission_status
                     END,
+                    status=CASE WHEN candidate_themes.status='rejected' AND ? THEN 'pending'
+                        ELSE candidate_themes.status END,
+                    theme_level=CASE WHEN candidate_themes.status='rejected' AND ? THEN 'candidate'
+                        ELSE candidate_themes.theme_level END,
+                    admission_reason=CASE WHEN candidate_themes.status='rejected' AND ? THEN NULL
+                        ELSE candidate_themes.admission_reason END,
                     updated_at=excluded.updated_at
                 """,
                 (
@@ -1467,12 +1571,20 @@ class Database:
                     max(0.0, min(100.0, float(cluster_confidence))),
                     json.dumps(list(dict.fromkeys(cluster_aliases)), ensure_ascii=False),
                     now,
+                    int(reopen_rejected), int(reopen_rejected),
+                    int(reopen_rejected), int(reopen_rejected),
                 ),
             )
             row = connection.execute(
                 "SELECT id FROM candidate_themes WHERE fingerprint=?", (fingerprint,)
             ).fetchone()
             theme_id = int(row["id"])
+            if replace_trigger_members:
+                connection.execute(
+                    "UPDATE theme_members SET active=0 WHERE theme_id=? AND EXISTS "
+                    "(SELECT 1 FROM candidate_themes t WHERE t.id=? "
+                    "AND t.status IN ('pending','watching','rejected'))", (theme_id, theme_id),
+                )
             for member in members:
                 connection.execute(
                     """
@@ -1516,6 +1628,10 @@ class Database:
         sql += " ORDER BY pinned DESC, updated_at DESC"
         with self.connect() as connection:
             themes = [dict(row) for row in connection.execute(sql, params).fetchall()]
+            direction_data = {row["key"]: json.loads(row["value"]) for row in connection.execute(
+                "SELECT key,value FROM metadata WHERE key LIKE 'direction_state:%' "
+                "OR key LIKE 'direction_event:%'"
+            )}
             member_sql = "SELECT DISTINCT tm.code FROM theme_members tm "
             member_sql += "JOIN candidate_themes ct ON ct.id=tm.theme_id"
             if status:
@@ -1523,6 +1639,9 @@ class Database:
             codes = [str(row["code"]) for row in connection.execute(member_sql, params)]
             board_context = self._load_board_context(connection, codes) if codes else ({}, {})
             for theme in themes:
+                theme["direction_context"] = direction_data.get(
+                    f"direction_event:{theme['id']}", {})
+                theme["direction_state"] = direction_data.get(f"direction_state:{theme['id']}", {})
                 theme["cluster_aliases"] = json.loads(theme.pop("cluster_aliases_json") or "[]")
                 baseline_at = str(theme.get("confirmed_at") or theme["discovered_at"])
                 member_rows = connection.execute(
@@ -1659,6 +1778,21 @@ class Database:
             ).fetchone()
             if not row:
                 raise KeyError(f"Theme {theme_id} not found")
+            day = MarketClock.normalize(datetime.fromisoformat(now)).strftime("%Y%m%d")
+            codes = [r[0] for r in connection.execute(
+                "SELECT code FROM theme_members WHERE theme_id=? AND active=1", (theme_id,),
+            )]
+            sealed = [r[0] for r in connection.execute(
+                "SELECT e.code FROM kpl_events e JOIN theme_members m ON m.code=e.code "
+                "WHERE m.theme_id=? AND e.trade_date=? AND e.board_tag='涨停'", (theme_id, day),
+            )]
+            connection.execute(
+                "INSERT INTO metadata(key,value,updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                "updated_at=excluded.updated_at",
+                (f"direction_archive:{theme_id}", json.dumps({"archived_at": now,
+                 "trade_date": day, "member_codes": codes, "sealed_codes": sealed}), now),
+            )
             connection.execute(
                 """
                 UPDATE candidate_themes SET status='archived', archived_at=?, pinned=0,

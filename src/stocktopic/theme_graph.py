@@ -352,7 +352,7 @@ def install_graph_first_ai_clustering() -> None:
 
 def _graph_first_cluster_limit_events(
     self: Any, trade_date: str, events: list[dict[str, Any]], minimum_members: int = 2,
-    *, review_scope: dict | None = None,
+    *, review_scope: dict | None = None, known_direction_clusters: list[dict] | None = None,
 ) -> list[dict[str, Any]]:
     from .event_bridge import EventBridgeDetector, verify_event_bridge
 
@@ -360,7 +360,7 @@ def _graph_first_cluster_limit_events(
         events, minimum_members=max(2, minimum_members), include_broad_parents=True,
     )
     local = structured_event_clusters(events, minimum_members=max(2, minimum_members))
-    all_local = unique_anchor_clusters([*all_local, *local])
+    all_local = unique_anchor_clusters([*all_local, *local, *(known_direction_clusters or [])])
     early = [item for item in local if 2 <= len(item["member_codes"]) <= 3]
     detector = EventBridgeDetector()
     bridges = detector.detect(trade_date, events, all_local)
@@ -382,6 +382,7 @@ def _graph_first_cluster_limit_events(
     result = []
     formal_local = structured_event_clusters(events, minimum_members=4,
                                               include_broad_parents=True)
+    formal_local = unique_anchor_clusters([*formal_local, *(known_direction_clusters or [])])
     if review_scope is not None:
         formal_local = [c for c in formal_local if c["tag"] in review_scope.get("anchors", [])]
     if self.enabled and any(item["tag"] not in {"文化传媒", "传媒"} for item in formal_local):
@@ -389,6 +390,7 @@ def _graph_first_cluster_limit_events(
             result = _verify_formal_graph_clusters(
                 self, trade_date, events, minimum_members,
                 allowed_anchors=set(review_scope.get("anchors", [])) if review_scope else None,
+                known_direction_clusters=known_direction_clusters,
             )
             trace["single_node_formal"] = [item["tag"] for item in result]
             trace["single_node_verifications"] = getattr(self, "last_graph_verification", [])
@@ -446,26 +448,31 @@ def unique_anchor_clusters(clusters: list[dict]) -> list[dict]:
         current = selected.get(tag)
         if current is None or rank(cluster) > rank(current):
             selected[tag] = cluster
+        context = {key: value for node in (current or {}, cluster)
+                   for key, value in node.items() if key in {
+                       "known_direction_id", "known_formal", "known_status", "direction_name",
+                   }}
+        selected[tag] = {**selected[tag], **context}
     return list(selected.values())
 
 
 def _verify_formal_graph_clusters(
     self: Any, trade_date: str, events: list[dict[str, Any]], minimum_members: int = 2,
-    *, allowed_anchors: set[str] | None = None,
+    *, allowed_anchors: set[str] | None = None, known_direction_clusters: list[dict] | None = None,
 ) -> list[dict[str, Any]]:
     if not self.enabled:
         raise RuntimeError("OpenAI API is not configured")
-    local = unique_anchor_clusters(structured_event_clusters(
+    local = unique_anchor_clusters([*structured_event_clusters(
         events, minimum_members=max(2, minimum_members), include_broad_parents=True,
-    ))
+    ), *(known_direction_clusters or [])])
     if len({str(e.get("code")) for e in events if e.get("code")}) < 4:
         return local
     candidates = [c for c in local if len(set(c["member_codes"])) >= 4
                   and c["tag"] not in {"文化传媒", "传媒"}
                   and (allowed_anchors is None or c["tag"] in allowed_anchors)]
     result, decisions = [], []
-    # At most 30 local nodes exist. Review every eligible node in bounded batches;
-    # a busy day must not silently discard node 21.
+    # Review local nodes and saved-direction nodes in bounded batches; a busy day
+    # must not silently discard node 21.
     for start in range(0, len(candidates), 20):
         result.extend(_verify_formal_graph_batch(
             self, trade_date, events, minimum_members,
@@ -521,6 +528,9 @@ def _verify_formal_graph_batch(
                 if str(code) in allowed_codes and str(reason).strip()
             },
             "parent_only": bool(item.get("parent_only")),
+            "known_direction": {key: item[key] for key in (
+                "known_direction_id", "known_formal", "known_status", "direction_name",
+            ) if key in item},
         }
         for item in graph_candidates
     ]
@@ -560,7 +570,11 @@ def _verify_formal_graph_batch(
 你是A股题材图谱验证器。系统已经先用结构化知识图谱完成股票聚合；你只能在这些图谱候选上
 使用web_search补充当日/隔夜催化、验证共同因果链，不能从全市场自由拼凑股票。
 
-正式题材硬门槛：至少{formal_minimum}只输入强势股票共同指向同一具体新增事件/产业逻辑。
+正式题材硬门槛：至少{formal_minimum}只输入强势股票共同响应同一方向或具体事件/产业逻辑。
+known_direction标记本地已存方向，只有known_formal=true才表示历史上已正式准入。
+这些节点核验当日共振和逐股业务关系，不能仅因旧概念、催化延续或手动存档而拒绝；
+不需要编造“全新催化”，未曾正式准入的方向仍须通过后续完整质量与证据审查。
+新方向仍须核实具体驱动。正式池名称使用机器人等大方向，canonical_name保存具体催化。
 每个输出成员只能来自其anchor_tag对应的单个输入节点。跨节点桥接由独立本地检测器负责。
 
 硬约束：
@@ -574,6 +588,8 @@ def _verify_formal_graph_batch(
 5. 新闻只负责验证和补全图谱，不负责创造初始股票集合。
 6. 没有合格正式题材就返回空数组。
 7. confidence_scale必须为0_100，置信度以0到100分输出，例如93，不能用0.93。
+8. direction_name归纳共同产业大方向，必须能从输入业务关系及common_logic得到支持；
+   例如特斯拉人形机器人事件归入“机器人”，具体催化仍写canonical_name，禁止新增股票。
 
 只返回JSON对象：
 {{
@@ -581,6 +597,7 @@ def _verify_formal_graph_batch(
     {{
       "anchor_tag": "必须来自图谱候选",
       "canonical_name": "更具体的共同事件名称",
+      "direction_name": "机器人等共同产业大方向，不能是单次事件名称",
       "common_logic": "事件→产业变化→股票受益的共同链条",
       "member_codes": ["至少4只，只能来自输入"],
       "member_reasons": [{{"code":"股票代码", "reason":"关联依据"}}],
@@ -663,6 +680,7 @@ def _verify_formal_graph_batch(
             {
                 "tag": candidate_tag,
                 "canonical_name": canonical_name,
+                "direction_name": str(cluster.get("direction_name") or ""),
                 "common_logic": logic[:1000],
                 "member_codes": codes,
                 "member_reasons": member_reasons,
