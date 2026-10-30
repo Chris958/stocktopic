@@ -8,6 +8,7 @@ from typing import Any
 from . import ai as ai_module
 from . import theme_graph as graph_module
 from . import themes as themes_module
+from .ai_validation import confidence_scores
 
 # Very broad taxonomies must never bridge otherwise unrelated concrete themes.
 _GENERIC_BRIDGE_TAGS = {
@@ -387,7 +388,14 @@ def policy_assess_for_admission(
     )
 
     prompt = f"""
-你是A股重点题材准入审查器。目标是识别真正形成资金共识的新炒作逻辑，同时过滤普通轮动。
+你是A股重点题材准入审查器。正式题材名称使用机器人、低空经济等可持续跟踪的大方向。
+具体的特斯拉产品、订单、技术、政策等催化写入event_name和catalyst_summary，不能单独拆成小题材。
+本地确定的大方向：
+{json.dumps((theme.get("direction_context") or {}).get("name"), ensure_ascii=False)}
+已有方向上下文：{json.dumps(theme.get("direction_context") or {}, ensure_ascii=False)}
+target_id非空表示本地已有方向可复审；known_formal=true才表示历史正式准入。
+两种情况均不因历史存在、事件延续或手动存档单独否决，不能把本地观察伪称为已正式准入。
+延续仍需核验当日四股、逐股关系、证据和持续性；保留真实novelty_mode，不必伪造新催化。
     {search_policy}
 
 关键定义：行业/概念长期存在，并不等于本轮没有新题材资格。请先分类 novelty_mode：
@@ -401,17 +409,20 @@ def policy_assess_for_admission(
 “多了一条新闻”“行业本来就涨价”“旧题材再次活跃”本身不能通过。
 同一行业过去60日出现过不能单独否决；只有“同一具体催化/同一轮周期逻辑”在窗口内已广泛发酵，
 才应判 old_rotation，并把对应系统历史ID写入 within_window_match_ids。
-若判 new_cycle/new_catalyst，suggested_name 必须写出具体新变化，不能只写猪肉、航运、有色等老行业名。
-图谱anchor是稳定标识，不能当作本轮驱动。沿用触发证据中的canonical_name/common_logic核查
+suggested_name必须使用本地大方向名称，event_name写出本轮具体变化。
+图谱anchor是稳定标识。沿用触发证据中的canonical_name/common_logic核查
 本轮具体事件；若证据支持AI短剧/IP改编，应保留这一具体逻辑，不能泛化成“人工智能应用”。
 
+置信度必须声明confidence_scale=0_100，按0到100分输出，例如93而非0.93。
 证据优先级：政府/监管/交易所/公司公告 > 产业原始信息/权威媒体 > 研报/供应链 > 社交传闻。
 持续性和空间只做条件情景，不得伪装成确定预测。必须给出反证条件。
 
 只返回JSON对象，不要Markdown：
 {{
-  "suggested_name": "最小共同逻辑名称",
+  "suggested_name": "本地确定的大方向名称，例如机器人",
+  "event_name": "具体催化，例如特斯拉人形机器人量产进展",
   "novelty_mode": "new_theme|new_cycle|new_catalyst|old_rotation",
+  "confidence_scale": "0_100",
   "is_new_theme": true,
   "novelty_confidence": 0,
   "novelty_reason": "说明本轮新变化，或为何只是旧轮动",
@@ -499,7 +510,8 @@ def policy_assess_for_admission(
         )
 
     novelty_mode = _normalize_novelty_mode(parsed.get("novelty_mode"))
-    novelty_confidence = ai_module._bounded_number(parsed.get("novelty_confidence"))
+    scores = confidence_scores(parsed, ("novelty_confidence", "catalyst_confidence"))
+    novelty_confidence = scores["novelty_confidence"]
     qualifies = ai_module._boolean(parsed.get("is_new_theme"))
     if novelty_mode in {"new_cycle", "new_catalyst"} and novelty_confidence >= 70:
         qualifies = True
@@ -518,6 +530,7 @@ def policy_assess_for_admission(
     return {
         "model": self.model_for_task("admission_analysis"),
         "suggested_name": ai_module._concrete_suggested_name(parsed, theme),
+        "event_name": str(parsed.get("event_name") or parsed.get("suggested_name") or ""),
         "novelty_mode": novelty_mode,
         "is_new_theme": qualifies,
         "novelty_confidence": novelty_confidence,
@@ -528,7 +541,7 @@ def policy_assess_for_admission(
             if ai_module._integer(value) > 0
         ],
         "catalyst_summary": str(parsed.get("catalyst_summary") or "未找到明确催化"),
-        "catalyst_confidence": ai_module._bounded_number(parsed.get("catalyst_confidence")),
+        "catalyst_confidence": scores["catalyst_confidence"],
         "expected_duration_days": max(
             0, ai_module._integer(parsed.get("expected_duration_days"))
         ),

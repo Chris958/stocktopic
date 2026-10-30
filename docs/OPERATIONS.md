@@ -19,6 +19,11 @@ curl http://127.0.0.1:8765/health
 - `latest_feishu_error`：最近一次飞书机器人失败的错误码及处理建议；`last_feishu_success_at`记录最近成功发送时间。旧`latest_wecom_error`仅为历史兼容字段。
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
 - `discovery_input_coverage`：当日KPL涨停/炸板源状态；`empty_strong_feed`或`unavailable`意味着输入覆盖需检查，即使行情采集任务成功。盘中主板可用本地行情+官方涨停价兜底；缺少官方涨停价不能凑数。
+- `daily_limit_readiness`：当日有效官方涨停价占当前主板股票池的覆盖；不足95%时保持`incomplete`并每5分钟重试。该比例仅判断源完整性，不改变题材四票准入门槛。
+- `market_signal_coverage`：实际主板行情、具备涨停价的行情数量与分市场强势股数量；主板数据不足时采集任务为`degraded`，页面提示“主板发现数据待补”。涨停价齐全但主板行情缺失仍不能算完整。
+- KPL `pending_publication`：官方榜单次日06:00后更新前一交易日数据，当日不轮询榜单。次日06:10后独立补录最近两个已结束交易日，失败每30分钟重试，含周六；记录在`completed_sources:日期`及`reconcile_completed_sources`任务。该补录只修复证据，不调用历史AI、不补发机会通知。
+- `/api/v1/dashboard.market_cycles`：最多120个本地市场周期，保留最近10个观察日摘要。页面默认显示8个，可展开全部方向。`event_admission`单独标示准入，“数据待补”不能解释为退潮；归档方向再发酵可验证后重新入池。详见[周期修复说明](robot-cycle-repair.md)。
+- 正式题材按“大方向＋催化”维护，例如机器人是池名称、特斯拉产品进展是催化。归档继续跟踪，同一批旧数据不会立即撤销归档；次日或当日新增成员/封板形成四股再共振并验证通过，复用原ID恢复。每天五分钟采集后即可更新已存在方向的强势成员，不必等新建四票候选。详见[方向池说明](direction-pool.md)。
 - 本地`early_observation`：2–3股共振仅在网页展示，不创建预警、不发机器人通知。AI审查后的`early_watch`、正式题材、机会、风险和数据故障仍推送飞书。
 - `ai_usage.policy.discovery_research`记录当前研究预算；`negative_cache_recheck_minutes`与`negative_cache_max_extra_reviews_per_input`记录负面复核频率和单输入上限。`service_runs`的`discovery_ai_recheck`区分新催化复核与接口失败重试。
 - `admission_policy`：当前生效的共同事件4只强势股票、主板涨停/炸板与创业板涨幅超过10%、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
@@ -49,7 +54,7 @@ curl -u '你的管理用户名' \
 
 `curl` 会交互询问管理密码，不要把密码直接写进命令历史。
 
-该任务调用日度开盘啦接口，并用Tushare `daily` 的当日最高价重建创业板涨幅超过10%的强势信号；不调用实时 `rt_k`。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。
+该任务调用已到发布时间的日度开盘啦接口，并用Tushare `daily` 的最高价重建创业板涨幅超过10%的信号、用官方涨停价重建主板触板证据；不调用实时 `rt_k`。主板日线补录缺少盘中时间和涨停原因时保持未知，不覆盖已有盘中/KPL记录。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。手工发现回补仍会运行既有AI准入流程，与上述仅修复数据源的次日任务不同。
 
 测试票池在交易时段复用已有 `rt_k` 五分钟采集确认T+1买入、T+2卖出并更新盘中涨跌；服务启动、
 08:35和17:10检查正式日线与待结算记录。手工立即回补和结算可执行：

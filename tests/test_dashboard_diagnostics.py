@@ -38,7 +38,8 @@ def test_real_dashboard_logs_stages_without_changing_payload(tmp_path, caplog):
     client = TestClient(app, base_url="https://testserver")
     response = client.get("/api/v1/dashboard", headers={"Authorization": "Bearer token-secret"})
     assert response.status_code == 200
-    assert set(response.json()) == {"health", "themes", "alerts", "backtest"}
+    assert set(response.json()) == {"health", "themes", "alerts", "backtest", "market_cycles"}
+    assert response.json()["market_cycles"] == []
     assert response.headers["cache-control"] == "no-store"
     log = logged(caplog)[0]
     assert log["request_id"] == response.headers["x-stocktopic-request-id"]
@@ -60,6 +61,7 @@ def test_real_dashboard_logs_stages_without_changing_payload(tmp_path, caplog):
         "json_response",
         "alerts",
         "backtest",
+        "market_cycles",
         "endpoint_total",
         "framework_response",
         "headers_ready",

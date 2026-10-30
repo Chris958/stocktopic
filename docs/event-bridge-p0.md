@@ -1,5 +1,11 @@
 # Event Bridge P0
 
+Formal pool identity now follows [the direction-pool policy](direction-pool.md):
+robotics is the direction; a Tesla product event is an attached catalyst. The bridge
+still validates fixed local nodes and members. New directions retain novelty gates;
+existing/archived directions may continue or reactivate without a novelty-only veto,
+while retaining four-stock, relationship, evidence and persistence requirements.
+
 ## Problem and scope
 
 The old graph verifier ran when the **whole market** supplied four strong stocks,
@@ -36,8 +42,9 @@ No real API calls are used in regression tests.
    partial_merge or reject. Invalid/expanded members, <4 members, <2 per accepted
    node, broad names, missing per-member reasons or missing catalysts with an actual search URL fail closed.
 7. An accepted event_bridge goes through ThemeDiscovery's >=4 formal_candidate
-   gate and **the existing admission_analysis**, including evidence/novelty gates.
-   new_theme/new_cycle/new_catalyst/old_rotation semantics remain unchanged.
+   gate and **admission_analysis**, including evidence and persistence gates.
+   New directions retain novelty gates; an existing direction's continuation or
+   reactivation records the real novelty mode without a novelty-only veto.
 
 ## Deterministic score and identity
 

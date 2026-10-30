@@ -23,8 +23,8 @@ const views = {
   },
   confirmed: {
     kicker: '重点题材库',
-    title: '已经通过多源证据验证',
-    description: '正式题材通过持续性审查与官方信息或多源产业证据交叉验证。'
+    title: '跟踪已经形成共识的大方向',
+    description: '机器人等方向持续跟踪，具体事件作为催化；每日按本地证据更新强势成员。'
   },
   backtest: {
     kicker: '测试票池',
@@ -149,6 +149,10 @@ $$('[data-backtest-filter]').forEach(button => button.addEventListener('click', 
 }));
 
 $('#refresh').addEventListener('click', () => load(true));
+$('#marketCycleExpand').addEventListener('click', () => {
+  state.showAllMarketCycles = !state.showAllMarketCycles;
+  renderMarketCycles();
+});
 $('#accountButton').addEventListener('click', event => openSheet('logout', {}, event.currentTarget));
 $('#feishuTest').addEventListener('click', event => openSheet('feishu', {}, event.currentTarget));
 $('#sheetBackdrop').addEventListener('click', closeSheet);
@@ -194,13 +198,17 @@ function render() {
   const watching = themes.filter(theme => candidateMatchesFilter(theme, 'watching'));
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
   const market = health.market;
+  const coverageMissing = market.realtime_collection_enabled && (
+    (health.daily_limit_readiness && !health.daily_limit_readiness.ready)
+    || (health.market_signal_coverage && !health.market_signal_coverage.mainboard_available));
   const marketNode = $('#marketState');
   marketNode.classList.remove('loading', 'live', 'warning');
-  marketNode.classList.add(market.realtime_collection_enabled ? 'live' : 'warning');
-  marketNode.querySelector('strong').textContent = market.realtime_collection_enabled
+  marketNode.classList.add(market.realtime_collection_enabled && !coverageMissing ? 'live' : 'warning');
+  marketNode.querySelector('strong').textContent = coverageMissing ? '主板发现数据待补' : market.realtime_collection_enabled
     ? '盘中采集中' : marketLabel(market.session);
-  marketNode.querySelector('small').textContent = market.realtime_collection_enabled
-    ? '5分钟行情 · 5分钟涨停池'
+  marketNode.querySelector('small').textContent = coverageMissing ? '主板行情或当日涨停价覆盖不足，正在重试'
+    : market.realtime_collection_enabled
+    ? '5分钟行情 · 本地强势股发现'
     : health.latest_quote_run
       ? `最近采集 ${formatDataTime(health.latest_quote_run.started_at)}`
       : marketReason(market.reason);
@@ -214,6 +222,7 @@ function render() {
   $('#backtestCount').textContent = backtest.entries.length;
   $('#alertCount').textContent = alerts.length;
   renderCandidates();
+  renderMarketCycles();
   renderConfirmed();
   renderBacktest();
   renderAlerts(alerts);
@@ -223,6 +232,36 @@ function render() {
 
 function isLocalObservation(theme) {
   return theme.status === 'pending' && theme.admission_status === 'early_observation';
+}
+
+function renderMarketCycles() {
+  const cycles = state.data?.market_cycles || [];
+  $('#marketCyclePanel').hidden = !cycles.length;
+  const expand = $('#marketCycleExpand');
+  expand.hidden = cycles.length <= 8;
+  expand.setAttribute('aria-expanded', String(!!state.showAllMarketCycles));
+  expand.textContent = state.showAllMarketCycles ? '收起方向' : `查看全部${cycles.length}个方向`;
+  const visible = state.showAllMarketCycles ? cycles : cycles.slice(0, 8);
+  $('#marketCycleList').innerHTML = visible.map(cycle => {
+    const current = cycle.latest;
+    const ladder = Object.entries(current.board_ladder || {}).sort((a, b) => Number(b[0]) - Number(a[0]))
+      .map(([height, count]) => `${height}板 ${count}只`).join(' · ');
+    const admission = cycle.event_admission === 'linked_active_event' ? '关联已准入方向'
+      : cycle.event_admission === 'historical_event_only' ? '有关联历史题材，当前事件待验证'
+      : '共同催化待验证';
+    const comparison = current.comparison_trade_date && current.new_strong_count != null
+      ? `较${current.comparison_trade_date}：新增强势${current.new_strong_count}只 · 延续强势${current.retained_strong_count}只 · 板位提高${current.promotion_count}只`
+      : '连续性数据仍在积累';
+    const names = current.members.slice(0, 6).map(member => escapeHtml(member.name || member.code)).join('、');
+    const estimate = current.members.some(member => member.board_basis === 'local_price_streak_estimate');
+    return `<article class="theme-card">
+      <p class="section-kicker">${escapeHtml(cycle.family)} · ${escapeHtml(current.stage)}</p>
+      <strong>${current.touch_count}只强势股 · ${escapeHtml(admission)}</strong>
+      <p>${escapeHtml(ladder || '暂无已知涨停梯队')}${current.unknown_board_count ? ` · ${current.unknown_board_count}只涨停板数待补` : ''}${current.non_limit_strong_count ? ` · 非涨停强势${current.non_limit_strong_count}只` : ''}</p>
+      <p>${escapeHtml(comparison)}</p><p>${names}</p>
+      <small>交易日 ${escapeHtml(current.trade_date)} · 更新 ${escapeHtml(formatDataTime(current.available_at))}${current.historical_replay ? ' · 历史补录' : ''}${estimate ? ' · 板位含盘中价格估计，收盘后校验' : ''}</small>
+    </article>`;
+  }).join('');
 }
 
 function candidateMatchesFilter(theme, filter) {
@@ -305,6 +344,7 @@ function themeCard(theme, mode) {
   const rejected = theme.status === 'rejected';
   const archived = mode === 'archived';
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
+  const eventName = theme.direction_state?.latest_event_name || theme.direction_context?.event_name;
   const activeMembers = theme.members.filter(member => member.active);
   const returnLabel = pending || watching || rejected ? '触发后' : '入库后';
   const backtest = state.data?.backtest || { entries: [] };
@@ -366,13 +406,14 @@ function themeCard(theme, mode) {
     actions = `<div class="card-actions">
       <button class="secondary-button pressable" data-action="toggle-pin" data-id="${theme.id}">${theme.pinned ? '取消置顶' : '置顶'}</button>
       <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">更新新闻催化</button>
-      <button class="text-button danger pressable" data-action="archive" data-id="${theme.id}">移除并归档</button>
+      <button class="text-button danger pressable" data-action="archive" data-id="${theme.id}">归档并继续跟踪</button>
     </div>`;
   } else if (archived) {
     actions = `<div class="card-actions"><button class="secondary-button pressable" data-action="restore" data-id="${theme.id}">恢复到题材库</button></div>`;
   }
   return `<article class="theme-card ${theme.pinned ? 'pinned-theme' : ''} stage-${escapeHtml(theme.theme_level || theme.status)}">
     <div class="theme-head"><div><div class="theme-title">${theme.pinned ? '<span class="pin-mark">置顶</span>' : ''}${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
+    ${eventName ? `<p class="catalyst-summary">当前催化：${escapeHtml(eventName)}</p>` : ''}
     ${statusHtml}${scoreHtml}${reviewHtml}${decisionHtml}${summaryHtml}${fundFlowHtml}${stockDetails}
     <p class="theme-footnote">Day 1 ${escapeHtml(theme.day1_date)} · 行情 ${escapeHtml(formatDataTime(summary.market_data_at))} · 市值 ${escapeHtml(formatDate(summary.metric_trade_date))}</p>
     ${newsDetails}${actions}
@@ -619,8 +660,8 @@ function sheetContent(action, title) {
       hint: '将搜索近期及海外隔夜催化，保存来源、时间和证据等级。'
     },
     archive: {
-      kicker: '移除题材', title: `归档“${title}”`, submit: '移除并归档',
-      hint: '题材会从当前列表移除，历史数据保留，可在“已归档”中恢复。'
+      kicker: '归档题材', title: `归档“${title}”`, submit: '归档并继续跟踪',
+      hint: '暂时移出当前池并保留历史。后续四股再共振并通过验证时，可自动重新入池；也可手动恢复。'
     },
     feishu: {
       kicker: '通知通道', title: '测试飞书机器人', submit: '发送测试消息',

@@ -4,6 +4,8 @@ from collections.abc import Iterable
 from statistics import median
 from typing import Any
 
+from .board_status import consecutive_boards
+
 
 def clamp(value: float) -> float:
     return round(max(0.0, min(100.0, value)), 1)
@@ -301,11 +303,7 @@ def _minutes(value: Any) -> int | None:
 
 
 def _board_height(status: Any) -> int:
-    value = str(status or "")
-    if "首板" in value:
-        return 1
-    digits = "".join(character for character in value if character.isdigit())
-    return int(digits) if digits else 0
+    return consecutive_boards(status)
 
 
 def _float(value: Any) -> float:

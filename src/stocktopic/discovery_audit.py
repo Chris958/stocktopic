@@ -17,6 +17,7 @@ from typing import Any
 from .config import Settings
 from .db import Database
 from .event_bridge import EventBridgeDetector
+from .market_cycles import STATE_KEY
 from .theme_policy import policy_structured_event_clusters
 from .theme_taxonomy import install_theme_taxonomy
 
@@ -70,7 +71,32 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
     relevant_nodes = [c for c in clusters if _relevant(c, codes, keywords)]
     tags = {c["tag"] for c in relevant_nodes}
     by_code = {event["code"]: event for event in events}
+    source_state = {name: _json(db.get_metadata(f"{name}:{day}"), None)
+                    for name in ("daily_limit_readiness", "market_signal_coverage",
+                                 "completed_sources", "kpl_event_coverage", "kpl_concept_coverage")}
+    cycle_state = _json(db.get_metadata(STATE_KEY), {})
+    market_cycles = []
+    for cycle in cycle_state.values():
+        snapshot = next((s for s in cycle.get("snapshots", []) if s["trade_date"] == day), None)
+        if snapshot and _relevant([cycle["family"], snapshot], codes, keywords):
+            market_cycles.append({"cycle_id": cycle["cycle_id"], "family": cycle["family"],
+                                  "start_trade_date": cycle["start_trade_date"],
+                                  "snapshot": snapshot})
     with db.connect() as con:
+        iso_day = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+        limit_rows = con.execute(
+            "SELECT COUNT(*) AS stored_mainboard_count, "
+            "COALESCE(SUM(CASE WHEN l.upper_limit>0 THEN 1 ELSE 0 END),0) AS valid_upper_count "
+            "FROM daily_limits l JOIN stocks s ON s.code=l.code "
+            "WHERE l.trade_date=? AND s.active=1 AND s.market='主板'", (iso_day,),
+        ).fetchone()
+        expected_main = con.execute(
+            "SELECT COUNT(*) FROM stocks WHERE active=1 AND market='主板'",
+        ).fetchone()[0]
+        stored_limit_coverage = {
+            **dict(limit_rows), "current_active_mainboard_count": expected_main,
+            "basis": "current_stored_rows_not_historical_intraday_snapshot",
+        }
         target_rows = []
         concept_rows = []
         if codes:
@@ -172,11 +198,11 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                 }
             )
         themes = []
-        iso_day = f"{day[:4]}-{day[4:6]}-{day[6:]}"
         for row in con.execute(
             "SELECT id,shared_tag,provisional_name,suggested_name,final_name,status,"
             "admission_status,admission_reason,discovered_at,day1_date,cluster_method,"
-            "discovery_reason FROM candidate_themes WHERE day1_date BETWEEN ? AND ?",
+            "discovery_reason,theme_level,confirmed_at,observation_at,archived_at,updated_at "
+            "FROM candidate_themes WHERE day1_date BETWEEN ? AND ?",
             ((datetime.strptime(day, "%Y%m%d") - timedelta(days=120)).date().isoformat(), iso_day),
         ):
             item = dict(row)
@@ -190,6 +216,13 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
             if not _relevant([item, members], codes, keywords):
                 continue
             item["members"] = members
+            for prefix in ("direction_state", "direction_event", "direction_archive"):
+                saved_direction = con.execute("SELECT value FROM metadata WHERE key=?",
+                                              (f"{prefix}:{item['id']}",)).fetchone()
+                item[prefix] = _json(saved_direction[0], {}) if saved_direction else {}
+            daily_tracking = con.execute("SELECT value FROM metadata WHERE key=?",
+                                         (f"direction_tracking:{day}:{item['id']}",)).fetchone()
+            item["direction_tracking"] = _json(daily_tracking[0], {}) if daily_tracking else {}
             item["visible_in_current_default_watch_tab"] = (
                 item["status"] == "watching" or (item["status"] == "pending"
                 and item["admission_status"] == "early_observation")
@@ -212,6 +245,10 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
                 key: trace.get(key)
                 for key in (
                     "novelty_mode",
+                    "admission_route",
+                    "novelty_required",
+                    "direction_context",
+                    "event_candidate_id",
                     "admission_result",
                     "checks",
                     "final_reject_reason",
@@ -230,6 +267,10 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
     return {
         "trade_date": day,
         "strong_stock_count": len(events),
+        "strong_input_counts": db.strong_input_counts(day),
+        "saved_source_readiness": source_state,
+        "stored_daily_limit_coverage": stored_limit_coverage,
+        "market_cycles": market_cycles,
         "targets": [
             {"code": code, "in_strong_input": code in by_code, "event": by_code.get(code)}
             for code in sorted(codes)
@@ -289,6 +330,8 @@ def build_report(path: Path, dates: list[str], names: list[str], keywords: list[
             "Related themes show current state, including earlier themes within 120 calendar days.",
             "Later news, closes and added tags do not establish earlier actionable signals.",
             "Export is capped at 64 trace signatures/runs per day and 3 reviews per theme.",
+            "Market cycles retain 10 observed dates; late replay is labelled by available_at.",
+            "Archive timestamps do not identify who archived a theme or why.",
         ],
         "dates": [audit_date(db, day, {t["code"] for t in targets}, keywords) for day in dates],
     }

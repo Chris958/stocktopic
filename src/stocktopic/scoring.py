@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from statistics import mean, median
 from typing import Any
 
+from .board_status import consecutive_boards
 from .db import Database
 from .market_environment import build_market_environment
 from .theme_intelligence import (
@@ -302,8 +303,4 @@ def _duration_score(value: Any) -> float:
 
 
 def _board_height(status: Any) -> int:
-    value = str(status or "")
-    if "首板" in value:
-        return 1
-    digits = "".join(character for character in value if character.isdigit())
-    return int(digits) if digits else 0
+    return consecutive_boards(status)

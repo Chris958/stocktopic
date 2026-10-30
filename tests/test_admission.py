@@ -140,7 +140,7 @@ def test_candidate_is_auto_admitted_only_after_ai_and_member_validation():
             "600003.SH",
             "600004.SH",
         }
-        assert service.notifier.messages[0][0] == "正式题材：液冷超节点"
+        assert service.notifier.messages[0][0] == "正式题材：算力"
 
 
 class SupplyChainAdmissionExplainer(PassingAdmissionExplainer):
@@ -223,7 +223,7 @@ def test_supply_chain_theme_enters_early_watch_and_pushes_without_formal_confirm
         assert theme["theme_level"] == "early_watch"
         assert theme["evidence_grade"] == "supply_chain_unconfirmed"
         assert theme["admission_review"]["decision_level"] == "early_watch"
-        assert service.notifier.messages[0][0] == "早期观察：英伟达PTFE正交背板"
+        assert service.notifier.messages[0][0] == "早期观察：PCB"
 
 
 class RepeatedThemeExplainer(PassingAdmissionExplainer):
@@ -245,6 +245,36 @@ class OldWebHistoryOnlyExplainer(PassingAdmissionExplainer):
         item["novelty_reason"] = "2月份曾出现过AI漫剧热点"
         item["within_window_match_ids"] = []
         return item
+
+
+def test_explicit_old_rotation_is_not_forced_into_formal_without_history_ids(tmp_path):
+    service = StockTopicService(Settings(
+        tushare_token="test", db_path=tmp_path / "test.sqlite3", archive_dir=tmp_path / "archive",
+    ))
+    service.initialize_storage()
+    service.database.upsert_stocks([
+        {"ts_code": f"60000{i}.SH", "name": f"股票{i}", "market": "主板"} for i in range(4)
+    ])
+    service.database.upsert_kpl_events([
+        {"trade_date": "20261016", "ts_code": f"60000{i}.SH", "name": f"股票{i}",
+         "tag": "涨停", "theme": "具体机器人事件", "status": "首板"} for i in range(4)
+    ])
+    service.explainer = OldWebHistoryOnlyExplainer()
+    assess = service.explainer.assess_for_admission
+
+    def old_rotation(*args):
+        return {**assess(*args), "novelty_mode": "old_rotation"}
+
+    service.explainer.assess_for_admission = old_rotation
+    service.notifier = CapturingNotifier()
+    ids = service.discovery.discover_for_date(
+        "20261016", datetime(2026, 10, 16, 10, 0, tzinfo=CN)
+    )
+    service._assess_and_admit_candidates(ids)
+    theme = service.database.get_theme(ids[0])
+    assert theme["status"] == "rejected"
+    assert theme["admission_review"]["is_new_theme"] == 0
+    assert service.notifier.messages == []
 
 
 def test_history_older_than_window_cannot_veto_a_new_concrete_event():
