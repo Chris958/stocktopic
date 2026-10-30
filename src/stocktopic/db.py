@@ -11,6 +11,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+from .board_status import consecutive_boards
 from .domain import Anomaly, Quote
 from .market_clock import MarketClock
 
@@ -327,6 +328,100 @@ class Database:
                 (trade_date,),
             ).fetchall()
         return {str(row["code"]): (row["upper_limit"], row["lower_limit"]) for row in rows}
+
+    def strong_input_counts(self, trade_date: str) -> dict[str, int]:
+        with self.connect() as con:
+            rows = con.execute(
+                "SELECT s.market, COUNT(DISTINCT e.code) AS n FROM kpl_events e "
+                "JOIN stocks s ON s.code=e.code WHERE e.trade_date=? "
+                "AND e.board_tag IN ('涨停','炸板','创业板涨幅超10%') GROUP BY s.market",
+                (trade_date,),
+            ).fetchall()
+        return {row["market"]: row["n"] for row in rows}
+
+    def previous_limit_streaks(self, day: str, codes: list[str]) -> dict[str, int | None]:
+        """Known previous closing streak, using only prices dated before the target day."""
+        dates = [d for d in self.open_trade_dates(day, 22) if d < day][:20]
+        if not codes or not dates:
+            return {}
+        result: dict[str, int | None] = {}
+        with self.connect() as con:
+            for start in range(0, len(codes), 400):
+                batch = codes[start:start + 400]
+                marks = ",".join("?" for _ in batch)
+                bars = {(r["code"], r["trade_date"]): r for r in con.execute(
+                    f"SELECT code,trade_date,close FROM stock_daily_bars WHERE code IN ({marks}) "
+                    "AND trade_date>=? AND trade_date<?", [*batch, dates[-1], day],
+                )}
+                uppers = {(r["code"], r["trade_date"].replace("-", "")): r["upper_limit"]
+                          for r in con.execute(
+                    f"SELECT code,trade_date,upper_limit FROM daily_limits WHERE code IN ({marks}) "
+                    "AND replace(trade_date,'-','')>=? AND replace(trade_date,'-','')<?",
+                    [*batch, dates[-1], day],
+                )}
+                for code in batch:
+                    count = 0
+                    for previous in dates:
+                        row, upper = bars.get((code, previous)), uppers.get((code, previous))
+                        if row is None or not upper or row["close"] <= 0:
+                            result[code] = None
+                            break
+                        if abs(row["close"] - upper) > 0.005:
+                            result[code] = count
+                            break
+                        count += 1
+                    else:
+                        result[code] = None  # No known start of the streak in this window.
+        return result
+
+    def market_cycle_theme_refs(self, since_date: str) -> list[dict]:
+        with self.connect() as con:
+            rows = con.execute(
+                """SELECT t.id,t.shared_tag,t.status,t.admission_status,t.day1_date,
+                   COALESCE(t.final_name,t.suggested_name,t.provisional_name) AS name,
+                   (t.theme_level IN ('formal','early_watch')
+                       OR t.status IN ('confirmed','watching')
+                       OR t.admission_status IN ('admitted','early_watch') OR EXISTS(
+                       SELECT 1 FROM theme_admission_reviews r WHERE r.theme_id=t.id
+                       AND r.decision_level IN ('formal','early_watch'))) AS qualified_event
+                   FROM candidate_themes t WHERE t.day1_date>=? ORDER BY t.id""", (since_date,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def backfill_mainboard_limit_events(self, trade_date: str, observed_at: datetime) -> int:
+        """Replay official daily highs without inventing intraday seal times or reasons."""
+        day = trade_date.replace("-", "")
+        iso = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+        limits = self.daily_limit_map(iso)
+        active = self.active_stock_map()
+        count = 0
+        with self.connect() as con:
+            for row in self.daily_bars_for_date(day):
+                code = str(row["code"])
+                upper = limits.get(code, (None, None))[0]
+                if (active.get(code, {}).get("market") != "主板" or not upper
+                        or float(row.get("pre_close") or 0) <= 0
+                        or float(row.get("close") or 0) <= 0
+                        or abs(float(row.get("high") or 0) - upper) > 0.005):
+                    continue
+                present = con.execute(
+                    "SELECT 1 FROM kpl_events WHERE trade_date=? AND code=?", (day, code),
+                ).fetchone()
+                if present:
+                    continue
+                board = "涨停" if float(row["close"]) >= upper - 0.005 else "炸板"
+                con.execute(
+                    "INSERT INTO kpl_events(trade_date,code,name,board_tag,themes_json,"
+                    "limit_reason,pct_change,raw_json,synced_at) VALUES (?,?,?,?,'[]','',?,?,?)",
+                    (day, code, active[code]["name"], board,
+                     (float(row["close"]) / float(row["pre_close"]) - 1) * 100,
+                     json.dumps({"source": "local_daily_limit_replay",
+                                 "limit_time_basis": "daily_high_time_unknown",
+                                 "evidence_available_at": observed_at.isoformat(),
+                                 "upper_limit": upper}), observed_at.isoformat()),
+                )
+                count += 1
+        return count
 
     def upsert_daily_metrics(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
@@ -2714,11 +2809,7 @@ def _number(value: Any) -> float:
 
 
 def _board_height(value: Any) -> int:
-    text = str(value or "")
-    if "首板" in text:
-        return 1
-    match = re.search(r"(\d+)\s*连板", text)
-    return int(match.group(1)) if match else 0
+    return consecutive_boards(value)
 
 
 def _clock_sort(value: Any) -> str:

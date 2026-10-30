@@ -194,13 +194,17 @@ function render() {
   const watching = themes.filter(theme => candidateMatchesFilter(theme, 'watching'));
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
   const market = health.market;
+  const coverageMissing = market.realtime_collection_enabled && (
+    (health.daily_limit_readiness && !health.daily_limit_readiness.ready)
+    || (health.market_signal_coverage && !health.market_signal_coverage.mainboard_available));
   const marketNode = $('#marketState');
   marketNode.classList.remove('loading', 'live', 'warning');
-  marketNode.classList.add(market.realtime_collection_enabled ? 'live' : 'warning');
-  marketNode.querySelector('strong').textContent = market.realtime_collection_enabled
+  marketNode.classList.add(market.realtime_collection_enabled && !coverageMissing ? 'live' : 'warning');
+  marketNode.querySelector('strong').textContent = coverageMissing ? '主板发现数据待补' : market.realtime_collection_enabled
     ? '盘中采集中' : marketLabel(market.session);
-  marketNode.querySelector('small').textContent = market.realtime_collection_enabled
-    ? '5分钟行情 · 5分钟涨停池'
+  marketNode.querySelector('small').textContent = coverageMissing ? '主板行情或当日涨停价覆盖不足，正在重试'
+    : market.realtime_collection_enabled
+    ? '5分钟行情 · 本地强势股发现'
     : health.latest_quote_run
       ? `最近采集 ${formatDataTime(health.latest_quote_run.started_at)}`
       : marketReason(market.reason);
@@ -214,6 +218,7 @@ function render() {
   $('#backtestCount').textContent = backtest.entries.length;
   $('#alertCount').textContent = alerts.length;
   renderCandidates();
+  renderMarketCycles();
   renderConfirmed();
   renderBacktest();
   renderAlerts(alerts);
@@ -223,6 +228,31 @@ function render() {
 
 function isLocalObservation(theme) {
   return theme.status === 'pending' && theme.admission_status === 'early_observation';
+}
+
+function renderMarketCycles() {
+  const cycles = state.data?.market_cycles || [];
+  $('#marketCyclePanel').hidden = !cycles.length;
+  $('#marketCycleList').innerHTML = cycles.map(cycle => {
+    const current = cycle.latest;
+    const ladder = Object.entries(current.board_ladder || {}).sort((a, b) => Number(b[0]) - Number(a[0]))
+      .map(([height, count]) => `${height}板 ${count}只`).join(' · ');
+    const admission = cycle.event_admission === 'linked_active_event' ? '关联已准入事件'
+      : cycle.event_admission === 'historical_event_only' ? '有关联历史题材，当前事件待验证'
+      : '共同催化待验证';
+    const comparison = current.comparison_trade_date && current.new_strong_count != null
+      ? `较${current.comparison_trade_date}：新增强势${current.new_strong_count}只 · 延续强势${current.retained_strong_count}只 · 板位提高${current.promotion_count}只`
+      : '连续性数据仍在积累';
+    const names = current.members.slice(0, 6).map(member => escapeHtml(member.name || member.code)).join('、');
+    const estimate = current.members.some(member => member.board_basis === 'local_price_streak_estimate');
+    return `<article class="theme-card">
+      <p class="section-kicker">${escapeHtml(cycle.family)} · ${escapeHtml(current.stage)}</p>
+      <strong>${current.touch_count}只强势股 · ${escapeHtml(admission)}</strong>
+      <p>${escapeHtml(ladder || '暂无已知涨停梯队')}${current.unknown_board_count ? ` · ${current.unknown_board_count}只涨停板数待补` : ''}${current.non_limit_strong_count ? ` · 非涨停强势${current.non_limit_strong_count}只` : ''}</p>
+      <p>${escapeHtml(comparison)}</p><p>${names}</p>
+      <small>交易日 ${escapeHtml(current.trade_date)} · 更新 ${escapeHtml(formatDataTime(current.available_at))}${current.historical_replay ? ' · 历史补录' : ''}${estimate ? ' · 板位含盘中价格估计，收盘后校验' : ''}</small>
+    </article>`;
+  }).join('');
 }
 
 function candidateMatchesFilter(theme, filter) {

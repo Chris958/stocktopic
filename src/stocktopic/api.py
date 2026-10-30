@@ -218,7 +218,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         health = timing.phase("health_exec", service.health)
         alerts = timing.phase("alerts", lambda: service.database.recent_alerts(100))
         backtest = timing.phase("backtest", lambda: service.test_pool.dashboard(now))
-        payload = {"health": health, "themes": themes, "alerts": alerts, "backtest": backtest}
+        cycles = timing.phase("market_cycles", lambda: service.market_cycles.dashboard(now))
+        payload = {"health": health, "themes": themes, "alerts": alerts, "backtest": backtest,
+                   "market_cycles": cycles}
         encoded = timing.phase("jsonable_encoder", lambda: jsonable_encoder(payload))
         return timing.phase("json_response", lambda: JSONResponse(encoded))
 

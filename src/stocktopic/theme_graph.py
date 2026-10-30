@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from .ai_validation import confidence_scores
 from .discovery_ai_policy import BRIDGE_VERIFICATION_WORKERS, DISCOVERY_AI_OPTIONS
 
 SOURCE_PRIORITY = {
@@ -359,7 +360,7 @@ def _graph_first_cluster_limit_events(
         events, minimum_members=max(2, minimum_members), include_broad_parents=True,
     )
     local = structured_event_clusters(events, minimum_members=max(2, minimum_members))
-    all_local = list({item["tag"]: item for item in [*all_local, *local]}.values())
+    all_local = unique_anchor_clusters([*all_local, *local])
     early = [item for item in local if 2 <= len(item["member_codes"]) <= 3]
     detector = EventBridgeDetector()
     bridges = detector.detect(trade_date, events, all_local)
@@ -434,12 +435,53 @@ def _graph_first_cluster_limit_events(
     return [*result, *(item for item in early if item["tag"] not in formal_tags)]
 
 
+def unique_anchor_clusters(clusters: list[dict]) -> list[dict]:
+    """Choose one existing local node per stable anchor, never union unrelated pools."""
+    selected: dict[str, dict] = {}
+    def rank(cluster: dict) -> tuple:
+        return len(set(cluster["member_codes"])), float(cluster.get("cluster_confidence") or 0)
+
+    for cluster in clusters:
+        tag = str(cluster["tag"])
+        current = selected.get(tag)
+        if current is None or rank(cluster) > rank(current):
+            selected[tag] = cluster
+    return list(selected.values())
+
+
 def _verify_formal_graph_clusters(
+    self: Any, trade_date: str, events: list[dict[str, Any]], minimum_members: int = 2,
+    *, allowed_anchors: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    if not self.enabled:
+        raise RuntimeError("OpenAI API is not configured")
+    local = unique_anchor_clusters(structured_event_clusters(
+        events, minimum_members=max(2, minimum_members), include_broad_parents=True,
+    ))
+    if len({str(e.get("code")) for e in events if e.get("code")}) < 4:
+        return local
+    candidates = [c for c in local if len(set(c["member_codes"])) >= 4
+                  and c["tag"] not in {"文化传媒", "传媒"}
+                  and (allowed_anchors is None or c["tag"] in allowed_anchors)]
+    result, decisions = [], []
+    # At most 30 local nodes exist. Review every eligible node in bounded batches;
+    # a busy day must not silently discard node 21.
+    for start in range(0, len(candidates), 20):
+        result.extend(_verify_formal_graph_batch(
+            self, trade_date, events, minimum_members,
+            candidate_batch=candidates[start:start + 20],
+        ))
+        decisions.extend(self.last_graph_verification)
+    self.last_graph_verification = decisions
+    return result
+
+
+def _verify_formal_graph_batch(
     self: Any,
     trade_date: str,
     events: list[dict[str, Any]],
     minimum_members: int = 2,
-    *, allowed_anchors: set[str] | None = None,
+    *, candidate_batch: list[dict],
 ) -> list[dict[str, Any]]:
     """Use local graph for 2-3 stocks and web/AI only from four stocks onward."""
     from . import ai as ai_module
@@ -462,11 +504,7 @@ def _verify_formal_graph_clusters(
         # Critical cost-control rule: never invoke web_search/LLM for the 2-3 stock layer.
         return local_clusters
 
-    graph_candidates = [
-        item for item in local_clusters
-        if len(item["member_codes"]) >= 4 and item["tag"] not in {"文化传媒", "传媒"}
-        and (allowed_anchors is None or item["tag"] in allowed_anchors)
-    ][:20]
+    graph_candidates = candidate_batch
     if not graph_candidates:
         # Fail closed: without a structured graph relationship, do not ask the model
         # to invent a four-stock theme from scratch.
@@ -535,6 +573,7 @@ def _verify_formal_graph_clusters(
 4. 必须逐只核查涨停原因/公司业务与共同事件关系；找不到关系的股票不得纳入。
 5. 新闻只负责验证和补全图谱，不负责创造初始股票集合。
 6. 没有合格正式题材就返回空数组。
+7. confidence_scale必须为0_100，置信度以0到100分输出，例如93，不能用0.93。
 
 只返回JSON对象：
 {{
@@ -546,6 +585,7 @@ def _verify_formal_graph_clusters(
       "member_codes": ["至少4只，只能来自输入"],
       "member_reasons": [{{"code":"股票代码", "reason":"关联依据"}}],
       "aliases": ["常用近义名"],
+      "confidence_scale": "0_100",
       "cluster_confidence": 0,
       "catalysts": [
         {{
@@ -628,9 +668,11 @@ def _verify_formal_graph_clusters(
                 "member_reasons": member_reasons,
                 "aliases": list(dict.fromkeys([anchor, canonical_name, *aliases])),
                 "parent_tags": [anchor] if anchor_is_parent else [],
-                "cluster_confidence": ai_module._bounded_number(
-                    cluster.get("cluster_confidence")
-                ),
+                "cluster_confidence": confidence_scores(
+                    {**cluster, "confidence_scale": cluster.get("confidence_scale",
+                                                              parsed.get("confidence_scale"))},
+                    ("cluster_confidence",),
+                )["cluster_confidence"],
                 "cluster_method": "semantic_event",
                 "catalysts": ai_module._normalize_catalysts(
                     cluster.get("catalysts"), sources

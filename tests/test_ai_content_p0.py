@@ -265,7 +265,7 @@ def test_graph_rejection_preserves_specific_node_reason(service):
     assert service.database.list_themes() == []
 
 
-def test_collector_still_schedules_local_discovery_when_kpl_fails(service):
+def test_collector_still_schedules_local_discovery_when_kpl_is_not_published(service):
     stocks = [{"ts_code": f"{600000+i:06d}.SH", "name": f"测试{i}", "market": "主板"}
               for i in range(2000)]
     service.database.upsert_stocks(stocks)
@@ -278,13 +278,13 @@ def test_collector_still_schedules_local_discovery_when_kpl_fails(service):
             return [quote(code=s["ts_code"], name=s["name"], captured_at=now) for s in stocks]
 
         def kpl_list(self, *_args):
-            raise RuntimeError("upstream unavailable")
+            raise AssertionError("The official KPL feed must not be polled intraday")
 
     service.provider = Provider()
     result = service.collect_once(NOW)
-    assert result["status"] == "success"
+    assert result["status"] == "degraded"  # Quote ingestion continues with partial limit coverage.
     assert result["mainboard_touch_signals"] == 1
     assert result["discovery_trade_date"] == DAY
     coverage = json.loads(service.database.get_metadata(f"kpl_event_coverage:{DAY}"))
-    assert coverage["state"] == "unavailable"
+    assert coverage["state"] == "pending_publication"
     assert service.database.limit_touch_events(DAY)[0]["signal_source"] == "local_rt_k_limit"

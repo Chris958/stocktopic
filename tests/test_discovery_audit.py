@@ -173,3 +173,26 @@ assert.equal(shown[0].id, 3);
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_audit_includes_source_gaps_cycle_evidence_and_archive_time(tmp_path):
+    db = setup_db(tmp_path)
+    now = datetime(2026, 10, 9, 10, 0, tzinfo=SHANGHAI)
+    theme_id = db.upsert_candidate(
+        fingerprint="archived-context", provisional_name="影视事件", shared_tag="影视",
+        direction="positive", discovered_at=now.isoformat(), day1_date="2026-10-09",
+        discovery_reason="审计归档场景", members=[],
+    )
+    db.archive_theme(theme_id)
+    db.set_metadata(f"daily_limit_readiness:{DAY}", '{"state":"incomplete","ready":false}')
+    from stocktopic.market_cycles import MarketCycleTracker
+
+    tracker = MarketCycleTracker(db)
+    events = db.limit_touch_events(DAY)
+    tracker.observe(DAY, now, events, structured_event_clusters(events), coverage_complete=False)
+    report = build_report(db.path, [DAY], ["目标0"], ["影视"])["dates"][0]
+    assert report["saved_source_readiness"]["daily_limit_readiness"]["state"] == "incomplete"
+    assert report["stored_daily_limit_coverage"]["valid_upper_count"] == 0
+    assert report["strong_input_counts"]["主板"] == 3
+    assert report["market_cycles"][0]["snapshot"]["stage"] == "数据待补"
+    assert report["related_themes"][0]["archived_at"]

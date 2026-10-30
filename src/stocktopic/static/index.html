@@ -95,6 +95,11 @@
       </div>
 
       <section id="candidates" class="view-panel active" aria-label="候选题材">
+        <div id="marketCyclePanel" hidden>
+          <p class="section-kicker">市场周期跟踪</p>
+          <p>持续记录市场共振与梯队变化，事件是否准入单独标示。本地早期观察不发送通知。</p>
+          <div id="marketCycleList" class="theme-list" aria-live="polite"></div>
+        </div>
         <div class="filter-row" role="group" aria-label="候选审查状态筛选">
           <button class="filter-chip active pressable" data-candidate-filter="watching">早期观察</button>
           <button class="filter-chip pressable" data-candidate-filter="reviewing">审查中</button>
@@ -179,7 +184,7 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
-  <script src="/static/app.js?v=0.12.7-feishu1" defer></script>
+  <script src="/static/app.js?v=0.12.7-cycle1" defer></script>
   <script src="/static/intelligence-panel.js?v=2" defer></script>
 </body>
 </html>

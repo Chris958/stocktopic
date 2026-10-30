@@ -8,6 +8,7 @@ from typing import Any
 from . import ai as ai_module
 from . import theme_graph as graph_module
 from . import themes as themes_module
+from .ai_validation import confidence_scores
 
 # Very broad taxonomies must never bridge otherwise unrelated concrete themes.
 _GENERIC_BRIDGE_TAGS = {
@@ -405,6 +406,7 @@ def policy_assess_for_admission(
 图谱anchor是稳定标识，不能当作本轮驱动。沿用触发证据中的canonical_name/common_logic核查
 本轮具体事件；若证据支持AI短剧/IP改编，应保留这一具体逻辑，不能泛化成“人工智能应用”。
 
+置信度必须声明confidence_scale=0_100，按0到100分输出，例如93而非0.93。
 证据优先级：政府/监管/交易所/公司公告 > 产业原始信息/权威媒体 > 研报/供应链 > 社交传闻。
 持续性和空间只做条件情景，不得伪装成确定预测。必须给出反证条件。
 
@@ -412,6 +414,7 @@ def policy_assess_for_admission(
 {{
   "suggested_name": "最小共同逻辑名称",
   "novelty_mode": "new_theme|new_cycle|new_catalyst|old_rotation",
+  "confidence_scale": "0_100",
   "is_new_theme": true,
   "novelty_confidence": 0,
   "novelty_reason": "说明本轮新变化，或为何只是旧轮动",
@@ -499,7 +502,8 @@ def policy_assess_for_admission(
         )
 
     novelty_mode = _normalize_novelty_mode(parsed.get("novelty_mode"))
-    novelty_confidence = ai_module._bounded_number(parsed.get("novelty_confidence"))
+    scores = confidence_scores(parsed, ("novelty_confidence", "catalyst_confidence"))
+    novelty_confidence = scores["novelty_confidence"]
     qualifies = ai_module._boolean(parsed.get("is_new_theme"))
     if novelty_mode in {"new_cycle", "new_catalyst"} and novelty_confidence >= 70:
         qualifies = True
@@ -528,7 +532,7 @@ def policy_assess_for_admission(
             if ai_module._integer(value) > 0
         ],
         "catalyst_summary": str(parsed.get("catalyst_summary") or "未找到明确催化"),
-        "catalyst_confidence": ai_module._bounded_number(parsed.get("catalyst_confidence")),
+        "catalyst_confidence": scores["catalyst_confidence"],
         "expected_duration_days": max(
             0, ai_module._integer(parsed.get("expected_duration_days"))
         ),

@@ -247,6 +247,36 @@ class OldWebHistoryOnlyExplainer(PassingAdmissionExplainer):
         return item
 
 
+def test_explicit_old_rotation_is_not_forced_into_formal_without_history_ids(tmp_path):
+    service = StockTopicService(Settings(
+        tushare_token="test", db_path=tmp_path / "test.sqlite3", archive_dir=tmp_path / "archive",
+    ))
+    service.initialize_storage()
+    service.database.upsert_stocks([
+        {"ts_code": f"60000{i}.SH", "name": f"股票{i}", "market": "主板"} for i in range(4)
+    ])
+    service.database.upsert_kpl_events([
+        {"trade_date": "20261016", "ts_code": f"60000{i}.SH", "name": f"股票{i}",
+         "tag": "涨停", "theme": "具体机器人事件", "status": "首板"} for i in range(4)
+    ])
+    service.explainer = OldWebHistoryOnlyExplainer()
+    assess = service.explainer.assess_for_admission
+
+    def old_rotation(*args):
+        return {**assess(*args), "novelty_mode": "old_rotation"}
+
+    service.explainer.assess_for_admission = old_rotation
+    service.notifier = CapturingNotifier()
+    ids = service.discovery.discover_for_date(
+        "20261016", datetime(2026, 10, 16, 10, 0, tzinfo=CN)
+    )
+    service._assess_and_admit_candidates(ids)
+    theme = service.database.get_theme(ids[0])
+    assert theme["status"] == "rejected"
+    assert theme["admission_review"]["is_new_theme"] == 0
+    assert service.notifier.messages == []
+
+
 def test_history_older_than_window_cannot_veto_a_new_concrete_event():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)

@@ -17,7 +17,9 @@ from . import __version__
 from .ai import OpenAIThemeExplainer
 from .anomaly import AnomalyDetector
 from .backtest import PaperTradeTracker
+from .board_status import consecutive_boards
 from .config import Settings
+from .data_readiness import DiscoveryDataReadiness
 from .db import Database
 from .discovery_ai_policy import (
     DISCOVERY_AI_OPTIONS,
@@ -29,6 +31,7 @@ from .domain import StockContext
 from .feishu import FeishuNotifier, redact_feishu_webhook
 from .fund_flow import EastmoneyFlowClient
 from .market_clock import MarketClock
+from .market_cycles import MarketCycleTracker
 from .providers import TushareClient
 from .scoring import ThemeScorer
 from .theme_policy import policy_structured_event_clusters as structured_event_clusters
@@ -64,6 +67,8 @@ class StockTopicService:
             settings.feishu_bot_webhook, secret=settings.feishu_bot_secret,
         )
         self.clock = MarketClock()
+        self.data_readiness = DiscoveryDataReadiness(self)
+        self.market_cycles = MarketCycleTracker(self.database)
         self._collector_lock = threading.Lock()
         self._discovery_lock = threading.Lock()
         self._ai_lock = threading.Lock()
@@ -71,6 +76,7 @@ class StockTopicService:
         self._ai_inflight: set[int] = set()
         self._discovery_inflight: set[str] = set()
         self._fund_flow_inflight: set[str] = set()
+        self._source_inflight: set[str] = set()
         self._startup_backfill_pending = True
         self._stop_event = asyncio.Event()
 
@@ -127,7 +133,7 @@ class StockTopicService:
         ):
             self.sync_kpl_concepts(previous_date)
         if self.database.calendar_status(compact):
-            self.sync_daily_limits(now)
+            self.data_readiness.ensure_limits(compact, now)
         recent_dates = self.database.open_trade_dates(compact, 6)
         current_metrics_ready = bool(
             self.database.calendar_status(compact) and now.time() >= time(17, 0)
@@ -148,7 +154,7 @@ class StockTopicService:
         ):
             for trade_date in reversed(recent_dates[:5]):
                 if not self.database.has_kpl_events_for_date(trade_date):
-                    self.sync_kpl_events(trade_date)
+                    self.data_readiness.kpl_for_date(trade_date, now)
             self.database.set_metadata("kpl_history_bootstrapped", recent_dates[0])
 
     def sync_calendar(self, now: datetime | None = None) -> int:
@@ -189,6 +195,12 @@ class StockTopicService:
         run_id = self.database.begin_run("sync_daily_limits")
         try:
             rows = self.provider.stock_limits(compact)
+            rows = [row for row in rows
+                    if str(row.get("trade_date") or "").replace("-", "") == compact
+                    and self.data_readiness._valid_upper(row.get("up_limit"))
+                    and self.data_readiness._valid_upper(row.get("down_limit"))]
+            if not rows:
+                raise RuntimeError(f"Official daily limits unavailable for {compact}")
             count = self.database.upsert_daily_limits(now.date().isoformat(), rows)
             self.database.finish_run(run_id, "success", count)
             return count
@@ -494,9 +506,17 @@ class StockTopicService:
             self.database.set_metadata(
                 "kpl_concepts_may_be_truncated", "true" if len(rows) >= 3000 else "false"
             )
+            self.database.set_metadata(f"kpl_concept_coverage:{trade_date}", json.dumps({
+                "trade_date": trade_date, "state": "available" if count else "empty",
+                "row_count": count, "checked_at": self.clock.china_now().isoformat(),
+            }))
             self.database.finish_run(run_id, "success", count)
             return count
         except Exception as error:
+            self.database.set_metadata(f"kpl_concept_coverage:{trade_date}", json.dumps({
+                "trade_date": trade_date, "state": "unavailable", "error": _safe_error(error),
+                "checked_at": self.clock.china_now().isoformat(),
+            }))
             self.database.finish_run(run_id, "degraded", detail=str(error))
             logger.warning("KPL concept sync degraded: %s", error)
             self._data_pull_failure("sync_kpl_concepts", error)
@@ -509,12 +529,27 @@ class StockTopicService:
         observed_at = self.clock.normalize(now or self.clock.china_now())
         with self._discovery_lock:
             events = self.database.limit_touch_events(trade_date)
+            local = structured_event_clusters(events, include_broad_parents=True)
+            limit_readiness = json.loads(self.database.get_metadata(
+                f"daily_limit_readiness:{trade_date}") or "null")
+            signal_coverage = json.loads(self.database.get_metadata(
+                f"market_signal_coverage:{trade_date}") or "null")
+            kpl_coverage = json.loads(self.database.get_metadata(
+                f"kpl_event_coverage:{trade_date}") or "null")
+            complete = (signal_coverage or {}).get("mainboard_available")
+            if complete is None and (kpl_coverage or {}).get("state") == "available":
+                complete = True
+            self.market_cycles.observe(
+                trade_date, observed_at, events, local,
+                coverage_complete=complete,
+            )
             coverage = {
                 "source_counts": dict(Counter(e.get("signal_source", "unknown") for e in events)),
                 "mainboard_count": sum(e.get("market") == "主板" for e in events),
                 "chinext_count": sum(e.get("market") == "创业板" for e in events),
-                "kpl_sync": json.loads(self.database.get_metadata(
-                    f"kpl_event_coverage:{trade_date}") or "null"),
+                "kpl_sync": kpl_coverage,
+                "daily_limits": limit_readiness,
+                "market_signals": signal_coverage,
             }
             if len(events) < self.settings.minimum_limit_touches:
                 self.database.set_metadata(
@@ -536,7 +571,6 @@ class StockTopicService:
             trace_key = f"discovery_trace:{trade_date}:{input_signature}"
             self.database.set_metadata(f"discovery_trace_latest:{trade_date}", input_signature)
             from .event_bridge import EventBridgeDetector
-            local = structured_event_clusters(events, include_broad_parents=True)
             detector = EventBridgeDetector()
             bridges = detector.detect(trade_date, events, local)
             local_early_now = [c for c in local if not c.get("parent_only")
@@ -741,14 +775,17 @@ class StockTopicService:
         for trade_date in reversed(trade_dates):
             try:
                 if refresh_sources:
-                    if self.sync_kpl_events(trade_date) < 0:
+                    if self.data_readiness.kpl_for_date(trade_date, observed_at) < 0:
                         raise RuntimeError(f"KPL events unavailable for {trade_date}")
                     self.sync_kpl_concepts(trade_date)
                     completed_day = trade_date < compact or observed_at.time() >= time(16, 0)
-                    if completed_day and self.sync_chinext_growth_signals(trade_date) < 0:
-                        raise RuntimeError(
-                            f"ChiNext daily growth signals unavailable for {trade_date}"
-                        )
+                    if completed_day:
+                        self.data_readiness.ensure_limits(trade_date, observed_at)
+                        if self.sync_chinext_growth_signals(trade_date) < 0:
+                            raise RuntimeError(
+                                f"ChiNext daily growth signals unavailable for {trade_date}"
+                            )
+                        self.database.backfill_mainboard_limit_events(trade_date, observed_at)
                 candidate_ids.extend(self.discover_trade_date(trade_date, observed_at))
             except Exception as error:
                 failures.append(f"{trade_date}:{_safe_error(error)}")
@@ -867,6 +904,7 @@ class StockTopicService:
                     raise RuntimeError("Full-market cumulative amount and volume did not change")
 
                 trade_date = started.date().isoformat()
+                self.data_readiness.ensure_limits(compact, started)
                 history = self.database.latest_quote_history(trade_date, depth=2)
                 limits = self.database.daily_limit_map(trade_date)
                 anomalies = []
@@ -909,14 +947,17 @@ class StockTopicService:
                 candidate_ids: list[int] = []
                 discovery_trade_date: str | None = None
                 if started.minute % self.settings.cluster_interval_minutes == 0:
-                    kpl_count = self.sync_kpl_events(compact)
+                    kpl_count = self.data_readiness.kpl_for_date(compact, started)
                     if kpl_count >= 0 or mainboard_touch_count or chinext_growth_count:
                         discovery_trade_date = compact
+                signal_coverage = self.data_readiness.signal_coverage(
+                    compact, started, quotes, limits,
+                )
                 scored_ids = self.scorer.score_confirmed(started)
                 self._evaluate_theme_alerts(started, scored_ids, stale=False)
                 self.database.finish_run(
                     run_id,
-                    "success",
+                    "success" if signal_coverage["mainboard_available"] else "degraded",
                     len(quotes),
                     f"internal_events={len(anomalies)}, invalid_quotes={len(invalid_quotes)}, "
                     f"chinext_growth={chinext_growth_count}, "
@@ -924,13 +965,14 @@ class StockTopicService:
                     f"candidates={len(candidate_ids)}, live_pool={live_pool}",
                 )
                 return {
-                    "status": "success",
+                    "status": "success" if signal_coverage["mainboard_available"] else "degraded",
                     "slot": state.slot,
                     "quotes": len(quotes),
                     "internal_events": len(anomalies),
                     "invalid_quotes": len(invalid_quotes),
                     "chinext_growth_signals": chinext_growth_count,
                     "mainboard_touch_signals": mainboard_touch_count,
+                    "discovery_coverage": signal_coverage,
                     "candidate_ids": candidate_ids,
                     "discovery_trade_date": discovery_trade_date,
                     "scored_ids": scored_ids,
@@ -992,7 +1034,8 @@ class StockTopicService:
                         for value in item.get("within_window_match_ids", [])
                         if int(value) in valid_history_ids
                     }
-                    if not item.get("is_new_theme") and not cited_history_ids:
+                    if (not item.get("is_new_theme") and not cited_history_ids
+                            and item.get("novelty_mode") != "old_rotation"):
                         item["is_new_theme"] = True
                         item["novelty_confidence"] = max(
                             float(item.get("novelty_confidence") or 0),
@@ -1449,8 +1492,8 @@ class StockTopicService:
             return {"status": "duplicate_skipped"}
         run_id = self.database.begin_run("end_of_day")
         try:
-            self.sync_daily_limits(now)
-            self.sync_kpl_events(compact)
+            self.data_readiness.ensure_limits(compact, now)
+            self.data_readiness.kpl_for_date(compact, now)
             self.sync_kpl_concepts(compact)
             self.sync_daily_metrics(compact)
             backfill = self.backfill_recent_trade_days(
@@ -1536,6 +1579,15 @@ class StockTopicService:
                 except Exception:
                     logger.exception("Calendar unavailable; collector remains fail-closed")
             state = self.clock.state(now, calendar)
+            # Delayed daily sources are reconciled independently of the realtime clock;
+            # Saturday can publish Friday's KPL data. Never call rt_k from this job.
+            for day in self.data_readiness.due_completed_dates(now):
+                if day not in self._source_inflight:
+                    self._source_inflight.add(day)
+                    asyncio.create_task(
+                        asyncio.to_thread(self._reconcile_completed_sources, day, now),
+                        name=f"completed-sources-{day}",
+                    )
             candidate_ids: list[int] = []
             if self._startup_backfill_pending and calendar is not None:
                 self._startup_backfill_pending = False
@@ -1628,6 +1680,12 @@ class StockTopicService:
     def stop(self) -> None:
         self._stop_event.set()
 
+    def _reconcile_completed_sources(self, day: str, now: datetime) -> None:
+        try:
+            self.data_readiness.reconcile(day, now)
+        finally:
+            self._source_inflight.discard(day)
+
     def health(self) -> dict[str, Any]:
         now = self.clock.china_now()
         compact = now.strftime("%Y%m%d")
@@ -1642,12 +1700,24 @@ class StockTopicService:
         )
         kpl_coverage = json.loads(self.database.get_metadata(
             f"kpl_event_coverage:{compact}") or "null")
+        limit_readiness = json.loads(self.database.get_metadata(
+            f"daily_limit_readiness:{compact}") or "null")
+        signal_coverage = json.loads(self.database.get_metadata(
+            f"market_signal_coverage:{compact}") or "null")
+        missing_mainboard = (
+            (limit_readiness is not None and not limit_readiness.get("ready"))
+            or (signal_coverage is not None and not signal_coverage.get("mainboard_available"))
+        )
         warnings = self.settings.validate_integrations()
+        if missing_mainboard and state.is_open_day and now.time() >= time(9, 30):
+            warnings.append("主板行情或涨停价覆盖不完整，主板发现输入可能缺失；正在按交易日重试")
         if (kpl_coverage and kpl_coverage.get("state") in {"empty_strong_feed", "unavailable"}
                 and state.is_open_day and now.time() >= time(9, 35)):
             warnings.append("KPL强势股数据为空或不可用；主板覆盖依赖本地行情触板记录，请检查数据源")
         return {
-            "status": "ok" if database_ready else "degraded",
+            "status": "ok" if database_ready and not (
+                missing_mainboard and state.in_realtime_window and now.time() >= time(9, 30)
+            ) else "degraded",
             "version": __version__,
             "china_time": now.isoformat(timespec="seconds"),
             "database": "reachable" if database_ready else "unavailable",
@@ -1660,6 +1730,8 @@ class StockTopicService:
             "universe_count": self.database.active_stock_count(),
             "latest_quote_run": latest,
             "discovery_input_coverage": kpl_coverage,
+            "daily_limit_readiness": limit_readiness,
+            "market_signal_coverage": signal_coverage,
             "integrations": {
                 "tushare": True,
                 "tushare_transport": self.provider.transport,
@@ -1751,11 +1823,7 @@ class StockTopicService:
 
 
 def _parse_board_height(status: Any) -> int:
-    value = str(status or "")
-    if "首板" in value:
-        return 1
-    digits = "".join(character for character in value if character.isdigit())
-    return int(digits) if digits else 0
+    return consecutive_boards(status)
 
 
 def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
