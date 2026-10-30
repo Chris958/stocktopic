@@ -278,4 +278,4 @@ class MarketCycleTracker:
             ),
             reverse=True,
         )
-        return result[:8]
+        return result

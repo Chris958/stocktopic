@@ -63,7 +63,7 @@ KPL榜单是延迟日度源，官方口径为交易日06:00更新前一交易日
 - `market_signal_coverage:YYYYMMDD`：实际行情可用性与分市场强势输入数。
 - `kpl_concept_coverage:YYYYMMDD`：概念同步状态，空结果与接口失败分别保存。
 - `completed_sources:YYYYMMDD`：次日补录状态、尝试时间、各源结果。
-- `market_cycles_v1`：最多120个方向、每方向最近10个观察日；页面最多8个周期，成员展示有上限。
+- `market_cycles_v1`：最多120个方向、每方向最近10个观察日；页面默认8个周期，可展开全部，成员展示有上限。
 
 原`discovery_trace`继续记录源覆盖、节点验证及桥接决策，原`admission_trace`保存准入结果。
 只读审计现在额外导出上述日度源状态、当前存储涨停价覆盖、分市场强势股数、市场周期快照，

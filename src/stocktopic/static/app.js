@@ -149,6 +149,10 @@ $$('[data-backtest-filter]').forEach(button => button.addEventListener('click', 
 }));
 
 $('#refresh').addEventListener('click', () => load(true));
+$('#marketCycleExpand').addEventListener('click', () => {
+  state.showAllMarketCycles = !state.showAllMarketCycles;
+  renderMarketCycles();
+});
 $('#accountButton').addEventListener('click', event => openSheet('logout', {}, event.currentTarget));
 $('#feishuTest').addEventListener('click', event => openSheet('feishu', {}, event.currentTarget));
 $('#sheetBackdrop').addEventListener('click', closeSheet);
@@ -233,7 +237,12 @@ function isLocalObservation(theme) {
 function renderMarketCycles() {
   const cycles = state.data?.market_cycles || [];
   $('#marketCyclePanel').hidden = !cycles.length;
-  $('#marketCycleList').innerHTML = cycles.map(cycle => {
+  const expand = $('#marketCycleExpand');
+  expand.hidden = cycles.length <= 8;
+  expand.setAttribute('aria-expanded', String(!!state.showAllMarketCycles));
+  expand.textContent = state.showAllMarketCycles ? '收起方向' : `查看全部${cycles.length}个方向`;
+  const visible = state.showAllMarketCycles ? cycles : cycles.slice(0, 8);
+  $('#marketCycleList').innerHTML = visible.map(cycle => {
     const current = cycle.latest;
     const ladder = Object.entries(current.board_ladder || {}).sort((a, b) => Number(b[0]) - Number(a[0]))
       .map(([height, count]) => `${height}板 ${count}只`).join(' · ');

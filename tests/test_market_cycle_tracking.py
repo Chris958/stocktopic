@@ -78,6 +78,14 @@ def test_robot_and_low_air_track_independent_cross_day_cycles_with_ladders(servi
     assert service.database.list_themes() == []  # Market observations do not admit an event.
 
 
+def test_dashboard_keeps_directions_beyond_the_initial_eight_cards(service):
+    rows = [event(i) for i in range(4)]
+    for row in rows:
+        row["themes"] = [f"细分事件{j}" for j in range(10)]
+    observe(service, 16, rows)
+    assert len(service.market_cycles.dashboard(current())) == 10
+
+
 def test_four_stock_ai_rejection_stays_visible_as_a_market_observation(service):
     events = [event(i) for i in range(4)]
     service.database.limit_touch_events = lambda _: events
