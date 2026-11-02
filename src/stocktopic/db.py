@@ -1619,23 +1619,52 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_themes(self, status: str | None = None) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM candidate_themes"
+    def theme_index(self) -> list[dict[str, Any]]:
+        """Card headers only. Never materialize member evidence, quotes or review history."""
+        with self.connect() as connection:
+            return [dict(row) for row in connection.execute("""
+                SELECT id, final_name, suggested_name, provisional_name, shared_tag,
+                       status, admission_status, theme_level, pinned, day1_date,
+                       substr(admission_reason, 1, 120) AS reason_preview,
+                       (SELECT COUNT(*) FROM theme_members m
+                         WHERE m.theme_id=t.id AND m.active=1) AS member_count
+                FROM candidate_themes t WHERE status IN
+                    ('pending','watching','confirmed','archived','rejected')
+                ORDER BY pinned DESC, updated_at DESC, id DESC
+            """)]
+
+    def list_themes(
+        self, status: str | None = None, *, theme_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        conditions = []
         params: list[Any] = []
         if status:
-            sql += " WHERE status=?"
+            conditions.append("ct.status=?")
             params.append(status)
-        sql += " ORDER BY pinned DESC, updated_at DESC"
+        if theme_id is not None:
+            conditions.append("ct.id=?")
+            params.append(theme_id)
+        where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as connection:
-            themes = [dict(row) for row in connection.execute(sql, params).fetchall()]
-            direction_data = {row["key"]: json.loads(row["value"]) for row in connection.execute(
-                "SELECT key,value FROM metadata WHERE key LIKE 'direction_state:%' "
-                "OR key LIKE 'direction_event:%'"
-            )}
-            member_sql = "SELECT DISTINCT tm.code FROM theme_members tm "
-            member_sql += "JOIN candidate_themes ct ON ct.id=tm.theme_id"
-            if status:
-                member_sql += " WHERE ct.status=?"
+            themes = [dict(row) for row in connection.execute(
+                "SELECT ct.* FROM candidate_themes ct" + where
+                + " ORDER BY ct.pinned DESC, ct.updated_at DESC", params,
+            )]
+            if not themes:
+                return []
+            if theme_id is None:
+                direction_rows = connection.execute(
+                    "SELECT key,value FROM metadata WHERE key LIKE 'direction_state:%' "
+                    "OR key LIKE 'direction_event:%'"
+                )
+            else:
+                direction_rows = connection.execute(
+                    "SELECT key,value FROM metadata WHERE key IN (?,?)",
+                    (f"direction_state:{theme_id}", f"direction_event:{theme_id}"),
+                )
+            direction_data = {row["key"]: json.loads(row["value"]) for row in direction_rows}
+            member_sql = ("SELECT DISTINCT tm.code FROM theme_members tm "
+                          "JOIN candidate_themes ct ON ct.id=tm.theme_id" + where)
             codes = [str(row["code"]) for row in connection.execute(member_sql, params)]
             board_context = self._load_board_context(connection, codes) if codes else ({}, {})
             for theme in themes:
@@ -2184,10 +2213,7 @@ class Database:
         }
 
     def get_theme(self, theme_id: int) -> dict[str, Any] | None:
-        for theme in self.list_themes():
-            if int(theme["id"]) == theme_id:
-                return theme
-        return None
+        return next(iter(self.list_themes(theme_id=theme_id)), None)
 
     def set_theme_status(
         self,

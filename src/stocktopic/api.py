@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
@@ -70,6 +71,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     service = StockTopicService(settings)
     dashboard_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dashboard")
 
+    index_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="theme-index")
+
     async def run_background_services() -> None:
         try:
             await asyncio.to_thread(service.initialize_reference_data)
@@ -90,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await background_services
             finally:
+                index_executor.shutdown(wait=False, cancel_futures=True)
                 dashboard_executor.shutdown(wait=False, cancel_futures=True)
 
     app = FastAPI(
@@ -215,20 +219,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timing.phase("attach_fund_flows", lambda: service.database.attach_theme_fund_flows(
             themes, flow_date, flow_slot,
         ))
+        panels = dashboard_panels(timing, now)
+        payload = {**panels, "themes": themes}
+        encoded = timing.phase("jsonable_encoder", lambda: jsonable_encoder(payload))
+        return timing.phase("json_response", lambda: JSONResponse(encoded))
+
+    def dashboard_panels(timing, now):
         health = timing.phase("health_exec", service.health)
         alerts = timing.phase("alerts", lambda: service.database.recent_alerts(100))
         backtest = timing.phase("backtest", lambda: service.test_pool.dashboard(now))
         cycles = timing.phase("market_cycles", lambda: service.market_cycles.dashboard(now))
-        payload = {"health": health, "themes": themes, "alerts": alerts, "backtest": backtest,
-                   "market_cycles": cycles}
-        encoded = timing.phase("jsonable_encoder", lambda: jsonable_encoder(payload))
-        return timing.phase("json_response", lambda: JSONResponse(encoded))
+        return {"health": health, "alerts": alerts, "backtest": backtest, "market_cycles": cycles}
+
+    def build_index(timing):
+        items = timing.phase("theme_index", service.database.theme_index)
+        timing.counts["themes"] = len(items)
+        return timing.phase("json_response", lambda: JSONResponse({"themes": items}))
 
     @app.get("/api/v1/dashboard")
-    async def dashboard(request: Request):
+    async def dashboard(request: Request, view: Literal["full", "index", "panels"] = "full"):
         timing = request.scope.get(SCOPE_KEY) or DashboardTiming()
         endpoint_started = time.perf_counter()
         try:
+            if view == "index":
+                return await timing.dashboard_worker(index_executor, lambda: build_index(timing))
+            if view == "panels":
+                return await timing.dashboard_worker(
+                    dashboard_executor,
+                    lambda: JSONResponse(dashboard_panels(timing, service.clock.china_now())),
+                )
             return await timing.dashboard_worker(
                 dashboard_executor, lambda: build_dashboard(timing),
             )
@@ -290,6 +309,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }:
             raise HTTPException(status_code=400, detail="Invalid theme status")
         return {"items": await asyncio.to_thread(service.database.list_themes, status)}
+
+    @app.get("/api/v1/themes/{theme_id}")
+    def theme_detail(theme_id: int):
+        theme = service.database.get_theme(theme_id)
+        if theme is None:
+            raise HTTPException(status_code=404, detail="Theme not found")
+        day, slot = service.fund_flow_display_context(service.clock.china_now())
+        service.database.attach_theme_fund_flows([theme], day, slot)
+        return JSONResponse(theme)
 
     @app.post("/api/v1/themes/{theme_id}/pin")
     async def pin_theme(theme_id: int, request: PinRequest):

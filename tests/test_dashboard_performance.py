@@ -197,12 +197,13 @@ def test_frontend_shared_refresh_and_structure_panel_never_refetch():
     script = r"""
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-let calls = 0, resolve, events = [];
+let paths = [], resolve, events = [];
 const classes = {add(){}, remove(){}};
 const context = {
   dashboardLoadInFlight: null, state: {authenticated:true},
   $: () => ({classList:classes}), toast(){}, render(){ events.push('render'); },
-  api: () => { calls++; return new Promise(r => {resolve = r;}); },
+  renderPanels(){ events.push('panels'); },
+  api: path => { paths.push(path); return new Promise(r => {resolve = r;}); },
   window: {dispatchEvent(e){events.push(e.type);}},
   CustomEvent: class {constructor(type, options){this.type=type; this.detail=options.detail;}}
 };
@@ -211,11 +212,12 @@ vm.runInContext('function load(manual=false) {' + LOAD, context);
 (async () => {
   const a = context.load(), b = context.load(true);
   assert.equal(a, b);
-  assert.equal(calls, 1);
-  resolve({themes:[]}); await a;
-  assert.deepEqual(events, ['render','stocktopic:dashboard']);
-  const c = context.load(); assert.equal(calls, 2);
-  resolve({themes:[]}); await c;
+  assert.deepEqual(paths, ['/api/v1/dashboard?view=index']);
+  resolve({themes:[]}); await Promise.resolve(); await new Promise(setImmediate);
+  assert.deepEqual(events, ['render']);  // No dependency on the slower panels response.
+  assert.deepEqual(paths, ['/api/v1/dashboard?view=index', '/api/v1/dashboard?view=panels']);
+  resolve({alerts:[]}); await a;
+  assert.deepEqual(events, ['render','panels']);
   let handler, timers = [];
   vm.runInNewContext(PLUGIN, {
     window: {addEventListener(type, h){assert.equal(type,'stocktopic:dashboard'); handler=h;}},
@@ -282,3 +284,36 @@ def test_scheduler_lightweight_states_preserve_admission_due_checks(tmp_path):
                for t in states)
     assert sum(s.startswith("SELECT") for s in statements) == 1
     assert not any("theme_members" in s or "quote_snapshots" in s for s in statements)
+
+def test_browser_index_skips_bulk_work_and_detail_is_scoped(tmp_path):
+    app = create_app(Settings(tushare_token="test", db_path=tmp_path / "stock.sqlite3",
+                              archive_dir=tmp_path / "archive", app_api_token="test-token"))
+    db = app.state.service.database
+    db.initialize()
+    first = theme(db, 1, ["600001.SH", "600002.SH"])
+    second = theme(db, 2, ["600003.SH"])
+    db.set_theme_status(second, "archived")
+    db.set_metadata(f"direction_event:{first}", '{"event_name":"测试事件"}')
+    client = TestClient(app)
+    headers = {"Authorization": "Bearer test-token"}
+    expected = client.get("/api/v1/dashboard", headers=headers).json()
+    statements = trace(db)
+    path = "/api/v1/dashboard?view=index"
+    assert client.get(path).status_code == 401
+    assert client.get(f"/api/v1/themes/{first}").status_code == 401
+    response = client.get(path, headers=headers)
+    assert response.status_code == 200 and "theme_index;dur=" in response.headers["server-timing"]
+    rows = response.json()["themes"]
+    assert {r["id"]: r["member_count"] for r in rows} == {first: 2, second: 1}
+    assert all("members" not in r for r in rows)
+    assert len([s for s in statements if s.lstrip().startswith("SELECT")]) == 1
+    assert not any("quote_snapshots" in s or "evidence_json" in s for s in statements)
+
+    panels = client.get("/api/v1/dashboard?view=panels", headers=headers)
+    assert set(panels.json()) == {"health", "alerts", "backtest", "market_cycles"}
+    # A malformed historical member would expose any accidental full-table hydration.
+    with db.connect() as con:
+        con.execute("UPDATE theme_members SET evidence_json='invalid' WHERE theme_id=?", (second,))
+    detail = client.get(f"/api/v1/themes/{first}", headers=headers)
+    assert detail.json() == next(t for t in expected["themes"] if t["id"] == first)
+    assert client.get("/api/v1/themes/999999", headers=headers).status_code == 404

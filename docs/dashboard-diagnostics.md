@@ -79,22 +79,31 @@ have `Server-Timing`, containing phases available before response headers. Brows
 Network can correlate this ID with the log. Authentication/CSRF/security headers
 and the JSON body remain unchanged. Error responses may lack the timing header.
 
-## Deploy the diagnostic PR branch before merge
+## Production verification
 
-On the Mac mini (existing repository):
+The web page now requests `/api/v1/dashboard?view=index` first. This returns card
+headers and active member counts with one SELECT; it does not read quotes, board
+history, review evidence, or fund flows. Only the active tab is rendered, in
+groups of 24. Opening a card fetches `/api/v1/themes/{id}`; its data and actions
+are the same as the corresponding complete dashboard record. Subsequent
+refreshes update the open detail. Health, market cycles, alerts and the test
+pool load in a separate `?view=panels` request after the index renders.
+The index has a separate worker from the legacy full dashboard; SQLite locks
+and event-loop delays can still affect it. No schema/config changes are needed.
+
+After installing the release on the Mac mini, measure the **web first request** locally:
 
 ```bash
-cd /Users/chris/stocktopic
-git fetch origin
-git switch --track origin/diag/dashboard-latency
-bash ./scripts/install_macos.sh
-bash ./scripts/doctor.sh
+curl -sS --user chris -o /dev/null --max-time 90 \
+  -w 'HTTP=%{http_code} TTFB=%{time_starttransfer}s total=%{time_total}s bytes=%{size_download}\n' \
+  'http://127.0.0.1:8765/api/v1/dashboard?view=index'
 ```
 
-If that local branch already exists, use `git switch diag/dashboard-latency` and
-`git pull --ff-only origin diag/dashboard-latency` instead. No reset/stash is needed.
-After restarting, close browser pages and let the startup backfill finish before
-comparing timings. Do not manually duplicate backfill jobs.
+Repeat against the public hostname to separate network delay. In the browser
+Network tab the index should finish before panels, and there should be no full
+dashboard fetch. In the log the index request has a `theme_index` stage; compare
+its `dashboard_queue`, `dashboard_resume` and `headers_ready` if it still stalls.
+Use the unqualified URL below **only to compare the legacy full payload**.
 
 In one terminal, watch only diagnostic lines:
 
