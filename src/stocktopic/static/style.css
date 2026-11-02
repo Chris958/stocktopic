@@ -797,3 +797,22 @@ h1 {
 }
 
 .flow-source-grid {display:grid;gap:10px;margin:12px 0}.flow-source-grid>div {display:grid;grid-template-columns:1fr 1fr;gap:6px}.flow-source-grid small {grid-column:1/-1}.member-flow-details {font-size:11px;max-width:100%}.theme-fund-flow details p {font-size:11px;color:var(--secondary)}
+
+.theme-preview {
+  padding: 1rem;
+  border: 1px solid var(--separator);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+}
+.theme-preview-button {
+  display: grid;
+  gap: .35rem;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.theme-preview-button span, .theme-preview-button small { color: var(--secondary); }
+.theme-preview-button span:last-child { color: var(--blue); }
+.theme-preview > .theme-card { margin-top: .75rem; }

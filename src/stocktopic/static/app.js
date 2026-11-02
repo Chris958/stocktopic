@@ -5,6 +5,10 @@ try { savedSections = JSON.parse(localStorage.getItem('stocktopicSections') || '
 catch (_) { savedSections = {}; }
 const state = {
   data: null,
+  openTheme: null,
+  detail: null,
+  detailRequest: 0,
+  listLimit: 24,
   authenticated: false,
   view: 'candidates',
   candidateFilter: 'watching',
@@ -66,6 +70,8 @@ async function api(path, options = {}) {
 
 function showLogin(message = '') {
   state.authenticated = false;
+  state.data = null;
+  resetThemeList();
   $('#loginBackdrop').classList.remove('authenticated');
   $('#loginError').textContent = message;
   requestAnimationFrame(() => $('#loginPassword').focus());
@@ -109,6 +115,7 @@ $$('[data-view]').forEach(button => button.addEventListener('click', () => {
 
 function setView(view) {
   if (!views[view]) return;
+  resetThemeList();
   state.view = view;
   $$('.nav-item,.mobile-tab').forEach(button => {
     const selected = button.dataset.view === view;
@@ -121,6 +128,7 @@ function setView(view) {
   $('#sectionKicker').textContent = content.kicker;
   $('#sectionTitle').textContent = content.title;
   $('#sectionDescription').textContent = content.description;
+  renderActiveView();
   updateSectionCount();
   if (window.innerWidth < 861) {
     $('.content-shell').scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -128,6 +136,7 @@ function setView(view) {
 }
 
 $$('[data-theme-filter]').forEach(button => button.addEventListener('click', () => {
+  resetThemeList();
   state.themeFilter = button.dataset.themeFilter;
   $$('[data-theme-filter]').forEach(item => item.classList.toggle('active', item === button));
   renderConfirmed();
@@ -135,6 +144,7 @@ $$('[data-theme-filter]').forEach(button => button.addEventListener('click', () 
 }));
 
 $$('[data-candidate-filter]').forEach(button => button.addEventListener('click', () => {
+  resetThemeList();
   state.candidateFilter = button.dataset.candidateFilter;
   $$('[data-candidate-filter]').forEach(item => item.classList.toggle('active', item === button));
   renderCandidates();
@@ -178,9 +188,21 @@ function load(manual = false) {
     const refresh = $('#refresh');
     refresh.classList.add('loading');
     try {
-      state.data = await api('/api/v1/dashboard');
+      const index = await api('/api/v1/dashboard?view=index');
+      if (!state.authenticated) return;
+      state.data = { ...state.data, themes: index.themes };
+      if (state.openTheme != null && !index.themes.some(theme => theme.id === state.openTheme
+          && (state.view === 'candidates' ? candidateMatchesFilter(theme, state.candidateFilter)
+            : theme.status === (state.themeFilter === 'archived' ? 'archived' : 'confirmed')
+              && (state.themeFilter !== 'pinned' || theme.pinned)))) resetThemeList();
       render();
-      window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: state.data }));
+      if (state.openTheme != null) void fetchThemeDetail(state.openTheme);
+      const panels = await api('/api/v1/dashboard?view=panels');
+      if (!state.authenticated) return;
+      Object.assign(state.data, panels);
+      renderPanels();
+      if (state.detail) renderActiveView(); // Update tracking buttons from the new test pool.
+
       if (manual) toast('数据已刷新');
     } catch (error) {
       if (state.authenticated) toast(error.message, true);
@@ -193,10 +215,20 @@ function load(manual = false) {
 
 function render() {
   if (!state.data) return;
-  const { health, themes, alerts, backtest = { entries: [], summary: {} } } = state.data;
+  const { themes } = state.data;
   const pending = themes.filter(theme => candidateMatchesFilter(theme, 'reviewing'));
   const watching = themes.filter(theme => candidateMatchesFilter(theme, 'watching'));
   const confirmed = themes.filter(theme => theme.status === 'confirmed');
+  $('#candidateMetric').textContent = watching.length.toLocaleString();
+  $('#confirmedMetric').textContent = confirmed.length.toLocaleString();
+  $('#candidateCount').textContent = pending.length + watching.length;
+  $('#confirmedCount').textContent = confirmed.length;
+  renderActiveView();
+  updateSectionCount();
+}
+
+function renderPanels() {
+  const { health, alerts, backtest } = state.data;
   const market = health.market;
   const coverageMissing = market.realtime_collection_enabled && (
     (health.daily_limit_readiness && !health.daily_limit_readiness.ready)
@@ -213,21 +245,24 @@ function render() {
       ? `最近采集 ${formatDataTime(health.latest_quote_run.started_at)}`
       : marketReason(market.reason);
   $('#universeCount').textContent = health.universe_count?.toLocaleString() || '—';
-  $('#candidateMetric').textContent = watching.length.toLocaleString();
-  $('#confirmedMetric').textContent = confirmed.length.toLocaleString();
   $('#lastRun').textContent = formatTime(health.latest_quote_run?.started_at);
   $('#lastRunDetail').textContent = runStatus(health.latest_quote_run?.status);
-  $('#candidateCount').textContent = pending.length + watching.length;
-  $('#confirmedCount').textContent = confirmed.length;
   $('#backtestCount').textContent = backtest.entries.length;
   $('#alertCount').textContent = alerts.length;
-  renderCandidates();
   renderMarketCycles();
-  renderConfirmed();
-  renderBacktest();
-  renderAlerts(alerts);
+  if (state.view === 'backtest' || state.view === 'alerts') renderActiveView();
   updateSectionCount();
-  scheduleFundFlowPoll(themes, backtest.entries || []);
+  scheduleFundFlowPoll(state.detail ? [state.detail] : [], backtest.entries || []);
+}
+
+function renderActiveView() {
+  if (!state.data) return;
+  if (state.view === 'candidates') renderCandidates();
+  else if (state.view === 'confirmed') renderConfirmed();
+  else if (!state.data.backtest) {
+    $(state.view === 'alerts' ? '#alertList' : '#backtestList').textContent = '正在加载…';
+  } else if (state.view === 'backtest') renderBacktest();
+  else if (state.view === 'alerts') renderAlerts(state.data.alerts);
 }
 
 function isLocalObservation(theme) {
@@ -293,23 +328,83 @@ function renderConfirmed() {
   renderThemes('#confirmedList', items, mode);
 }
 
+async function reloadAfterMutation() {
+  if (dashboardLoadInFlight) await dashboardLoadInFlight;
+  if (state.authenticated) await load();
+}
+
+function resetThemeList() {
+  state.detailRequest++;
+  state.openTheme = null;
+  state.detail = null;
+  state.detailError = '';
+  state.listLimit = 24;
+}
+
+async function fetchThemeDetail(id) {
+  const seq = ++state.detailRequest;
+  state.openTheme = id;
+  state.detailError = '';
+  try {
+    const theme = await api(`/api/v1/themes/${id}`);
+    if (seq !== state.detailRequest) return;
+    state.detail = theme;
+    window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: { themes: [theme] } }));
+  } catch (error) {
+    if (seq !== state.detailRequest) return;
+    state.detailError = error.message;
+  }
+  renderActiveView();
+}
+
+function themePreview(theme, mode) {
+  const title = theme.final_name || theme.suggested_name || theme.provisional_name;
+  const open = theme.id === state.openTheme;
+  const content = open && state.detail ? themeCard(state.detail, mode) : '';
+  return `<div class="theme-preview">
+    <button type="button" class="theme-preview-button" data-open-theme="${theme.id}" aria-expanded="${open}">
+      <strong>${theme.pinned ? '置顶 · ' : ''}${escapeHtml(title)}</strong>
+      <span>${escapeHtml(themeStageLabel(theme))} · ${theme.member_count}只 · ${escapeHtml(theme.day1_date)}</span>
+      ${theme.reason_preview ? `<small>${escapeHtml(theme.reason_preview)}</small>` : ''}
+      <span>${open ? '收起详情' : '查看行情、资金与催化'}</span>
+    </button>
+    ${open && state.detailError ? `<p role="alert">详情更新失败：${escapeHtml(state.detailError)} <button data-retry-theme="${theme.id}">重试</button></p>` : ''}
+    ${content || (open && !state.detailError ? '<p role="status">正在加载题材详情…</p>' : '')}
+  </div>`;
+}
+
 function renderThemes(selector, items, mode) {
   const root = $(selector);
   root.classList.remove('skeleton-list');
   const audit = mode === 'audit';
   root.innerHTML = items.length
-    ? items.map(theme => audit && theme.status === 'rejected'
-      ? rejectedThemeDisclosure(theme, mode)
-      : themeCard(theme, mode)).join('')
+    ? items.slice(0, state.listLimit).map(theme => themePreview(theme, mode)).join('')
+      + (items.length > state.listLimit ? '<button class="filter-chip" data-more>显示更多题材</button>' : '')
     : emptyState(
       audit ? '当前筛选下没有记录' : mode === 'archived' ? '没有已归档题材' : '暂无重点题材',
       audit
         ? '所有达到4票共同事件门槛的候选都会保留审查状态和未入池原因。'
         : '通过新颖性、催化和持续性审查后才会自动入库。'
     );
+  root.querySelector('[data-more]')?.addEventListener('click', () => {
+    state.listLimit += 24;
+    renderActiveView();
+  });
+  root.querySelector('[data-retry-theme]')?.addEventListener('click', () => fetchThemeDetail(state.openTheme));
+  root.querySelectorAll('[data-open-theme]').forEach(button => button.addEventListener('click', () => {
+    const id = Number(button.dataset.openTheme);
+    state.detail = null;
+    state.detailError = '';
+    if (id === state.openTheme) {
+      state.detailRequest++;
+      state.openTheme = null;
+    } else void fetchThemeDetail(id);
+    renderActiveView();
+    root.querySelector(`[data-open-theme="${id}"]`)?.focus({ preventScroll: true });
+  }));
   root.querySelectorAll('[data-action]').forEach(button => {
     button.addEventListener('click', async event => {
-      const theme = items.find(item => Number(item.id) === Number(button.dataset.id));
+      const theme = state.detail?.id === Number(button.dataset.id) ? state.detail : null;
       if (!theme) return;
       if (button.dataset.action === 'track-stock') {
         await trackStock(theme, button.dataset.code, button);
@@ -327,15 +422,6 @@ function renderThemes(selector, items, mode) {
       localStorage.setItem('stocktopicSections', JSON.stringify(state.expanded));
     });
   });
-}
-
-function rejectedThemeDisclosure(theme, mode) {
-  const title = theme.final_name || theme.suggested_name || theme.provisional_name || '未命名题材';
-  const collapseKey = `rejected-theme-${theme.id}`;
-  return `<details class="rejected-theme-disclosure" data-collapse-key="${collapseKey}" ${state.expanded[collapseKey] ? 'open' : ''}>
-    <summary><strong>${escapeHtml(title)}</strong><i aria-hidden="true">⌄</i></summary>
-    <div class="rejected-theme-content">${themeCard(theme, mode)}</div>
-  </details>`;
 }
 
 function themeCard(theme, mode) {
@@ -525,7 +611,7 @@ async function trackStock(theme, code, button) {
       method: 'POST', body: JSON.stringify({ theme_id: Number(theme.id), code })
     });
     toast(result.created ? '已加入测试票池' : '本交易日已跟踪，题材来源已合并');
-    await load();
+    await reloadAfterMutation();
   } catch (error) {
     button.disabled = false;
     button.textContent = original;
@@ -627,7 +713,7 @@ async function immediateThemeAction(action, theme, button) {
       await api(`/api/v1/themes/${theme.id}/restore`, { method: 'POST' });
       toast('题材已恢复');
     }
-    await load();
+    await reloadAfterMutation();
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -702,7 +788,7 @@ $('#sheetForm').addEventListener('submit', async event => {
       closeSheet(); showLogin(); toast('已退出当前账户'); return;
     }
     closeSheet();
-    await load();
+    await reloadAfterMutation();
     toast(action === 'feishu' ? '飞书机器人测试消息已送达' : '操作已完成');
   } catch (error) {
     $('#sheetHint').textContent = error.message;
@@ -731,7 +817,7 @@ function renderAlerts(items) {
 
 function updateSectionCount() {
   if (!state.data) return;
-  const { themes, alerts, backtest = { entries: [] } } = state.data;
+  const { themes, alerts = [], backtest = { entries: [] } } = state.data;
   let count = 0;
   if (state.view === 'candidates') {
     count = themes.filter(theme => candidateMatchesFilter(theme, state.candidateFilter)).length;
