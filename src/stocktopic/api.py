@@ -311,12 +311,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"items": await asyncio.to_thread(service.database.list_themes, status)}
 
     @app.get("/api/v1/themes/{theme_id}")
-    def theme_detail(theme_id: int):
-        theme = service.database.get_theme(theme_id)
+    def theme_detail(theme_id: int, view: Literal["full", "focus"] = "full"):
+        theme = next(iter(service.database.list_themes(
+            theme_id=theme_id, focus_only=view == "focus",
+        )), None)
         if theme is None:
             raise HTTPException(status_code=404, detail="Theme not found")
         day, slot = service.fund_flow_display_context(service.clock.china_now())
         service.database.attach_theme_fund_flows([theme], day, slot)
+        if view == "focus" and theme["status"] in {"confirmed", "archived"}:
+            theme["focus_scope"] = json.loads(
+                service.database.get_metadata("direction_member_scope") or "{}"
+            )
         return JSONResponse(theme)
 
     @app.post("/api/v1/themes/{theme_id}/pin")

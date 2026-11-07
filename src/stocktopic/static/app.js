@@ -23,7 +23,7 @@ const views = {
   candidates: {
     kicker: '早期观察',
     title: '已经形成市场共识，等待证据确认',
-    description: '主板触板与创业板涨幅超10%按上涨原因聚合；未入池候选保留完整审查原因。'
+    description: '沪深主板触板按上涨原因聚合；未入池候选保留完整审查原因。'
   },
   confirmed: {
     kicker: '重点题材库',
@@ -346,7 +346,7 @@ async function fetchThemeDetail(id) {
   state.openTheme = id;
   state.detailError = '';
   try {
-    const theme = await api(`/api/v1/themes/${id}`);
+    const theme = await api(`/api/v1/themes/${id}?view=focus`);
     if (seq !== state.detailRequest) return;
     state.detail = theme;
     window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: { themes: [theme] } }));
@@ -469,13 +469,15 @@ function themeCard(theme, mode) {
     ${summaryMetric('当前平均', formatPct(summary.current_average_pct))}
     ${summaryMetric(`${returnLabel}平均`, formatPct(summary.confirmed_average_return))}
     ${summaryMetric('上涨家数', `${summary.up_count ?? 0}/${summary.member_count ?? activeMembers.length}`)}
-    ${summaryMetric('涨停 / 创业板强势 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.chinext_growth_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
+    ${summaryMetric('涨停 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
   </div>`;
   const fundFlowHtml = themeFundFlow(theme);
   const stockKey = `theme-${theme.id}-stocks`;
   const newsKey = `theme-${theme.id}-news`;
+  const focusLabel = theme.focus_scope?.status === 'incomplete_coverage'
+    ? '关注股 · 涨停数据待补全' : '强势关注股 · 近5个交易日涨停';
   const stockDetails = `<details class="fold-section" data-collapse-key="${stockKey}" ${state.expanded[stockKey] ? 'open' : ''}>
-    <summary><span><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
+    <summary><span><strong>${theme.status === 'confirmed' || archived ? focusLabel : '题材触发股票'}</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
     <div class="member-table" role="table" aria-label="${escapeHtml(title)}股票行情">
       <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span><span>资金 / 操作</span></div>
       <div class="member-table-body">${members}</div>

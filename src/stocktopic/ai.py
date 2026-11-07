@@ -41,16 +41,9 @@ class OpenAIThemeExplainer:
             for key, value in (task_models or {}).items()
             if str(value).strip()
         }
-        # Third-party OpenAI-compatible relays commonly implement Responses API
-        # without newer optional controls such as ``max_tool_calls`` and
-        # ``prompt_cache_key``.  Start those endpoints in the conservative mode
-        # and only send the portable output-token bound.  Official OpenAI keeps
-        # the full controls, while the compatibility layer can still downgrade
-        # either endpoint further when required.
-        endpoint_host = (urllib.parse.urlsplit(self.endpoint).hostname or "").casefold()
-        self._request_controls_mode: str | None = (
-            None if endpoint_host == "api.openai.com" else "bounded"
-        )
+        # Negotiate once per process. Try tool budgets even on third-party relays;
+        # retain the output bound if optional tool controls are unsupported.
+        self._request_controls_mode: str | None = None
         self._request_controls_lock = threading.Lock()
 
     @property
@@ -419,6 +412,7 @@ class OpenAIThemeExplainer:
         max_output_tokens: int = 6000,
         max_tool_calls: int = 5,
         web_search: bool = True,
+        search_required: bool = True,
     ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]]]:
         request_model = self.model_for_task(task_type)
         base_payload = {
@@ -440,7 +434,7 @@ class OpenAIThemeExplainer:
                             "search_context_size": search_context_size,
                         }
                     ],
-                    "tool_choice": "required",
+                    "tool_choice": "required" if search_required else "auto",
                     "include": ["web_search_call.action.sources"],
                 }
             )
@@ -469,7 +463,7 @@ class OpenAIThemeExplainer:
         if mode is None:
             with self._request_controls_lock:
                 if self._request_controls_mode is None:
-                    for candidate_mode in ("full", "bounded", "legacy"):
+                    for candidate_mode in ("full", "bounded"):
                         payload = self._payload_for_mode(
                             base_payload,
                             candidate_mode,
@@ -482,7 +476,7 @@ class OpenAIThemeExplainer:
                             self._request_controls_mode = candidate_mode
                             return raw, candidate_mode
                         except RuntimeError as error:
-                            if "OpenAI HTTP 400" not in str(error) or candidate_mode == "legacy":
+                            if "OpenAI HTTP 400" not in str(error) or candidate_mode == "bounded":
                                 raise
                             logger.warning(
                                 "AI upstream rejected %s request controls; "
@@ -490,7 +484,7 @@ class OpenAIThemeExplainer:
                                 candidate_mode,
                             )
                 mode = self._request_controls_mode
-        mode = mode or self._request_controls_mode or "legacy"
+        mode = mode or self._request_controls_mode or "bounded"
         payload = self._payload_for_mode(
             base_payload, mode, task_type, max_output_tokens, max_tool_calls
         )
@@ -591,11 +585,9 @@ class OpenAIThemeExplainer:
                 if not retryable or attempt >= attempts - 1:
                     raise RuntimeError(last_message) from error
             except TimeoutError as error:
-                # Streaming progress makes a silent read timeout much more likely to
-                # be a broken relay connection than a healthy long generation. Allow
-                # one bounded retry for streamed requests; retain the single-attempt
-                # behavior for non-streaming requests to avoid duplicate billing.
-                timeout_attempts = min(max(1, attempts), 2) if _request_streams(request) else 1
+                # A timeout cannot prove that upstream stopped generating.
+                # Let the persistent scheduler budget decide any later retry.
+                timeout_attempts = 1  # Upstream may still bill the first generation.
                 last_error = error
                 last_message = (
                     f"AI upstream read timed out after {min(attempt + 1, timeout_attempts)}/"
