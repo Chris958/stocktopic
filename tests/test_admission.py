@@ -138,7 +138,6 @@ def test_candidate_is_auto_admitted_only_after_ai_and_member_validation():
             "600001.SH",
             "600002.SH",
             "600003.SH",
-            "600004.SH",
         }
         assert service.notifier.messages[0][0] == "正式题材：算力"
 

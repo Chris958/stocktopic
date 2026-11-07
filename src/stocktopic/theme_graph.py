@@ -403,19 +403,53 @@ def _graph_first_cluster_limit_events(
         -item["bridge_score"], -item["touch_count"], tuple(item["nodes"]),
     ))
 
-    def verify_one(candidate: dict) -> tuple[dict | None, dict]:
-        try:
-            return verify_event_bridge(self, candidate, events)
-        except Exception as error:
-            return None, {"nodes": candidate["nodes"],
-                          "final_reject_reason": "verification_failed",
-                          "error_type": type(error).__name__}
+    cache = getattr(self, "verification_cache", None)
+
+    def verify_group(group):
+        outcomes = []
+        accepted_anchor = False
+        for candidate in group:
+            if accepted_anchor:
+                outcomes.append((None, {"nodes": candidate["nodes"],
+                    "final": "superseded_same_anchor",
+                    "final_reject_reason": "stronger_bridge_same_anchor",
+                    "cache": "skipped_before_ai"}))
+                continue
+            key = (cache.identity(trade_date, "bridge", candidate, events, self.model)
+                   if cache else None)
+            saved = cache.lookup(key) if cache else None
+            if saved:
+                cluster, decision = saved["result"], saved["decision"]
+                decision = {**decision, "cache": "hit", "cache_key": key}
+            else:
+                subject = cache.audit(trade_date, "bridge", [candidate], [key]) if cache else None
+                try:
+                    cluster, decision = verify_event_bridge(
+                        self, candidate, events, subject_id=subject,
+                    )
+                    status = "accepted" if cluster else "rejected"
+                except Exception as error:
+                    cluster, status = None, "failed"
+                    decision = {"nodes": candidate["nodes"],
+                                "final_reject_reason": "verification_failed",
+                                "error_type": type(error).__name__}
+                if cache:
+                    cache.save(key, status, cluster, decision)
+                decision = {**decision, "cache": "miss", "cache_key": key}
+            outcomes.append((cluster, decision))
+            accepted_anchor = bool(cluster and cluster["tag"] == candidate["anchor_tag"]
+                                   and decision.get("ai_bridge_decision") == "merge")
+        return outcomes
 
     outcomes = []
     if self.enabled and ordered_bridges:
+        groups = {}
+        for candidate in ordered_bridges:
+            groups.setdefault(candidate["anchor_tag"], []).append(candidate)
         with ThreadPoolExecutor(max_workers=BRIDGE_VERIFICATION_WORKERS) as executor:
-            # map preserves local-score order even when requests finish out of order.
-            outcomes = list(executor.map(verify_one, ordered_bridges))
+            outcomes = [o for group in executor.map(verify_group, groups.values()) for o in group]
+        order = {tuple(c["nodes"]): i for i, c in enumerate(ordered_bridges)}
+        outcomes.sort(key=lambda o: order[tuple(o[1]["nodes"])])
     elif not self.enabled:
         trace["bridges"] = [{"nodes": c["nodes"], "final_reject_reason": "ai_disabled"}
                             for c in ordered_bridges]
@@ -430,9 +464,14 @@ def _graph_first_cluster_limit_events(
         trace["bridges"].append(decision)
     trace["verification_failed"] = (
         trace.get("single_node_final") == "verification_failed"
+        or any(d.get("reject_reason") == "verification_failed"
+               for d in trace.get("single_node_verifications", []))
         or any(item.get("final_reject_reason") == "verification_failed"
                for item in trace["bridges"])
     )
+    if not result and any(d.get("reject_reason") == "verification_failed"
+                          for d in trace.get("single_node_verifications", [])):
+        trace["single_node_final"] = "verification_failed"
     formal_tags = {item["tag"] for item in result}
     return [*result, *(item for item in early if item["tag"] not in formal_tags)]
 
@@ -470,15 +509,42 @@ def _verify_formal_graph_clusters(
     candidates = [c for c in local if len(set(c["member_codes"])) >= 4
                   and c["tag"] not in {"文化传媒", "传媒"}
                   and (allowed_anchors is None or c["tag"] in allowed_anchors)]
-    result, decisions = [], []
-    # Review local nodes and saved-direction nodes in bounded batches; a busy day
-    # must not silently discard node 21.
-    for start in range(0, len(candidates), 20):
-        result.extend(_verify_formal_graph_batch(
-            self, trade_date, events, minimum_members,
-            candidate_batch=candidates[start:start + 20],
-        ))
-        decisions.extend(self.last_graph_verification)
+    result, decisions, pending = [], [], []
+    cache = getattr(self, "verification_cache", None)
+    for candidate in candidates:
+        key = cache.identity(trade_date, "graph", candidate, events, self.model) if cache else None
+        saved = cache.lookup(key) if cache else None
+        if saved:
+            result.extend(saved["result"] or [])
+            decisions.append({**saved["decision"], "cache": "hit", "cache_key": key})
+        else:
+            pending.append((candidate, key))
+    for start in range(0, len(pending), 20):
+        batch = pending[start:start + 20]
+        nodes, keys = [n for n, _ in batch], [k for _, k in batch]
+        subject = cache.audit(trade_date, "graph", nodes, keys) if cache else trade_date
+        try:
+            accepted = _verify_formal_graph_batch(
+                self, trade_date, events, minimum_members,
+                candidate_batch=nodes, subject_id=subject,
+            )
+        except Exception as error:
+            for node, key in batch:
+                decision = {"anchor_tag": node["tag"], "reject_reason": "verification_failed",
+                            "error_type": type(error).__name__}
+                if cache:
+                    cache.save(key, "failed", [], decision)
+                decisions.append(decision)
+            continue
+        result.extend(accepted)
+        current = list(self.last_graph_verification)
+        for node, key in batch:
+            matched = [c for c in accepted if c["tag"] == node["tag"]]
+            decision = next((d for d in current if d["anchor_tag"] == node["tag"]),
+                            {"anchor_tag": node["tag"], "reject_reason": "not_accepted"})
+            if cache:
+                cache.save(key, "accepted" if matched else "rejected", matched, decision)
+            decisions.append({**decision, "cache": "miss", "cache_key": key})
     self.last_graph_verification = decisions
     return result
 
@@ -488,7 +554,7 @@ def _verify_formal_graph_batch(
     trade_date: str,
     events: list[dict[str, Any]],
     minimum_members: int = 2,
-    *, candidate_batch: list[dict],
+    *, candidate_batch: list[dict], subject_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Use local graph for 2-3 stocks and web/AI only from four stocks onward."""
     from . import ai as ai_module
@@ -626,7 +692,7 @@ known_direction标记本地已存方向，只有known_formal=true才表示历史
     raw, parsed, sources = self._call_prompt(
         prompt,
         task_type="semantic_event_clustering",
-        subject_id=trade_date,
+        subject_id=subject_id or trade_date,
         **DISCOVERY_AI_OPTIONS,
     )
     clusters = parsed.get("clusters")

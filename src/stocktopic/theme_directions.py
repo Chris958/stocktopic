@@ -9,11 +9,14 @@ import threading
 from datetime import datetime
 
 from .market_clock import MarketClock
+from .market_scope import is_mainboard
 from .theme_graph import is_broad_parent_tag
 
 # These are investable directions, not generic industry parents. Component labels
 # such as bearings, reducers or Tesla alone do NOT imply a robot relationship.
 DIRECTION_ALIASES = {
+    "光伏/绿色电力": {"光伏/绿色电力", "光伏", "光伏发电", "光伏设备", "太阳能",
+                  "绿色电力", "绿电", "新能源电力"},
     "机器人": {"机器人", "人形机器人", "工业机器人", "服务机器人", "具身智能"},
     "低空经济": {"低空经济", "低空", "飞行汽车", "飞行汽车(eVTOL)", "eVTOL"},
     "AI内容": {"AI内容", "AI影视", "AI短剧", "AI漫剧", "AI语料", "AI视频", "AIGC"},
@@ -142,6 +145,42 @@ def member_relation(
     return None
 
 
+
+def consolidate_verified_directions(clusters: list[dict]) -> list[dict]:
+    """One admission per direction; only already-verified >=4-stock nodes can combine."""
+    groups, early = {}, []
+    for item in clusters:
+        if len(set(item.get("member_codes") or [])) < 4:
+            early.append(item)
+            continue
+        name = event_direction(item["tag"], item.get("canonical_name", ""),
+                               item.get("common_logic", ""), item.get("direction_name", ""))
+        groups.setdefault(name or item["tag"], []).append(item)
+    result = []
+    for name, nodes in groups.items():
+        if len(nodes) == 1:
+            result.append(nodes[0])
+            continue
+        first = min(nodes, key=lambda n: n["tag"])
+        members = {m["code"]: m for n in nodes for m in n.get("members", [])}
+        catalysts = {c.get("url") or c.get("source_url") or c.get("title"):
+                     c for n in nodes for c in n.get("catalysts", [])}
+        codes = sorted({c for n in nodes for c in n["member_codes"]})
+        result.append({
+            **first, "tag": name, "direction_name": name, "member_codes": codes,
+            "members": list(members.values()), "touch_count": len(codes),
+            "sealed_count": sum(m.get("board_tag") == "涨停" for m in members.values()),
+            "failed_count": sum(m.get("board_tag") == "炸板" for m in members.values()),
+            "member_reasons": {c: r for n in nodes for c, r in n.get("member_reasons", {}).items()},
+            "aliases": sorted({a for n in nodes for a in [n["tag"], *n.get("aliases", [])]}),
+            "canonical_name": "；".join(dict.fromkeys(
+                n.get("canonical_name") or n["tag"] for n in nodes)),
+            "common_logic": "；".join(dict.fromkeys(
+                n.get("common_logic") or n["tag"] for n in nodes)),
+            "catalysts": list(catalysts.values()),
+        })
+    return [*result, *early]
+
 class DirectionDeferred(RuntimeError):
     """The archive changed, or the observation has no new post-archive resonance."""
 
@@ -181,7 +220,7 @@ class ThemeDirectionPool:
         groups = {}
         for row in self.db.direction_tracking_rows():
             state = row.get("direction_state") or {}
-            name = state.get("name") or event_direction(
+            name = label_direction(state.get("name", "")) or state.get("name") or event_direction(
                 row["shared_tag"],
                 row.get("final_name") or row["provisional_name"],
             )
@@ -246,10 +285,12 @@ class ThemeDirectionPool:
     def observe(self, day: str, now: datetime, events: list[dict]) -> list[dict]:
         """Update existing pools from local evidence; return fixed >=4-stock AI nodes."""
         with self.lock:
+            events = [e for e in events if is_mainboard(e["code"])]
             known = []
             for name, root in self._roots().items():
                 previous = {
-                    m["code"] for m in root["members"] if m["active"] and root["qualified_formal"]
+                    m["code"] for m in root["members"]
+                    if root["qualified_formal"] and is_mainboard(m["code"])
                 }
                 matched = [
                     {**e, "direction_relation": relation}
@@ -267,10 +308,11 @@ class ThemeDirectionPool:
                 if not matched:
                     continue
                 last_day = (root.get("direction_state") or {}).get("last_trade_date", "")
-                if day >= last_day:
+                if day == MarketClock.normalize(now).strftime("%Y%m%d") and day >= last_day:
                     self.db.update_direction_members(
                         root["id"],
-                        self._members(matched, name, now, day),
+                        self._members([e for e in matched if e.get("board_tag") == "涨停"],
+                                      name, now, day),
                         now.isoformat(),
                     )
                     state = {
@@ -319,11 +361,13 @@ class ThemeDirectionPool:
                         "cluster_method": "direction_continuation",
                     }
                 )
+            self.db.prune_direction_members(MarketClock.normalize(now).strftime("%Y%m%d"))
             return known
 
     def prepare_clusters(self, day: str, now: datetime, clusters: list[dict]) -> list[dict]:
         with self.lock:
             roots, result = self._roots(), []
+            clusters = consolidate_verified_directions(clusters)
             for item in clusters:
                 if len(set(item.get("member_codes") or [])) < 4:
                     early_name = event_direction(item["tag"])
@@ -385,9 +429,11 @@ class ThemeDirectionPool:
                         continue
                     if root["status"] == "confirmed":
                         last = (root.get("direction_state") or {}).get("last_trade_date", "")
-                        if day >= last:
+                        if day == MarketClock.normalize(now).strftime("%Y%m%d") and day >= last:
                             self.db.update_direction_members(
-                                root["id"], self._members(events, name, now, day), now.isoformat()
+                                root["id"],
+                                self._members([e for e in events if e.get("board_tag") == "涨停"],
+                                              name, now, day), now.isoformat()
                             )
                         self.db.save_theme_catalysts(root["id"], item.get("catalysts") or [])
                         self._record_event(root["id"], context, now)
@@ -399,7 +445,7 @@ class ThemeDirectionPool:
     def admission_context(self, theme: dict) -> dict:
         saved = theme.get("direction_context") or {}
         evidence = [m.get("evidence") or {} for m in theme.get("members", [])]
-        name = saved.get("name") or event_direction(
+        name = label_direction(saved.get("name", "")) or saved.get("name") or event_direction(
             theme["shared_tag"],
             next((e.get("canonical_name") for e in evidence if e.get("canonical_name")), ""),
             next((e.get("common_logic") for e in evidence if e.get("common_logic")), ""),

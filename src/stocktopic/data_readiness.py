@@ -162,7 +162,6 @@ class DiscoveryDataReadiness:
             if self.db.get_metadata(f"daily_prices_synced:{day}") != "true":
                 self.service.sync_daily_prices(day)
             replayed = self.db.backfill_mainboard_limit_events(day, current)
-            self.db.upsert_chinext_daily_growth_events(day, self.db.daily_bars_for_date(day))
             result.update(
                 daily_limits=coverage,
                 kpl_rows=kpl_count,

@@ -262,7 +262,7 @@ class EventBridgeDetector:
 
 
 def verify_event_bridge(
-    client: Any, candidate: dict, events: list[dict]
+    client: Any, candidate: dict, events: list[dict], *, subject_id: str | None = None,
 ) -> tuple[dict | None, dict]:
     """Fail closed on expanded stocks/nodes, insufficient partials or missing evidence."""
     codes = candidate["member_codes"]
@@ -324,7 +324,7 @@ partial_merge只保留明确接受节点及其成员；至少两个节点、每�
     _, parsed, sources = client._call_prompt(
         prompt,
         task_type="semantic_event_clustering",
-        subject_id=candidate["trade_date"],
+        subject_id=subject_id or candidate["trade_date"],
         **DISCOVERY_AI_OPTIONS,
     )
     decision = parsed.get("decision")

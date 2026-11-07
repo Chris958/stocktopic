@@ -37,6 +37,7 @@ from .scoring import ThemeScorer
 from .theme_directions import DirectionDeferred, ThemeDirectionPool
 from .theme_policy import policy_structured_event_clusters as structured_event_clusters
 from .themes import ThemeDiscovery
+from .verification_cache import VerificationCache
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ class StockTopicService:
         self.settings.ensure_directories()
         self.database.initialize()
         self.direction_pool.normalize_existing(self.clock.china_now())
+        self.database.prune_direction_members(self.clock.china_now().strftime("%Y%m%d"))
         recovered_ai = self.database.recover_interrupted_ai_analyses()
         if recovered_ai:
             self.database.set_metadata(
@@ -181,7 +183,7 @@ class StockTopicService:
             rows = self.provider.stock_basic()
             count = self.database.upsert_stocks(rows)
             if count < 2000:
-                raise RuntimeError(f"Main-board and ChiNext universe coverage abnormal: {count}")
+                raise RuntimeError(f"Main-board universe coverage abnormal: {count}")
             self.database.set_metadata(
                 "universe_synced_at", datetime.now().astimezone().isoformat()
             )
@@ -247,14 +249,8 @@ class StockTopicService:
             return 0
 
     def sync_chinext_growth_signals(self, trade_date: str) -> int:
-        compact = trade_date.replace("-", "")
-        if self.database.get_metadata(f"daily_prices_synced:{compact}") != "true":
-            if self.sync_daily_prices(compact) < 2000:
-                return -1
-        rows = self.database.daily_bars_for_date(compact)
-        count = self.database.upsert_chinext_daily_growth_events(compact, rows)
-        self.database.set_metadata(f"chinext_growth_synced:{compact}", str(count))
-        return count
+        # Compatibility entry point: main-board-only operation never backfills ChiNext.
+        return 0
 
     def refresh_test_pool_prices(self, now: datetime | None = None) -> dict[str, Any]:
         now = self.clock.normalize(now or self.clock.china_now())
@@ -470,11 +466,12 @@ class StockTopicService:
             for tag in ("涨停", "炸板", "跌停"):
                 rows.extend(self.provider.kpl_list(trade_date, tag))
             count = self.database.upsert_kpl_events(rows)
+            universe = self.database.active_stock_map()
+            boards = Counter(str(row.get("tag") or "") for row in rows
+                             if row.get("ts_code") in universe)
             coverage = {
-                "trade_date": trade_date, "row_count": count,
-                "boards": dict(Counter(str(row.get("tag") or "") for row in rows)),
-                "state": "available" if any(row.get("tag") in {"涨停", "炸板"}
-                                           for row in rows) else "empty_strong_feed",
+                "trade_date": trade_date, "row_count": count, "boards": dict(boards),
+                "state": "available" if boards["涨停"] or boards["炸板"] else "empty_strong_feed",
                 "checked_at": self.clock.china_now().isoformat(timespec="seconds"),
             }
             detail = json.dumps(coverage, ensure_ascii=False)
@@ -567,6 +564,7 @@ class StockTopicService:
                                 "final_reject_reason": "below_discovery_floor"}),
                 )
                 return []
+            self.explainer.verification_cache = VerificationCache(self.database, observed_at)
             signature_events = _semantic_signature_events(
                 events, self.settings.minimum_limit_touches
             )
@@ -798,10 +796,9 @@ class StockTopicService:
                     completed_day = trade_date < compact or observed_at.time() >= time(16, 0)
                     if completed_day:
                         self.data_readiness.ensure_limits(trade_date, observed_at)
-                        if self.sync_chinext_growth_signals(trade_date) < 0:
-                            raise RuntimeError(
-                                f"ChiNext daily growth signals unavailable for {trade_date}"
-                            )
+                        price_key = f"daily_prices_synced:{trade_date}"
+                        if self.database.get_metadata(price_key) != "true":
+                            self.sync_daily_prices(trade_date)
                         self.database.backfill_mainboard_limit_events(trade_date, observed_at)
                 candidate_ids.extend(self.discover_trade_date(trade_date, observed_at))
             except Exception as error:
@@ -945,9 +942,7 @@ class StockTopicService:
                 mainboard_touch_count = self.database.upsert_mainboard_limit_events(
                     compact, quotes, limits, history,
                 )
-                chinext_growth_count = self.database.upsert_chinext_growth_events(
-                    compact, quotes
-                )
+                chinext_growth_count = 0  # Kept in service-run schema for old clients.
                 live_pool = self.test_pool.update_realtime(
                     quotes,
                     compact,
@@ -1023,6 +1018,8 @@ class StockTopicService:
                 if len({m["code"] for m in theme.get("members", []) if m.get("active", 1)}) < 4:
                     continue
                 try:
+                    if not self._admission_budget_available(theme):
+                        continue
                     direction_context = self.direction_pool.admission_context(theme)
                     theme["direction_context"] = direction_context
                     self.database.set_admission_status(
@@ -1048,9 +1045,8 @@ class StockTopicService:
                         member_codes=trigger_codes,
                         since_date=cutoff,
                     )
-                    aliases = list(theme.get("cluster_aliases") or [])
-                    aliases.append(str(theme["shared_tag"]))
-                    stock_pool = self.database.eligible_members_for_tags(aliases, limit=80)
+                    # Current strong trigger members suffice. Never expand to quiet concept peers.
+                    stock_pool = []
                     item = self.explainer.assess_for_admission(theme, history, stock_pool)
                     # A manual archive while AI is running must survive this response.
                     with self.database.connect() as con:
@@ -1297,6 +1293,41 @@ class StockTopicService:
         finally:
             with self._ai_lock:
                 self._ai_inflight.difference_update(selected)
+            self.database.prune_direction_members(self.clock.china_now().strftime("%Y%m%d"))
+
+    def _admission_budget_available(self, theme: dict) -> bool:
+        now = self.clock.china_now()
+        day = now.strftime("%Y%m%d")
+        evidence = {
+            "members": sorted(
+                (m["code"], m.get("evidence", {}).get("limit_reason"),
+                 m.get("evidence", {}).get("common_logic"))
+                for m in theme.get("members", []) if m.get("active", 1)
+            ),
+            "catalysts": sorted(
+                (str(c.get("source_url") or c.get("url") or ""),
+                 str(c.get("summary") or "")) for c in theme.get("catalysts", [])
+            ),
+            "direction": theme.get("direction_context"),
+        }
+        signature = hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()[:24]
+        key = f"admission_budget:{day}:{theme['id']}:{signature}"
+        budget = json.loads(self.database.get_metadata(key) or "{}")
+        attempts = int(budget.get("attempts", 0))
+        if attempts >= 3 or (attempts and _within_retry_cooldown(
+            budget.get("at"), now, minutes=30 * 2 ** (attempts - 1),
+        )):
+            self.database.set_metadata(f"admission_deferred:{theme['id']}", json.dumps({
+                "trade_date": day, "reason": "same_evidence_retry_budget",
+                "attempts": attempts, "input_signature": signature,
+            }))
+            return False
+        self.database.set_metadata(key, json.dumps({
+            "attempts": attempts + 1, "at": now.isoformat(),
+        }))
+        return True
 
     def refresh_theme_catalysts(
         self, limit: int = 8, slot: str | None = None
@@ -1307,6 +1338,7 @@ class StockTopicService:
             item
             for item in self.database.list_themes()
             if item.get("status") in {"confirmed", "watching"}
+            and any(m.get("active", 1) for m in item.get("members", []))
         ]
         configured_slots = sorted(
             value.strip()
@@ -1690,7 +1722,8 @@ class StockTopicService:
                     )
             elif calendar and time(15, 5) <= now.time() <= time(15, 20):
                 await asyncio.to_thread(self.end_of_day, now)
-            if now.second < 25:
+            if (calendar and time(9, 15) <= now.time() <= time(15, 30)
+                    and now.second < 25):
                 admission_states = await asyncio.to_thread(self.database.list_admission_states)
                 candidate_ids.extend(
                     int(theme["id"])
@@ -1827,7 +1860,7 @@ class StockTopicService:
             },
             "fund_flow": {
                 "schedule": ["交易时段每15分钟", "17:10起每15分钟重试缺源"],
-                "scope": "all_formal_theme_members",
+                "scope": "recent_five_day_mainboard_limit_up_members",
 
                 "latest_close": self.database.latest_run("fund_flow_close"),
             },
@@ -1846,11 +1879,13 @@ class StockTopicService:
                     (now - timedelta(days=7)).isoformat(timespec="seconds")
                 ),
                 "policy": {
-                    "semantic_cluster_cache": "trade_date+input_signature",
+                    "semantic_cluster_cache": "per_node_and_bridge_persistent_metadata",
                     "discovery_research": DISCOVERY_AI_OPTIONS,
                     "negative_cache_recheck_minutes": NEGATIVE_REVIEW_MINUTES,
                     "negative_cache_max_extra_reviews_per_input": MAX_NEGATIVE_REVIEWS_PER_INPUT,
                     "semantic_signature_scope": "graph_candidate_members",
+                    "admission_attempts_per_day_and_evidence": 3,
+                    "quiet_stock_expansion": False,
                     "watching_catalyst_refreshes_per_day": 2,
                     "confirmed_catalyst_refreshes_per_day": 1,
                     "pending_separate_catalyst_refresh": False,
@@ -1858,7 +1893,7 @@ class StockTopicService:
                     "admission_reuses_verified_catalysts": True,
                     "admission_can_supplement_search": True,
                     "streaming_requests": True,
-                    "read_timeout_immediate_retries": 1,
+                    "read_timeout_immediate_retries": 0,
                     "timeout_seconds": self.settings.openai_timeout_seconds,
                     "models": {
                         "catalyst_refresh": self._ai_model_for_task("catalyst_refresh"),
@@ -1885,8 +1920,11 @@ class StockTopicService:
                 "minimum_limit_touches": self.settings.minimum_limit_touches,
                 "failed_boards_count": True,
                 "semantic_event_clustering": True,
-                "covered_boards": ["main_board", "chinext"],
-                "chinext_growth_signal_pct": 10,
+                "covered_boards": ["sh_main_board", "sz_main_board"],
+                "member_focus": "last_five_trade_days_limit_up",
+                "member_scope_status": json.loads(
+                    self.database.get_metadata("direction_member_scope") or "{}"),
+                "chinext_growth_signal_pct": None,
                 "backfill_trade_days": 2,
                 "levels": ["early_watch", "formal"],
                 "analysis_failure_retry_minutes": 30,
@@ -1939,7 +1977,8 @@ def _semantic_event_signature(events: list[dict[str, Any]]) -> str:
         key=lambda item: str(item.get("code") or ""),
     )
     return hashlib.sha256(
-        ("event-bridge-p0-v3|" + json.dumps(payload, ensure_ascii=False, sort_keys=True)).encode()
+        ("mainboard-research-v1|"
+         + json.dumps(payload, ensure_ascii=False, sort_keys=True)).encode()
     ).hexdigest()
 
 

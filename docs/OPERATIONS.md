@@ -14,7 +14,7 @@ curl http://127.0.0.1:8765/health
 - `realtime_collection_enabled=false`：休市、午休、交易日历未知、不在有效窗口，或已通过
   `TUSHARE_RT_K_ENABLED=false` 暂停实时行情。
 - `calendar_unknown_fail_closed`：交易日历同步失败，系统主动停止实时采集。
-- `coverage abnormal`：Tushare返回的有效主板与创业板行情低于当前股票池80%（且至少2000只），本周期不参与计算。
+- `coverage abnormal`：Tushare返回的有效沪深主板行情低于当前股票池80%（且至少2000只），本周期不参与计算。
 - `data_stale`：全市场累计成交量和成交额没有变化，本周期信号熔断。
 - `latest_feishu_error`：最近一次飞书机器人失败的错误码及处理建议；`last_feishu_success_at`记录最近成功发送时间。旧`latest_wecom_error`仅为历史兼容字段。
 - `latest_discovery_backfill`：最近一次启动、收盘或手工两交易日发现回补的时间和结果。
@@ -26,7 +26,7 @@ curl http://127.0.0.1:8765/health
 - 正式题材按“大方向＋催化”维护，例如机器人是池名称、特斯拉产品进展是催化。归档继续跟踪，同一批旧数据不会立即撤销归档；次日或当日新增成员/封板形成四股再共振并验证通过，复用原ID恢复。每天五分钟采集后即可更新已存在方向的强势成员，不必等新建四票候选。详见[方向池说明](direction-pool.md)。
 - 本地`early_observation`：2–3股共振仅在网页展示，不创建预警、不发机器人通知。AI审查后的`early_watch`、正式题材、机会、风险和数据故障仍推送飞书。
 - `ai_usage.policy.discovery_research`记录当前研究预算；`negative_cache_recheck_minutes`与`negative_cache_max_extra_reviews_per_input`记录负面复核频率和单输入上限。`service_runs`的`discovery_ai_recheck`区分新催化复核与接口失败重试。
-- `admission_policy`：当前生效的共同事件4只强势股票、主板涨停/炸板与创业板涨幅超过10%、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
+- `admission_policy`：当前生效的共同事件4只强势股票、沪深主板涨停/炸板、两交易日回补、早期观察/正式题材、60交易日（约90自然日）和3日/30%准入口径。
 - `test_pool`：测试票池记录数量和最近一次Tushare正式日线同步任务。
 - `integrations.tushare_transport`：当前数据通道，`mcp`表示使用中转，`direct`表示Token直连；
   健康页不会返回MCP URL。
@@ -54,7 +54,7 @@ curl -u '你的管理用户名' \
 
 `curl` 会交互询问管理密码，不要把密码直接写进命令历史。
 
-该任务调用已到发布时间的日度开盘啦接口，并用Tushare `daily` 的最高价重建创业板涨幅超过10%的信号、用官方涨停价重建主板触板证据；不调用实时 `rt_k`。主板日线补录缺少盘中时间和涨停原因时保持未知，不覆盖已有盘中/KPL记录。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。手工发现回补仍会运行既有AI准入流程，与上述仅修复数据源的次日任务不同。
+该任务调用已到发布时间的日度开盘啦接口，并用Tushare `daily` 的最高价和官方涨停价重建主板触板证据；不调用实时 `rt_k`。主板日线补录缺少盘中时间和涨停原因时保持未知，不覆盖已有盘中/KPL记录。运行结果写入 `service_runs` 和 `/health` 的 `latest_discovery_backfill`。手工发现回补仍会运行既有AI准入流程，与上述仅修复数据源的次日任务不同。
 
 测试票池在交易时段复用已有 `rt_k` 五分钟采集确认T+1买入、T+2卖出并更新盘中涨跌；服务启动、
 08:35和17:10检查正式日线与待结算记录。手工立即回补和结算可执行：
@@ -129,17 +129,17 @@ launchctl kickstart -k gui/$(id -u)/com.chris958.stocktopic
 ./scripts/doctor.sh
 ```
 
-对于第三方中转地址，系统首个请求默认不发送兼容性较差的`max_tool_calls`和
-`prompt_cache_key`，只保留`max_output_tokens`。如果中转连该参数也不支持，系统会自动降级为
-基础Responses API请求；官方`api.openai.com`仍使用完整请求控制参数。
-
-AI请求使用Responses API流式返回，长推理和联网搜索期间由SSE事件保持连接，避免中转站缓冲
-完整结果时触发120秒读取超时。遇到DNS瞬断、HTTP 429、上游5xx或流内`response.failed`时，
-会按1秒、2秒间隔最多尝试3次；流式连接静默超时只额外重试1次。非流式请求仍不重试读取超时，
-避免同一个已到达模型的长请求被重复计费；系统冷却后也会自动恢复审查。
-若仍失败，候选保持在“AI分析失败”状态，后台每30分钟重新审查，不需要重新创建候选。
+官方和中转均优先请求完整控制参数。不兼容时回退到保留输出上限的模式；若中转也拒绝
+`max_output_tokens`，请求失败，不发送无上限请求。读取超时不立即重发，以免重复计费。
+同一天、同一准入证据最多请求3次，重试至少间隔30/60分钟；新增证据可立即送审。
 如果服务升级或重启时正处于AI准入请求，启动时会把遗留的`analyzing`状态恢复为
-`awaiting_ai`并立即重试；运行期间超过15分钟的孤立`analyzing`状态也会由看门狗重新调度。
+`awaiting_ai`并按剩余预算重试；运行期间超过15分钟的孤立`analyzing`状态也会由看门狗重新调度。
 `/health.latest_ai_recovery`会记录最近一次启动恢复数量。
 
 AI任务用量、预算上限、已实施降耗和统一模型配置见[AI Token用量说明](AI_TOKEN_USAGE.md)。
+
+正式关注名单的计算状态见 metadata 中的 `direction_member_scope`。
+`applied` 同时记录参与计算的五个交易日及停用关系数；
+`incomplete_coverage` 表示交易日历或强势行情覆盖不足，暂缓移出。
+题材详情的 `?view=focus` 只加载活跃成员；默认接口保留历史关系供复盘。
+同方向的已确认池启动时合并，原记录保留合并目标；光伏与绿色电力共用一个方向 ID。

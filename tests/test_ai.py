@@ -265,6 +265,7 @@ class OpenAIEndpointTests(TestCase):
             client,
             {
                 "id": 7,
+                "day1_date": "2026-11-06",
                 "provisional_name": "液冷待审",
                 "shared_tag": "液冷超节点",
                 "cluster_aliases": ["液冷"],
@@ -276,6 +277,7 @@ class OpenAIEndpointTests(TestCase):
                         "title": "产品发布",
                         "summary": "发布新一代产品",
                         "source_name": "公司",
+                        "published_at": "2026-11-05",
                         "source_url": "https://example.com/release",
                         "evidence_level": "官方确认",
                         "source_kind": "company_disclosure",
@@ -287,6 +289,7 @@ class OpenAIEndpointTests(TestCase):
         )
 
         self.assertTrue(captured["web_search"])
+        self.assertFalse(captured["search_required"])
         self.assertEqual(captured["max_output_tokens"], 6500)
         self.assertIn("允许使用web_search补齐", captured["prompt"])
         self.assertIn("https://example.com/release", {s["url"] for s in result["sources"]})
@@ -355,9 +358,9 @@ class OpenAIEndpointTests(TestCase):
 
         self.assertEqual(len(payloads), 1)
         self.assertEqual(payloads[0]["max_output_tokens"], 3500)
-        self.assertNotIn("max_tool_calls", payloads[0])
-        self.assertNotIn("prompt_cache_key", payloads[0])
-        self.assertEqual(client._request_controls_mode, "bounded")
+        self.assertIn("max_tool_calls", payloads[0])
+        self.assertIn("prompt_cache_key", payloads[0])
+        self.assertEqual(client._request_controls_mode, "full")
 
     def test_unsupported_optional_controls_are_negotiated_once(self):
         client = OpenAIThemeExplainer("key", "model")
