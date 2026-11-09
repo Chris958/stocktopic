@@ -141,7 +141,7 @@ def test_persistent_upstream_5xx_uses_all_retry_attempts(monkeypatch, status):
     assert sleeps == [1.0, 2.0]
 
 
-def test_stream_read_timeout_retries_once(monkeypatch):
+def test_stream_read_timeout_never_immediately_resends(monkeypatch):
     install_ai_relay_compat()
     client = OpenAIThemeExplainer("key", "model", base_url="https://relay.example/v1")
     calls = 0
@@ -156,10 +156,10 @@ def test_stream_read_timeout_retries_once(monkeypatch):
         client.endpoint, data=b'{"stream":true}', method="POST"
     )
 
-    with pytest.raises(RuntimeError, match="read timed out after 2/2 attempts"):
+    with pytest.raises(RuntimeError, match="read timed out after 1/1 attempts"):
         client._request_json_with_retry(request, attempts=3)
 
-    assert calls == 2
+    assert calls == 1
 
 
 def test_non_stream_read_timeout_is_not_retried_and_double_billed(monkeypatch):

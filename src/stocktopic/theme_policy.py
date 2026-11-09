@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from collections.abc import Iterable
+from datetime import date
 from typing import Any
 
 from . import ai as ai_module
@@ -380,11 +381,22 @@ def policy_assess_for_admission(
         for item in theme.get("catalysts", [])
         if item.get("source_url") or item.get("url")
     ][:4]
+    def reusable(item):
+        try:
+            age = (date.fromisoformat(str(theme.get("day1_date"))) -
+                   date.fromisoformat(str(item.get("published_at"))[:10])).days
+        except ValueError:
+            return False
+        return (0 <= age <= 7 and bool(item["summary"]) and item["source_kind"] in {
+            "official", "company_disclosure", "industry_primary", "authoritative_media",
+        })
+
+    reuse_search = any(reusable(item) for item in compact_catalysts)
     search_policy = (
         "优先复用上一步带URL的证据和系统60交易日历史；若证据过时、因果链或反证不足，"
         "允许使用web_search补齐共同催化与逐股业务关系，不得扩展股票白名单。"
-        if compact_catalysts
-        else "当前没有可复用的带URL催化，必须使用web_search补齐近期证据后再判断。"
+        if reuse_search
+        else "当前缺少可直接复用的近期可靠催化，必须使用web_search补齐近期证据后再判断。"
     )
 
     prompt = f"""
@@ -465,6 +477,7 @@ suggested_name必须使用本地大方向名称，event_name写出本轮具体�
         max_output_tokens=6500,
         max_tool_calls=5,
         web_search=True,
+        search_required=not reuse_search,
     )
     if compact_catalysts:
         known_urls = {source.get("url") for source in sources}

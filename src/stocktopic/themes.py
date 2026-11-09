@@ -168,8 +168,7 @@ class ThemeDiscovery:
             )
             reason = (
                 f"{trade_date}共同事件“{tag}”有{item['touch_count']}只股票形成强势共识；"
-                f"封板{item['sealed_count']}只、创业板涨幅超10%"
-                f"{int(item.get('growth_count') or 0)}只、炸板{item['failed_count']}只。"
+                f"封板{item['sealed_count']}只、炸板{item['failed_count']}只。"
                 f"共振度{float(metrics.get('synchronization_score') or 0):.1f}，"
                 f"广度{float(metrics.get('breadth_score') or 0):.1f}，"
                 f"中位数涨幅{float(metrics.get('median_pct') or 0):.2f}%。"

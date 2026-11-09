@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -85,7 +86,10 @@ class DashboardTiming:
 class DashboardTimingRoute(APIRoute):
     def get_route_handler(self):
         original = super().get_route_handler()
-        if self.path != PATH:
+        if self.path not in {
+            PATH, "/api/v1/themes/{theme_id}", "/api/v1/themes/{theme_id}/research",
+            "/api/v1/themes/{theme_id}/fund-flows",
+        }:
             return original
 
         async def timed(request: Request):
@@ -114,7 +118,9 @@ class DashboardTimingMiddleware:
         self.inflight: dict[str, int] = {}
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope.get("path") != PATH:
+        path = scope.get("path", "")
+        detail = bool(re.fullmatch(r"/api/v1/themes/\d+(?:/(?:research|fund-flows))?", path))
+        if scope["type"] != "http" or (path != PATH and not detail):
             await self.app(scope, receive, send)
             return
         timing = DashboardTiming()
@@ -152,10 +158,11 @@ class DashboardTimingMiddleware:
             peak = self.inflight.pop(timing.request_id)
             timing.elapsed("app_total", timing.started)
             logger.info(
-                "dashboard_timing %s",
+                "theme_detail_timing %s" if detail else "dashboard_timing %s",
                 json.dumps(
                     {
                         "request_id": timing.request_id,
+                        "path": path,
                         "status": status,
                         "error_type": error_type,
                         "response_bytes": response_bytes,

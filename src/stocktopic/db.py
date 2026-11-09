@@ -3,7 +3,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import re
 import sqlite3
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
@@ -14,6 +13,7 @@ from typing import Any
 from .board_status import consecutive_boards
 from .domain import Anomaly, Quote
 from .market_clock import MarketClock
+from .market_scope import MAINBOARD_SQL, is_mainboard
 
 
 def utc_now_iso() -> str:
@@ -47,6 +47,15 @@ class Database:
         with self.connect() as connection:
             connection.executescript(schema)
             self._migrate_schema(connection)
+            # Apply even if today's universe sync already ran or the provider is offline.
+            connection.execute(
+                f"UPDATE stocks SET active=0, excluded_reason='outside_mainboard_scope' "
+                f"WHERE NOT {MAINBOARD_SQL} AND (active<>0 OR "
+                "excluded_reason IS NOT 'outside_mainboard_scope')"
+            )
+            connection.execute(
+                f"UPDATE theme_members SET active=0 WHERE active=1 AND NOT {MAINBOARD_SQL}"
+            )
             # Invalid auction rows were produced by an old bug and have already been
             # filtered at ingestion since 0.12.  Re-scanning the multi-million-row
             # quote history on every process start can keep Uvicorn in startup for
@@ -222,14 +231,10 @@ class Database:
             code = str(row.get("ts_code", ""))
             name = str(row.get("name", ""))
             market = str(row.get("market", ""))
-            is_supported = bool(
-                re.match(r"^(600|601|603|605)\d{3}\.SH$", code)
-                or re.match(r"^(000|001|002|003)\d{3}\.SZ$", code)
-                or re.match(r"^(300|301)\d{3}\.SZ$", code)
-            )
+            is_supported = is_mainboard(code)
             excluded = ""
             if not is_supported:
-                excluded = "not_main_or_chinext"
+                excluded = "outside_mainboard_scope"
             elif "ST" in name.upper() or "退" in name:
                 excluded = "risk_warning_or_delisting"
             active = int(not excluded)
@@ -284,14 +289,15 @@ class Database:
     def active_stock_map(self) -> dict[str, dict[str, Any]]:
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT code, name, list_date, industry, market FROM stocks WHERE active=1"
+                "SELECT code, name, list_date, industry, market FROM stocks "
+                f"WHERE active=1 AND {MAINBOARD_SQL}"
             ).fetchall()
         return {str(row["code"]): dict(row) for row in rows}
 
     def active_stock_count(self) -> int:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT COUNT(*) AS count FROM stocks WHERE active=1"
+                f"SELECT COUNT(*) AS count FROM stocks WHERE active=1 AND {MAINBOARD_SQL}"
             ).fetchone()
         return int(row["count"])
 
@@ -339,6 +345,41 @@ class Database:
             ).fetchall()
         return {row["market"]: row["n"] for row in rows}
 
+    def prune_direction_members(self, day: str) -> dict:
+        """Only recent sealed main-board stocks remain live; retain historical membership."""
+        dates = self.open_trade_dates(day.replace("-", ""), 5)
+        coverage_keys = [f"{source}:{date}" for date in dates for source in
+                         ("kpl_event_coverage", "market_signal_coverage")]
+        with self.connect() as con:
+            coverage = {r["key"]: json.loads(r["value"]) for r in con.execute(
+                "SELECT key,value FROM metadata WHERE key IN (" +
+                ",".join("?" for _ in coverage_keys) + ")", coverage_keys
+            )}
+        missing = [d for d in dates
+                   if coverage.get(f"kpl_event_coverage:{d}", {}).get("state") != "available"
+                   and not coverage.get(f"market_signal_coverage:{d}", {})
+                   .get("mainboard_available")]
+        if len(dates) < 5 or missing:
+            summary = {"status": "incomplete_coverage", "trade_dates": dates,
+                       "missing_dates": missing, "deactivated": 0}
+            self.set_metadata("direction_member_scope", json.dumps(summary))
+            return summary
+        marks = ",".join("?" for _ in dates)
+        with self.connect() as con:
+            result = con.execute(
+                f"UPDATE theme_members SET active=0 WHERE active=1 AND theme_id IN "
+                "(SELECT id FROM candidate_themes WHERE status IN ('confirmed','archived')) "
+                f"AND (NOT {MAINBOARD_SQL} OR code NOT IN "
+                f"(SELECT code FROM kpl_events WHERE trade_date IN ({marks}) "
+                "AND board_tag='涨停'))",
+                dates,
+            )
+            changed = result.rowcount
+        summary = {"status": "applied", "trade_dates": dates, "deactivated": changed,
+                   "rule": "mainboard_sealed_in_last_five_trade_days"}
+        self.set_metadata("direction_member_scope", json.dumps(summary, ensure_ascii=False))
+        return summary
+
     def direction_tracking_rows(self) -> list[dict]:
         """Lightweight previously admitted pools, including manually archived pools."""
         with self.connect() as con:
@@ -351,7 +392,7 @@ class Database:
             )]
             members = {}
             for row in con.execute(
-                "SELECT theme_id,code,name,active FROM theme_members WHERE active=1"
+                f"SELECT theme_id,code,name,active FROM theme_members WHERE {MAINBOARD_SQL}"
             ):
                 members.setdefault(row["theme_id"], []).append(dict(row))
             states = {int(r["key"].split(":")[1]): json.loads(r["value"])
@@ -369,6 +410,7 @@ class Database:
                         (name, name, theme_id, name))
 
     def update_direction_members(self, theme_id: int, members: Sequence[dict], seen_at: str) -> int:
+        members = [m for m in members if is_mainboard(m["code"])]
         with self.connect() as con:
             old = {r[0] for r in con.execute(
                 "SELECT code FROM theme_members WHERE theme_id=?", (theme_id,),
@@ -407,10 +449,10 @@ class Database:
                     "INSERT INTO theme_members(theme_id,code,name,membership_source,evidence_json,"
                     "first_seen_at,last_seen_at,active,role) SELECT ?,code,name,'direction_event',"
                     "evidence_json,first_seen_at,last_seen_at,active,role FROM theme_members "
-                    "WHERE theme_id=? AND active=1 ON CONFLICT(theme_id,code) DO UPDATE SET "
+                    "WHERE theme_id=? ON CONFLICT(theme_id,code) DO UPDATE SET "
                     "evidence_json=excluded.evidence_json,"
                     "first_seen_at=MIN(first_seen_at,excluded.first_seen_at),"
-                    "last_seen_at=MAX(last_seen_at,excluded.last_seen_at),active=1,"
+                    "last_seen_at=MAX(last_seen_at,excluded.last_seen_at),active=MAX(active,excluded.active),"
                     "role=COALESCE(excluded.role,theme_members.role)", (target_id, source_id),
                 )
                 con.execute(
@@ -921,136 +963,14 @@ class Database:
     def upsert_chinext_growth_events(
         self, trade_date: str, quotes: Sequence[Quote]
     ) -> int:
-        """Persist ChiNext stocks whose intraday high first exceeds +10%."""
-        active = self.active_stock_map()
-        selected = []
-        for quote in quotes:
-            if not _is_chinext_code(quote.code) or quote.code not in active:
-                continue
-            if quote.pre_close <= 0 or quote.high <= 0:
-                continue
-            peak_pct = (quote.high / quote.pre_close - 1.0) * 100.0
-            if peak_pct <= 10.0:
-                continue
-            selected.append((quote, peak_pct))
-        if not selected:
-            return 0
-        tags = self.tags_for_codes([quote.code for quote, _ in selected])
-        now = utc_now_iso()
-        values = []
-        for quote, peak_pct in selected:
-            themes = _high_confidence_theme_tags(tags.get(quote.code, []))
-            signal_time = quote.captured_at.strftime("%H%M%S")
-            reason = (
-                f"创业板盘中最高涨幅{peak_pct:.2f}%，按涨停等效样本进入共同事件聚合；"
-                "具体上涨原因结合题材标签、公司关联和当日新闻核查"
-            )
-            raw = {
-                "source": "tushare_rt_k",
-                "qualification": "chinext_intraday_high_gt_10pct",
-                "peak_pct_change": round(peak_pct, 4),
-                "current_pct_change": round(quote.pct_change, 4),
-            }
-            values.append(
-                (
-                    trade_date.replace("-", ""),
-                    quote.code,
-                    quote.name or str(active[quote.code]["name"]),
-                    "创业板涨幅超10%",
-                    json.dumps(themes, ensure_ascii=False),
-                    "创业板强势",
-                    signal_time,
-                    reason,
-                    peak_pct,
-                    quote.pct_change,
-                    quote.amount,
-                    json.dumps(raw, ensure_ascii=False),
-                    now,
-                )
-            )
-        return self._upsert_chinext_growth_values(values)
+        """Compatibility entry point: ChiNext signals are outside the monitored universe."""
+        return 0
 
     def upsert_chinext_daily_growth_events(
         self, trade_date: str, rows: Sequence[dict[str, Any]]
     ) -> int:
-        """Rebuild missed ChiNext >10% intraday signals from official daily highs."""
-        active = self.active_stock_map()
-        selected = []
-        for row in rows:
-            code = str(row.get("ts_code") or row.get("code") or "")
-            if not _is_chinext_code(code) or code not in active:
-                continue
-            pre_close = _number(row.get("pre_close"))
-            high = _number(row.get("high"))
-            if pre_close <= 0 or high <= 0:
-                continue
-            peak_pct = (high / pre_close - 1.0) * 100.0
-            if peak_pct > 10.0:
-                selected.append((row, code, peak_pct))
-        if not selected:
-            return 0
-        tags = self.tags_for_codes([code for _, code, _ in selected])
-        now = utc_now_iso()
-        values = []
-        for row, code, peak_pct in selected:
-            close = _number(row.get("close"))
-            pre_close = _number(row.get("pre_close"))
-            close_pct = (close / pre_close - 1.0) * 100.0 if close > 0 else 0.0
-            themes = _high_confidence_theme_tags(tags.get(code, []))
-            reason = (
-                f"创业板当日最高涨幅{peak_pct:.2f}%，由正式日线回补为涨停等效样本；"
-                "具体上涨原因结合题材标签、公司关联和当日新闻核查"
-            )
-            raw = {
-                "source": "tushare_daily",
-                "qualification": "chinext_intraday_high_gt_10pct_backfill",
-                "peak_pct_change": round(peak_pct, 4),
-                "close_pct_change": round(close_pct, 4),
-            }
-            values.append(
-                (
-                    trade_date.replace("-", ""),
-                    code,
-                    str(row.get("name") or active[code]["name"]),
-                    "创业板涨幅超10%",
-                    json.dumps(themes, ensure_ascii=False),
-                    "创业板强势",
-                    "150000",
-                    reason,
-                    peak_pct,
-                    close_pct,
-                    _number(row.get("amount")),
-                    json.dumps(raw, ensure_ascii=False),
-                    now,
-                )
-            )
-        return self._upsert_chinext_growth_values(values)
-
-    def _upsert_chinext_growth_values(self, values: Sequence[tuple[Any, ...]]) -> int:
-        with self.connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO kpl_events(
-                    trade_date, code, name, board_tag, themes_json, status,
-                    limit_up_time, limit_reason, pct_change, realtime_pct_change,
-                    amount, raw_json, synced_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(trade_date, code, board_tag) DO UPDATE SET
-                    name=excluded.name,
-                    themes_json=CASE WHEN excluded.themes_json='[]'
-                        THEN kpl_events.themes_json ELSE excluded.themes_json END,
-                    status=excluded.status,
-                    limit_up_time=COALESCE(kpl_events.limit_up_time, excluded.limit_up_time),
-                    limit_reason=excluded.limit_reason,
-                    pct_change=MAX(COALESCE(kpl_events.pct_change, 0), excluded.pct_change),
-                    realtime_pct_change=excluded.realtime_pct_change,
-                    amount=excluded.amount,
-                    raw_json=excluded.raw_json,
-                    synced_at=excluded.synced_at
-                """,
-                values,
-            )
-        return len(values)
+        """Compatibility entry point for older replay scripts."""
+        return 0
 
     def upsert_kpl_concept_members(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
@@ -1135,11 +1055,12 @@ class Database:
                              WHEN 'tushare_daily' THEN 'daily_high_time_unknown'
                              ELSE 'provider_reported' END) AS limit_time_basis
                 FROM ranked LEFT JOIN stocks ON stocks.code=ranked.code
-                WHERE rn=1
+                WHERE rn=1 AND stocks.active=1
                 ORDER BY ranked.limit_up_time, ranked.code
                 """,
                 (trade_date,),
             ).fetchall()
+            rows = [row for row in rows if is_mainboard(row["code"])]
             codes = [str(row["code"]) for row in rows]
             tag_rows: list[sqlite3.Row] = []
             if codes:
@@ -1237,6 +1158,8 @@ class Database:
             ).fetchall()
         clusters: dict[str, dict[str, dict[str, Any]]] = {}
         for row in rows:
+            if not is_mainboard(row["code"]):
+                continue
             item = dict(row)
             themes = json.loads(str(item.pop("themes_json") or "[]"))
             for theme in themes:
@@ -1292,6 +1215,8 @@ class Database:
         result = []
         for row in rows:
             item = dict(row)
+            if not is_mainboard(item["code"]):
+                continue
             item["matched_tags"] = _split_tags(str(item.get("matched_tags") or ""))
             result.append(item)
         return result
@@ -1633,9 +1558,100 @@ class Database:
                 ORDER BY pinned DESC, updated_at DESC, id DESC
             """)]
 
+    def theme_strength_ranking(self, trade_date: str) -> dict[int, dict]:
+        """Rank confirmed pools on one shared date, without hydrating theme details."""
+        day = trade_date.replace("-", "")
+        iso = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+        with self.connect() as con:
+            members = con.execute(
+                "SELECT m.theme_id,m.code FROM theme_members m "
+                "JOIN candidate_themes t ON t.id=m.theme_id "
+                "JOIN stocks s ON s.code=m.code "
+                "WHERE t.status='confirmed' AND m.active=1 AND s.active=1"
+            ).fetchall()
+            if not members:
+                return {}
+            # Date-first KPL indexes bound this read to one day's market evidence.
+            rows = con.execute("""
+                SELECT e.code,e.name,e.board_tag,e.status,e.synced_at,
+                       q.close AS latest_close,d.upper_limit
+                FROM kpl_events e JOIN stocks s ON s.code=e.code
+                LEFT JOIN daily_limits d ON d.code=e.code AND d.trade_date=?
+                LEFT JOIN quote_snapshots q ON q.rowid=(
+                    SELECT rowid FROM quote_snapshots
+                    WHERE code=e.code AND captured_at>=? AND captured_at<?
+                    ORDER BY captured_at DESC LIMIT 1)
+                WHERE e.trade_date=? AND e.board_tag IN ('涨停','炸板') AND s.active=1
+                ORDER BY e.synced_at DESC,CASE e.board_tag WHEN '炸板' THEN 0 ELSE 1 END
+            """, (iso, iso + "T00:00:00", iso + "T24:00:00", day)).fetchall()
+        previous = {}
+        dates = self.open_trade_dates(day, 2)
+        previous_complete = False
+        if len(dates) == 2 and dates[0] == day:
+            prior_day = dates[1]
+            with self.connect() as con:
+                prior_rows = con.execute(
+                    "SELECT code,status,board_tag FROM kpl_events WHERE trade_date=? "
+                    "AND board_tag IN ('涨停','炸板') ORDER BY synced_at DESC,"
+                    "CASE board_tag WHEN '炸板' THEN 0 ELSE 1 END", (prior_day,),
+                ).fetchall()
+            for row in prior_rows:
+                previous.setdefault(row["code"], dict(row))
+            coverage = json.loads(self.get_metadata(f"kpl_event_coverage:{prior_day}") or "{}")
+            previous_complete = coverage.get("state") == "available"
+        current = {}
+        for row in rows:
+            item = dict(row)
+            if is_mainboard(item["code"]):
+                current.setdefault(item["code"], item)
+        result = {}
+        for member in members:
+            rank = result.setdefault(member["theme_id"], {
+                "trade_date": day, "limit_up_count": 0, "max_board_height": 0,
+                "leaders": [], "unknown_height_count": 0, "inferred_height_count": 0,
+                "data_available": bool(current),
+            })
+            event = current.get(member["code"])
+            if not event:
+                continue
+            sealed = event["board_tag"] == "涨停"
+            if event["latest_close"] is not None and event["upper_limit"]:
+                sealed = event["latest_close"] >= event["upper_limit"] - 0.005
+            if not sealed:
+                continue
+            rank["limit_up_count"] += 1
+            height = consecutive_boards(event["status"])
+            if not height and not str(event["status"] or "").strip():
+                prior = previous.get(event["code"])
+                prior_height = (consecutive_boards(prior["status"])
+                                if prior and prior["board_tag"] == "涨停" else 0)
+                if prior_height:
+                    height = prior_height + 1
+                elif previous_complete and not prior:
+                    height = 1
+                if height:
+                    rank["inferred_height_count"] += 1
+            if not height:
+                rank["unknown_height_count"] += 1
+                continue  # Unknown or N-day-M-board is never invented as consecutive.
+            leader = {"code": event["code"], "name": event["name"]}
+            if height > rank["max_board_height"]:
+                rank["max_board_height"], rank["leaders"] = height, [leader]
+            elif height == rank["max_board_height"]:
+                rank["leaders"].append(leader)
+        for rank in result.values():
+            rank["leaders"].sort(key=lambda e: e["code"])
+        return result
+
     def list_themes(
-        self, status: str | None = None, *, theme_id: int | None = None,
+        self, status: str | None = None, *, theme_id: int | None = None, focus_only: bool = False,
+        theme_ids: Sequence[int] | None = None, include_research: bool = True, timing=None,
     ) -> list[dict[str, Any]]:
+        def run(name, fn):
+            return timing.phase(name, fn) if timing else fn()
+
+        if theme_ids is not None and not theme_ids:
+            return []
         conditions = []
         params: list[Any] = []
         if status:
@@ -1644,6 +1660,9 @@ class Database:
         if theme_id is not None:
             conditions.append("ct.id=?")
             params.append(theme_id)
+        if theme_ids is not None:
+            conditions.append("ct.id IN (" + ",".join("?" for _ in theme_ids) + ")")
+            params.extend(theme_ids)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as connection:
             themes = [dict(row) for row in connection.execute(
@@ -1665,45 +1684,27 @@ class Database:
             direction_data = {row["key"]: json.loads(row["value"]) for row in direction_rows}
             member_sql = ("SELECT DISTINCT tm.code FROM theme_members tm "
                           "JOIN candidate_themes ct ON ct.id=tm.theme_id" + where)
+            if focus_only:
+                member_sql += (" AND " if conditions else " WHERE ") + "tm.active=1"
             codes = [str(row["code"]) for row in connection.execute(member_sql, params)]
-            board_context = self._load_board_context(connection, codes) if codes else ({}, {})
+            board_context = run(
+                "board_history", lambda: self._load_board_context(connection, codes),
+            ) if codes else ({}, {})
             for theme in themes:
                 theme["direction_context"] = direction_data.get(
                     f"direction_event:{theme['id']}", {})
                 theme["direction_state"] = direction_data.get(f"direction_state:{theme['id']}", {})
                 theme["cluster_aliases"] = json.loads(theme.pop("cluster_aliases_json") or "[]")
                 baseline_at = str(theme.get("confirmed_at") or theme["discovered_at"])
-                member_rows = connection.execute(
+                member_rows = run(
+                    "member_quotes",
+                    lambda baseline_at=baseline_at, theme=theme: connection.execute(
                     """
                     SELECT tm.code, tm.name, tm.membership_source, tm.evidence_json,
                            tm.first_seen_at, tm.last_seen_at, tm.active, tm.role,
-                           (SELECT q.close FROM quote_snapshots q
-                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
-                               AS current_price,
-                           (SELECT q.pct_change FROM quote_snapshots q
-                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
-                               AS current_pct,
-                           (SELECT q.captured_at FROM quote_snapshots q
-                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
-                               AS quote_captured_at,
-                           (SELECT m.trade_date FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS metric_trade_date,
-                           (SELECT m.turnover_rate FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS turnover_rate,
-                           (SELECT m.volume_ratio FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS volume_ratio,
-                           (SELECT m.float_share FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS float_share,
-                           (SELECT m.total_mv FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS total_mv,
-                           (SELECT m.circ_mv FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS circ_mv,
+                           q.close AS current_price,q.pct_change AS current_pct,
+                           q.captured_at AS quote_captured_at,m.trade_date AS metric_trade_date,
+                           m.turnover_rate,m.volume_ratio,m.float_share,m.total_mv,m.circ_mv,
                            COALESCE(
                                (SELECT b.close FROM quote_snapshots b
                                 WHERE b.code=tm.code AND b.captured_at<=?
@@ -1712,10 +1713,17 @@ class Database:
                                 WHERE a.code=tm.code AND a.captured_at>?
                                 ORDER BY a.captured_at ASC LIMIT 1)
                            ) AS baseline_price
-                    FROM theme_members tm WHERE tm.theme_id=?
-                    """,
+                    FROM theme_members tm
+                    LEFT JOIN quote_snapshots q ON q.rowid=(
+                        SELECT rowid FROM quote_snapshots WHERE code=tm.code
+                        ORDER BY captured_at DESC LIMIT 1)
+                    LEFT JOIN stock_daily_metrics m ON m.rowid=(
+                        SELECT rowid FROM stock_daily_metrics WHERE code=tm.code
+                        ORDER BY trade_date DESC LIMIT 1)
+                    WHERE tm.theme_id=?
+                    """ + (" AND tm.active=1" if focus_only else ""),
                     (baseline_at, baseline_at, theme["id"]),
-                ).fetchall()
+                ).fetchall())
                 theme["members"] = []
                 for row in member_rows:
                     member = dict(row)
@@ -1742,53 +1750,71 @@ class Database:
                 theme["score"] = dict(score) if score else None
                 if theme["score"]:
                     theme["score"]["details"] = json.loads(theme["score"].pop("details_json"))
-                explanation = connection.execute(
-                    """
-                    SELECT created_at, model, suggested_name, explanation,
-                           catalyst_summary, catalyst_duration, sources_json
-                    FROM ai_explanations WHERE theme_id=?
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (theme["id"],),
-                ).fetchone()
-                theme["latest_explanation"] = dict(explanation) if explanation else None
-                if theme["latest_explanation"]:
-                    theme["latest_explanation"]["sources"] = json.loads(
-                        theme["latest_explanation"].pop("sources_json")
-                    )
-                catalyst_rows = connection.execute(
-                    """
-                    SELECT title, summary, source_name, source_url, published_at,
-                           catalyst_type, evidence_level, source_kind, captured_at
-                    FROM theme_catalysts WHERE theme_id=?
-                    ORDER BY COALESCE(published_at, captured_at) DESC, id DESC LIMIT 12
-                    """,
-                    (theme["id"],),
-                ).fetchall()
-                theme["catalysts"] = [dict(row) for row in catalyst_rows]
-                admission = connection.execute(
-                    """
-                    SELECT created_at, model, is_new_theme, novelty_confidence,
-                           catalyst_confidence, expected_duration_days,
-                           leader_candidate_code, leader_upside_scenario_pct,
-                           admitted, decision_level, decision_reason, historical_matches_json,
-                           proposed_members_json, validated_members_json
-                    FROM theme_admission_reviews WHERE theme_id=?
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (theme["id"],),
-                ).fetchone()
-                theme["admission_review"] = dict(admission) if admission else None
-                if theme["admission_review"]:
-                    for key in (
-                        "historical_matches_json",
-                        "proposed_members_json",
-                        "validated_members_json",
-                    ):
-                        theme["admission_review"][key.removesuffix("_json")] = json.loads(
-                            theme["admission_review"].pop(key)
-                        )
+                if include_research:
+                    run("research", lambda theme=theme: self._attach_theme_research(
+                        connection, theme,
+                    ))
+                else:
+                    theme.update(latest_explanation=None, catalysts=[], admission_review=None)
         return themes
+
+    def theme_research(self, theme_id: int) -> dict | None:
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM candidate_themes WHERE id=?", (theme_id,),
+            ).fetchone():
+                return None
+            theme = {"id": theme_id}
+            self._attach_theme_research(connection, theme)
+            return theme
+
+    def _attach_theme_research(self, connection, theme):
+        explanation = connection.execute(
+            """
+            SELECT created_at, model, suggested_name, explanation,
+                   catalyst_summary, catalyst_duration, sources_json
+            FROM ai_explanations WHERE theme_id=?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (theme["id"],),
+        ).fetchone()
+        theme["latest_explanation"] = dict(explanation) if explanation else None
+        if theme["latest_explanation"]:
+            theme["latest_explanation"]["sources"] = json.loads(
+                theme["latest_explanation"].pop("sources_json")
+            )
+        catalyst_rows = connection.execute(
+            """
+            SELECT title, summary, source_name, source_url, published_at,
+                   catalyst_type, evidence_level, source_kind, captured_at
+            FROM theme_catalysts WHERE theme_id=?
+            ORDER BY COALESCE(published_at, captured_at) DESC, id DESC LIMIT 12
+            """,
+            (theme["id"],),
+        ).fetchall()
+        theme["catalysts"] = [dict(row) for row in catalyst_rows]
+        admission = connection.execute(
+            """
+            SELECT created_at, model, is_new_theme, novelty_confidence,
+                   catalyst_confidence, expected_duration_days,
+                   leader_candidate_code, leader_upside_scenario_pct,
+                   admitted, decision_level, decision_reason, historical_matches_json,
+                   proposed_members_json, validated_members_json
+            FROM theme_admission_reviews WHERE theme_id=?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (theme["id"],),
+        ).fetchone()
+        theme["admission_review"] = dict(admission) if admission else None
+        if theme["admission_review"]:
+            for key in (
+                "historical_matches_json",
+                "proposed_members_json",
+                "validated_members_json",
+            ):
+                theme["admission_review"][key.removesuffix("_json")] = json.loads(
+                    theme["admission_review"].pop(key)
+                )
 
     def set_theme_pin(self, theme_id: int, pinned: bool) -> None:
         with self.connect() as connection:
@@ -2019,17 +2045,10 @@ class Database:
         for offset in range(0, len(codes), 400):
             batch = codes[offset:offset + 400]
             placeholders = ",".join("?" for _ in batch)
-            rows = connection.execute(
-                f"""
-                WITH ranked AS (
-                    SELECT *, ROW_NUMBER() OVER(
-                        PARTITION BY code ORDER BY trade_date DESC, synced_at DESC
-                    ) AS rn
-                    FROM kpl_events WHERE code IN ({placeholders})
-                )
-                SELECT * FROM ranked WHERE rn<=8 ORDER BY code, trade_date DESC
-                """, batch,
-            ).fetchall()
+            # Each stock stops after eight index entries, regardless of history depth.
+            parts = ["SELECT * FROM (SELECT * FROM kpl_events WHERE code=? "
+                     "ORDER BY trade_date DESC,synced_at DESC LIMIT 8)" for _ in batch]
+            rows = connection.execute(" UNION ALL ".join(parts), batch).fetchall()
             for row in rows:
                 item = dict(row)
                 raw = json.loads(item.pop("raw_json") or "{}")
@@ -2610,6 +2629,17 @@ class Database:
             ).fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
+    def theme_flow_members(self, theme_id: int) -> dict | None:
+        with self.connect() as con:
+            theme = con.execute(
+                "SELECT id,status FROM candidate_themes WHERE id=?", (theme_id,),
+            ).fetchone()
+            if not theme:
+                return None
+            return {**dict(theme), "members": [dict(r) for r in con.execute(
+                "SELECT code FROM theme_members WHERE theme_id=? AND active=1", (theme_id,),
+            )]}
+
     def attach_theme_fund_flows(self, themes: list[dict], trade_date: str, slot: str) -> None:
         owners = {
             "theme": sorted({str(theme["id"]) for theme in themes}),
@@ -2625,8 +2655,12 @@ class Database:
                     batch = values[offset:offset + 400]
                     placeholders = ",".join("?" for _ in batch)
                     rows = connection.execute(
-                        "SELECT owner, payload FROM flow_history WHERE kind=? AND trade_date=? "
-                        f"AND owner IN ({placeholders}) ORDER BY captured_at DESC,id DESC",
+                        "WITH ranked AS (SELECT id, ROW_NUMBER() OVER ("
+                        "PARTITION BY owner,(slot='close') ORDER BY captured_at DESC,id DESC) rn "
+                        "FROM flow_history WHERE kind=? AND trade_date=? "
+                        f"AND owner IN ({placeholders})) "
+                        "SELECT f.owner,f.payload FROM ranked r JOIN flow_history f ON f.id=r.id "
+                        "WHERE r.rn=1 ORDER BY f.captured_at DESC,f.id DESC",
                         [kind, trade_date, *batch],
                     ).fetchall()
                     for row in rows:
@@ -2939,26 +2973,6 @@ def _unique_tags(tags: Sequence[dict[str, Any]], tag_type: str) -> list[str]:
         reverse=True,
     )
     return list(dict.fromkeys(str(item["tag"]) for item in ordered if item.get("tag")))
-
-
-def _high_confidence_theme_tags(tags: Sequence[dict[str, Any]]) -> list[str]:
-    return list(
-        dict.fromkeys(
-            str(item["tag"])
-            for item in sorted(
-                tags,
-                key=lambda value: float(value.get("confidence") or 0),
-                reverse=True,
-            )
-            if str(item.get("tag_type") or "") == "theme"
-            and float(item.get("confidence") or 0) >= 0.9
-            and item.get("tag")
-        )
-    )[:12]
-
-
-def _is_chinext_code(code: str) -> bool:
-    return bool(re.match(r"^(300|301)\d{3}\.SZ$", str(code)))
 
 
 def _number(value: Any) -> float:

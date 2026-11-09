@@ -1,6 +1,8 @@
 let savedSections = {};
 let fundFlowPollTimer = null;
 let dashboardLoadInFlight = null;
+const themeDetailCache = new Map();
+let activeDetailLoad = null;
 try { savedSections = JSON.parse(localStorage.getItem('stocktopicSections') || '{}'); }
 catch (_) { savedSections = {}; }
 const state = {
@@ -23,7 +25,7 @@ const views = {
   candidates: {
     kicker: '早期观察',
     title: '已经形成市场共识，等待证据确认',
-    description: '主板触板与创业板涨幅超10%按上涨原因聚合；未入池候选保留完整审查原因。'
+    description: '沪深主板触板按上涨原因聚合；未入池候选保留完整审查原因。'
   },
   confirmed: {
     kicker: '重点题材库',
@@ -70,6 +72,7 @@ async function api(path, options = {}) {
 
 function showLogin(message = '') {
   state.authenticated = false;
+  themeDetailCache.clear();
   state.data = null;
   resetThemeList();
   $('#loginBackdrop').classList.remove('authenticated');
@@ -196,7 +199,7 @@ function load(manual = false) {
             : theme.status === (state.themeFilter === 'archived' ? 'archived' : 'confirmed')
               && (state.themeFilter !== 'pinned' || theme.pinned)))) resetThemeList();
       render();
-      if (state.openTheme != null) void fetchThemeDetail(state.openTheme);
+      if (state.openTheme != null) void fetchThemeDetail(state.openTheme, true);
       const panels = await api('/api/v1/dashboard?view=panels');
       if (!state.authenticated) return;
       Object.assign(state.data, panels);
@@ -315,6 +318,13 @@ function renderCandidates() {
   renderThemes('#candidateList', items, 'audit');
 }
 
+function compareThemeStrength(a, b) {
+  const x = a.market_rank || {}, y = b.market_rank || {};
+  return Number(y.limit_up_count || 0) - Number(x.limit_up_count || 0)
+    || Number(y.max_board_height || 0) - Number(x.max_board_height || 0)
+    || Number(a.id) - Number(b.id);
+}
+
 function renderConfirmed() {
   if (!state.data) return;
   const themes = state.data.themes;
@@ -325,15 +335,20 @@ function renderConfirmed() {
     items = themes.filter(theme => theme.status === 'archived');
     mode = 'archived';
   }
+  if (mode === 'confirmed') items.sort(compareThemeStrength);
   renderThemes('#confirmedList', items, mode);
 }
 
 async function reloadAfterMutation() {
+  themeDetailCache.clear();
+  activeDetailLoad?.controller.abort();
   if (dashboardLoadInFlight) await dashboardLoadInFlight;
   if (state.authenticated) await load();
 }
 
 function resetThemeList() {
+  activeDetailLoad?.controller.abort();
+  activeDetailLoad = null;
   state.detailRequest++;
   state.openTheme = null;
   state.detail = null;
@@ -341,30 +356,94 @@ function resetThemeList() {
   state.listLimit = 24;
 }
 
-async function fetchThemeDetail(id) {
+function fetchThemeDetail(id, force = false) {
+  if (activeDetailLoad?.id === id && !activeDetailLoad.controller.signal.aborted) {
+    return activeDetailLoad.promise;
+  }
+  activeDetailLoad?.controller.abort();
   const seq = ++state.detailRequest;
+  const controller = new AbortController();
+  const cached = themeDetailCache.get(id);
   state.openTheme = id;
   state.detailError = '';
-  try {
-    const theme = await api(`/api/v1/themes/${id}`);
-    if (seq !== state.detailRequest) return;
-    state.detail = theme;
-    window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: { themes: [theme] } }));
-  } catch (error) {
-    if (seq !== state.detailRequest) return;
-    state.detailError = error.message;
+  if (cached) state.detail = cached.theme;
+  if (!force && cached && Date.now() - cached.at < 30000) {
+    renderActiveView();
+    return Promise.resolve();
   }
-  renderActiveView();
+  const current = () => seq === state.detailRequest && state.openTheme === id
+    && state.authenticated && !controller.signal.aborted;
+  const refresh = () => {
+    if (current()) renderActiveView();
+  };
+  const promise = (async () => {
+    try {
+      const theme = await api(`/api/v1/themes/${id}?view=core`, { signal: controller.signal });
+      if (!current()) return;
+      theme.detail_sections = { 'fund-flows': 'loading', research: 'loading' };
+      state.detail = theme;
+      refresh(); // First paint only waits for member quotes, not funds/research.
+      await Promise.all(['fund-flows', 'research'].map(async section => {
+        try {
+          const data = await api(`/api/v1/themes/${id}/${section}`, { signal: controller.signal });
+          if (!current()) return;
+          if (section === 'research') {
+            for (const key of ['latest_explanation', 'catalysts', 'admission_review']) {
+              theme[key] = data[key];
+            }
+          } else {
+            theme.fund_flow = data.fund_flow;
+            const flows = new Map(data.members.map(m => [m.code, m.fund_flow]));
+            theme.members.forEach(m => { m.fund_flow = flows.get(m.code); });
+          }
+          theme.detail_sections[section] = 'ready';
+        } catch (error) {
+          if (!current()) return;
+          theme.detail_sections[section] = 'error';
+        }
+        refresh();
+      }));
+      if (!current()) return;
+      if (Object.values(theme.detail_sections).every(v => v === 'ready')) {
+        themeDetailCache.set(id, { at: Date.now(), theme });
+        if (themeDetailCache.size > 24) themeDetailCache.delete(themeDetailCache.keys().next().value);
+      }
+      window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: { themes: [theme] } }));
+    } catch (error) {
+      if (current()) state.detailError = error.message;
+    } finally {
+      if (activeDetailLoad?.controller === controller) activeDetailLoad = null;
+      refresh();
+    }
+  })();
+  activeDetailLoad = { id, controller, promise };
+  return promise;
+}
+
+function detailSectionState(theme, section) {
+  const status = theme.detail_sections?.[section];
+  const name = section === 'research' ? '催化与审查' : '资金';
+  if (status === 'loading') return `<p role="status">${name}加载中…</p>`;
+  if (status === 'error') return `<p role="alert">${name}加载失败，行情仍可查看。
+    <button data-retry-section>重试</button></p>`;
+  return '';
 }
 
 function themePreview(theme, mode) {
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
   const open = theme.id === state.openTheme;
   const content = open && state.detail ? themeCard(state.detail, mode) : '';
+  const rank = theme.market_rank;
+  const strength = rank ? (rank.data_available
+    ? `${formatDate(rank.trade_date)} · 涨停 ${rank.limit_up_count} 只 · 最高 ${rank.max_board_height ? rank.max_board_height + ' 连板' : '连板待确认'}`
+      + (rank.leaders.length ? ` · ${rank.leaders.map(m => m.name).join('、')}` : '')
+      + (rank.unknown_height_count ? ' · 部分连板待确认' : '')
+    : `${formatDate(rank.trade_date)} · 当日涨停数据待更新`) : '';
   return `<div class="theme-preview">
     <button type="button" class="theme-preview-button" data-open-theme="${theme.id}" aria-expanded="${open}">
       <strong>${theme.pinned ? '置顶 · ' : ''}${escapeHtml(title)}</strong>
       <span>${escapeHtml(themeStageLabel(theme))} · ${theme.member_count}只 · ${escapeHtml(theme.day1_date)}</span>
+      ${strength ? `<small>${escapeHtml(strength)}</small>` : ''}
       ${theme.reason_preview ? `<small>${escapeHtml(theme.reason_preview)}</small>` : ''}
       <span>${open ? '收起详情' : '查看行情、资金与催化'}</span>
     </button>
@@ -390,13 +469,18 @@ function renderThemes(selector, items, mode) {
     state.listLimit += 24;
     renderActiveView();
   });
-  root.querySelector('[data-retry-theme]')?.addEventListener('click', () => fetchThemeDetail(state.openTheme));
+  root.querySelector('[data-retry-theme]')?.addEventListener('click',
+    () => fetchThemeDetail(state.openTheme, true));
+  root.querySelectorAll('[data-retry-section]').forEach(button => button.addEventListener('click',
+    () => fetchThemeDetail(state.openTheme, true)));
   root.querySelectorAll('[data-open-theme]').forEach(button => button.addEventListener('click', () => {
     const id = Number(button.dataset.openTheme);
     state.detail = null;
     state.detailError = '';
     if (id === state.openTheme) {
       state.detailRequest++;
+      activeDetailLoad?.controller.abort();
+      activeDetailLoad = null;
       state.openTheme = null;
     } else void fetchThemeDetail(id);
     renderActiveView();
@@ -469,13 +553,15 @@ function themeCard(theme, mode) {
     ${summaryMetric('当前平均', formatPct(summary.current_average_pct))}
     ${summaryMetric(`${returnLabel}平均`, formatPct(summary.confirmed_average_return))}
     ${summaryMetric('上涨家数', `${summary.up_count ?? 0}/${summary.member_count ?? activeMembers.length}`)}
-    ${summaryMetric('涨停 / 创业板强势 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.chinext_growth_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
+    ${summaryMetric('涨停 / 炸板', `${summary.limit_up_count ?? 0} / ${summary.failed_limit_count ?? 0}`)}
   </div>`;
   const fundFlowHtml = themeFundFlow(theme);
   const stockKey = `theme-${theme.id}-stocks`;
   const newsKey = `theme-${theme.id}-news`;
+  const focusLabel = theme.focus_scope?.status === 'incomplete_coverage'
+    ? '关注股 · 涨停数据待补全' : '强势关注股 · 近5个交易日涨停';
   const stockDetails = `<details class="fold-section" data-collapse-key="${stockKey}" ${state.expanded[stockKey] ? 'open' : ''}>
-    <summary><span><strong>题材股票行情榜</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
+    <summary><span><strong>${theme.status === 'confirmed' || archived ? focusLabel : '题材触发股票'}</strong><small>按当前涨幅纵向排序 · ${activeMembers.length}只</small></span><i>⌄</i></summary>
     <div class="member-table" role="table" aria-label="${escapeHtml(title)}股票行情">
       <div class="member-table-head" role="row"><span>股票</span><span>当前</span><span>${returnLabel}</span><span>近期连板</span><span>流通市值</span><span>带动</span><span>资金 / 操作</span></div>
       <div class="member-table-body">${members}</div>
@@ -483,10 +569,11 @@ function themeCard(theme, mode) {
   </details>`;
   const catalysts = theme.catalysts || [];
   const explanation = theme.latest_explanation;
-  const newsDetails = (catalysts.length || explanation) ? `<details class="fold-section catalyst-fold" data-collapse-key="${newsKey}" ${state.expanded[newsKey] ? 'open' : ''}>
+  let newsDetails = (catalysts.length || explanation) ? `<details class="fold-section catalyst-fold" data-collapse-key="${newsKey}" ${state.expanded[newsKey] ? 'open' : ''}>
     <summary><span><strong>新闻催化</strong><small>定时更新 · ${catalysts.length}条</small></span><i>⌄</i></summary>
     ${catalystContent(catalysts, explanation)}
   </details>` : '';
+  newsDetails = detailSectionState(theme, 'research') || newsDetails;
   let actions = '';
   if ((watching || theme.status === 'confirmed') && !archived) {
     actions = `<div class="card-actions">
@@ -559,6 +646,8 @@ function memberFundFlowTrigger(member, themeId) {
 }
 
 function themeFundFlow(theme) {
+  const sectionState = detailSectionState(theme, 'fund-flows');
+  if (sectionState) return sectionState;
   if (theme.status !== 'confirmed' && theme.status !== 'archived') return '';
   const flow = theme.fund_flow || {}, daily = flow.daily, intraday = flow.intraday;
   const c = daily?.consensus;

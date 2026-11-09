@@ -37,7 +37,7 @@ def install_ai_relay_compat() -> None:
         max_output_tokens: int,
         max_tool_calls: int,
     ) -> tuple[dict[str, Any], str]:
-        modes = ("full", "bounded", "legacy")
+        modes = ("full", "bounded")
         cached_mode = self._request_controls_mode
         start_index = modes.index(cached_mode) if cached_mode in modes else 0
 
@@ -53,7 +53,7 @@ def install_ai_relay_compat() -> None:
             try:
                 return self._request_payload(payload), cached_mode
             except RuntimeError as error:
-                if not is_unsupported_optional_control_error(error) or cached_mode == "legacy":
+                if not is_unsupported_optional_control_error(error) or cached_mode == "bounded":
                     raise
                 logger.warning(
                     "AI relay stopped accepting %s request controls; "
@@ -83,7 +83,7 @@ def install_ai_relay_compat() -> None:
                 except RuntimeError as error:
                     if (
                         not is_unsupported_optional_control_error(error)
-                        or candidate_mode == "legacy"
+                        or candidate_mode == "bounded"
                     ):
                         raise
                     logger.warning(
@@ -125,11 +125,7 @@ def install_ai_relay_compat() -> None:
                     attempts,
                 )
             except TimeoutError as error:
-                timeout_attempts = (
-                    min(max(1, attempts), 2)
-                    if ai_module._request_streams(request)
-                    else 1
-                )
+                timeout_attempts = 1  # Never immediately resend a possibly billed request.
                 last_error = error
                 last_message = (
                     f"AI upstream read timed out after {min(attempt + 1, timeout_attempts)}/"

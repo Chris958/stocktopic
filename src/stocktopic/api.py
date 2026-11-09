@@ -219,6 +219,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timing.phase("attach_fund_flows", lambda: service.database.attach_theme_fund_flows(
             themes, flow_date, flow_slot,
         ))
+        rankings = timing.phase(
+            "theme_ranking", lambda: service.database.theme_strength_ranking(flow_date),
+        )
+        for theme in themes:
+            if theme["id"] in rankings:
+                theme["market_rank"] = rankings[theme["id"]]
         panels = dashboard_panels(timing, now)
         payload = {**panels, "themes": themes}
         encoded = timing.phase("jsonable_encoder", lambda: jsonable_encoder(payload))
@@ -233,6 +239,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def build_index(timing):
         items = timing.phase("theme_index", service.database.theme_index)
+        day, _ = service.fund_flow_display_context(service.clock.china_now())
+        rankings = timing.phase(
+            "theme_ranking", lambda: service.database.theme_strength_ranking(day),
+        )
+        for theme in items:
+            if theme["id"] in rankings:
+                theme["market_rank"] = rankings[theme["id"]]
         timing.counts["themes"] = len(items)
         return timing.phase("json_response", lambda: JSONResponse({"themes": items}))
 
@@ -310,14 +323,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="Invalid theme status")
         return {"items": await asyncio.to_thread(service.database.list_themes, status)}
 
+    def detail_timing(request):
+        timing = request.scope.get(SCOPE_KEY) or DashboardTiming()
+        since_route = timing.started + timing.metrics.get("pre_handler", 0) / 1000
+        timing.elapsed("detail_queue", since_route)
+        return timing
+
+    def detail_response(timing, payload):
+        response = timing.phase("json_response", lambda: JSONResponse(payload))
+        timing.endpoint_done = time.perf_counter()
+        return response
+
     @app.get("/api/v1/themes/{theme_id}")
-    def theme_detail(theme_id: int):
-        theme = service.database.get_theme(theme_id)
+    def theme_detail(
+        theme_id: int, request: Request, view: Literal["full", "focus", "core"] = "full",
+    ):
+        timing = detail_timing(request)
+        theme = next(iter(timing.phase("detail_query", lambda: service.database.list_themes(
+            theme_id=theme_id, focus_only=view != "full", include_research=view != "core",
+            timing=timing,
+        ))), None)
         if theme is None:
             raise HTTPException(status_code=404, detail="Theme not found")
+        if view != "core":
+            day, slot = service.fund_flow_display_context(service.clock.china_now())
+            timing.phase("fund_flows", lambda: service.database.attach_theme_fund_flows(
+                [theme], day, slot,
+            ))
+        else:
+            theme["deferred_sections"] = ["fund-flows", "research"]
+        if view != "full" and theme["status"] in {"confirmed", "archived"}:
+            theme["focus_scope"] = json.loads(
+                service.database.get_metadata("direction_member_scope") or "{}"
+            )
+        timing.counts["members"] = len(theme["members"])
+        return detail_response(timing, theme)
+
+    @app.get("/api/v1/themes/{theme_id}/research")
+    def theme_research(theme_id: int, request: Request):
+        timing = detail_timing(request)
+        result = timing.phase("research", lambda: service.database.theme_research(theme_id))
+        if result is None:
+            raise HTTPException(status_code=404, detail="Theme not found")
+        return detail_response(timing, result)
+
+    @app.get("/api/v1/themes/{theme_id}/fund-flows")
+    def theme_fund_flows(theme_id: int, request: Request):
+        timing = detail_timing(request)
+        result = timing.phase("flow_members", lambda: service.database.theme_flow_members(theme_id))
+        if result is None:
+            raise HTTPException(status_code=404, detail="Theme not found")
         day, slot = service.fund_flow_display_context(service.clock.china_now())
-        service.database.attach_theme_fund_flows([theme], day, slot)
-        return JSONResponse(theme)
+        timing.phase("fund_flows", lambda: service.database.attach_theme_fund_flows(
+            [result], day, slot,
+        ))
+        return detail_response(timing, result)
 
     @app.post("/api/v1/themes/{theme_id}/pin")
     async def pin_theme(theme_id: int, request: PinRequest):

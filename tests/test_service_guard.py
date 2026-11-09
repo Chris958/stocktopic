@@ -129,7 +129,7 @@ class ServiceGuardTests(TestCase):
                 discovered_at="2026-08-26T10:00:00+08:00",
                 day1_date="2026-08-26",
                 discovery_reason="4只共同强势股票",
-                members=[],
+                members=[{"code": "600000.SH", "name": "强势成员", "evidence": {}}],
             )
             if status != "pending":
                 self.service.database.set_theme_status(theme_id, status, fingerprint)
