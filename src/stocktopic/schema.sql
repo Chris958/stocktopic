@@ -404,3 +404,14 @@ CREATE TABLE IF NOT EXISTS flow_history (
 );
 CREATE INDEX IF NOT EXISTS idx_flow_history_lookup
 ON flow_history(kind, owner, trade_date, captured_at DESC);
+
+
+-- Date-bounded detail reads and latest research lookups; no new tables.
+CREATE INDEX IF NOT EXISTS idx_kpl_code_date
+ON kpl_events(code, trade_date DESC, synced_at DESC);
+CREATE INDEX IF NOT EXISTS idx_anomaly_date_direction_code
+ON anomaly_events(trade_date, direction, code, captured_at);
+CREATE INDEX IF NOT EXISTS idx_explanation_theme_time
+ON ai_explanations(theme_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_catalyst_effective_time
+ON theme_catalysts(theme_id, COALESCE(published_at, captured_at) DESC, id DESC);

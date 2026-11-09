@@ -93,7 +93,7 @@ def test_board_context_batch_matches_individual_and_followers_stay_theme_local(t
     statements = trace(db)
     themes = db.list_themes()
     assert sum("MAX(trade_date) AS trade_date FROM anomaly_events" in s for s in statements) == 1
-    assert sum("WITH ranked AS" in s for s in statements) == 1
+    assert sum("LIMIT 8)" in s for s in statements) == 1
     for item in themes:
         expected = copy.deepcopy(item)
         with db.connect() as con:
@@ -136,7 +136,7 @@ def test_bulk_fund_flows_keep_latest_close_and_intraday_and_missing_values(tmp_p
     statements = trace(db)
     db.attach_theme_fund_flows(themes, DATE, "close")
     assert themes == expected
-    assert sum("SELECT owner, payload FROM flow_history" in s for s in statements) == 2
+    assert sum("PARTITION BY owner,(slot='close')" in s for s in statements) == 2
 
 
 def test_bulk_fund_flows_batch_parameters_and_deduplicate_stocks(tmp_path):
@@ -145,7 +145,7 @@ def test_bulk_fund_flows_batch_parameters_and_deduplicate_stocks(tmp_path):
     themes = [{"id": i, "members": copy.deepcopy(members)} for i in range(2)]
     statements = trace(db)
     db.attach_theme_fund_flows(themes, DATE, "close")
-    assert sum("SELECT owner, payload FROM flow_history" in s for s in statements) == 4
+    assert sum("PARTITION BY owner,(slot='close')" in s for s in statements) == 4
     assert all(
         m["fund_flow"] == {"daily": None, "intraday": None} for t in themes for m in t["members"]
     )
@@ -257,7 +257,7 @@ def test_board_context_large_universe_batches_and_keeps_stock_history(tmp_path):
     assert set(histories) == set(codes)
     assert moves == {}
     assert all(len(value) == 1 for value in histories.values())
-    assert sum("WITH ranked AS" in s for s in statements) == 3
+    assert sum("LIMIT 8)" in s for s in statements) == 3
     assert sum("MAX(trade_date) AS trade_date FROM anomaly_events" in s for s in statements) == 1
 
 

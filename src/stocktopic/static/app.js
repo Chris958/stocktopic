@@ -1,6 +1,8 @@
 let savedSections = {};
 let fundFlowPollTimer = null;
 let dashboardLoadInFlight = null;
+const themeDetailCache = new Map();
+let activeDetailLoad = null;
 try { savedSections = JSON.parse(localStorage.getItem('stocktopicSections') || '{}'); }
 catch (_) { savedSections = {}; }
 const state = {
@@ -70,6 +72,7 @@ async function api(path, options = {}) {
 
 function showLogin(message = '') {
   state.authenticated = false;
+  themeDetailCache.clear();
   state.data = null;
   resetThemeList();
   $('#loginBackdrop').classList.remove('authenticated');
@@ -196,7 +199,7 @@ function load(manual = false) {
             : theme.status === (state.themeFilter === 'archived' ? 'archived' : 'confirmed')
               && (state.themeFilter !== 'pinned' || theme.pinned)))) resetThemeList();
       render();
-      if (state.openTheme != null) void fetchThemeDetail(state.openTheme);
+      if (state.openTheme != null) void fetchThemeDetail(state.openTheme, true);
       const panels = await api('/api/v1/dashboard?view=panels');
       if (!state.authenticated) return;
       Object.assign(state.data, panels);
@@ -337,11 +340,15 @@ function renderConfirmed() {
 }
 
 async function reloadAfterMutation() {
+  themeDetailCache.clear();
+  activeDetailLoad?.controller.abort();
   if (dashboardLoadInFlight) await dashboardLoadInFlight;
   if (state.authenticated) await load();
 }
 
 function resetThemeList() {
+  activeDetailLoad?.controller.abort();
+  activeDetailLoad = null;
   state.detailRequest++;
   state.openTheme = null;
   state.detail = null;
@@ -349,20 +356,77 @@ function resetThemeList() {
   state.listLimit = 24;
 }
 
-async function fetchThemeDetail(id) {
+function fetchThemeDetail(id, force = false) {
+  if (activeDetailLoad?.id === id && !activeDetailLoad.controller.signal.aborted) {
+    return activeDetailLoad.promise;
+  }
+  activeDetailLoad?.controller.abort();
   const seq = ++state.detailRequest;
+  const controller = new AbortController();
+  const cached = themeDetailCache.get(id);
   state.openTheme = id;
   state.detailError = '';
-  try {
-    const theme = await api(`/api/v1/themes/${id}?view=focus`);
-    if (seq !== state.detailRequest) return;
-    state.detail = theme;
-    window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: { themes: [theme] } }));
-  } catch (error) {
-    if (seq !== state.detailRequest) return;
-    state.detailError = error.message;
+  if (cached) state.detail = cached.theme;
+  if (!force && cached && Date.now() - cached.at < 30000) {
+    renderActiveView();
+    return Promise.resolve();
   }
-  renderActiveView();
+  const current = () => seq === state.detailRequest && state.openTheme === id
+    && state.authenticated && !controller.signal.aborted;
+  const refresh = () => {
+    if (current()) renderActiveView();
+  };
+  const promise = (async () => {
+    try {
+      const theme = await api(`/api/v1/themes/${id}?view=core`, { signal: controller.signal });
+      if (!current()) return;
+      theme.detail_sections = { 'fund-flows': 'loading', research: 'loading' };
+      state.detail = theme;
+      refresh(); // First paint only waits for member quotes, not funds/research.
+      await Promise.all(['fund-flows', 'research'].map(async section => {
+        try {
+          const data = await api(`/api/v1/themes/${id}/${section}`, { signal: controller.signal });
+          if (!current()) return;
+          if (section === 'research') {
+            for (const key of ['latest_explanation', 'catalysts', 'admission_review']) {
+              theme[key] = data[key];
+            }
+          } else {
+            theme.fund_flow = data.fund_flow;
+            const flows = new Map(data.members.map(m => [m.code, m.fund_flow]));
+            theme.members.forEach(m => { m.fund_flow = flows.get(m.code); });
+          }
+          theme.detail_sections[section] = 'ready';
+        } catch (error) {
+          if (!current()) return;
+          theme.detail_sections[section] = 'error';
+        }
+        refresh();
+      }));
+      if (!current()) return;
+      if (Object.values(theme.detail_sections).every(v => v === 'ready')) {
+        themeDetailCache.set(id, { at: Date.now(), theme });
+        if (themeDetailCache.size > 24) themeDetailCache.delete(themeDetailCache.keys().next().value);
+      }
+      window.dispatchEvent(new CustomEvent('stocktopic:dashboard', { detail: { themes: [theme] } }));
+    } catch (error) {
+      if (current()) state.detailError = error.message;
+    } finally {
+      if (activeDetailLoad?.controller === controller) activeDetailLoad = null;
+      refresh();
+    }
+  })();
+  activeDetailLoad = { id, controller, promise };
+  return promise;
+}
+
+function detailSectionState(theme, section) {
+  const status = theme.detail_sections?.[section];
+  const name = section === 'research' ? '催化与审查' : '资金';
+  if (status === 'loading') return `<p role="status">${name}加载中…</p>`;
+  if (status === 'error') return `<p role="alert">${name}加载失败，行情仍可查看。
+    <button data-retry-section>重试</button></p>`;
+  return '';
 }
 
 function themePreview(theme, mode) {
@@ -405,13 +469,18 @@ function renderThemes(selector, items, mode) {
     state.listLimit += 24;
     renderActiveView();
   });
-  root.querySelector('[data-retry-theme]')?.addEventListener('click', () => fetchThemeDetail(state.openTheme));
+  root.querySelector('[data-retry-theme]')?.addEventListener('click',
+    () => fetchThemeDetail(state.openTheme, true));
+  root.querySelectorAll('[data-retry-section]').forEach(button => button.addEventListener('click',
+    () => fetchThemeDetail(state.openTheme, true)));
   root.querySelectorAll('[data-open-theme]').forEach(button => button.addEventListener('click', () => {
     const id = Number(button.dataset.openTheme);
     state.detail = null;
     state.detailError = '';
     if (id === state.openTheme) {
       state.detailRequest++;
+      activeDetailLoad?.controller.abort();
+      activeDetailLoad = null;
       state.openTheme = null;
     } else void fetchThemeDetail(id);
     renderActiveView();
@@ -500,10 +569,11 @@ function themeCard(theme, mode) {
   </details>`;
   const catalysts = theme.catalysts || [];
   const explanation = theme.latest_explanation;
-  const newsDetails = (catalysts.length || explanation) ? `<details class="fold-section catalyst-fold" data-collapse-key="${newsKey}" ${state.expanded[newsKey] ? 'open' : ''}>
+  let newsDetails = (catalysts.length || explanation) ? `<details class="fold-section catalyst-fold" data-collapse-key="${newsKey}" ${state.expanded[newsKey] ? 'open' : ''}>
     <summary><span><strong>新闻催化</strong><small>定时更新 · ${catalysts.length}条</small></span><i>⌄</i></summary>
     ${catalystContent(catalysts, explanation)}
   </details>` : '';
+  newsDetails = detailSectionState(theme, 'research') || newsDetails;
   let actions = '';
   if ((watching || theme.status === 'confirmed') && !archived) {
     actions = `<div class="card-actions">
@@ -576,6 +646,8 @@ function memberFundFlowTrigger(member, themeId) {
 }
 
 function themeFundFlow(theme) {
+  const sectionState = detailSectionState(theme, 'fund-flows');
+  if (sectionState) return sectionState;
   if (theme.status !== 'confirmed' && theme.status !== 'archived') return '';
   const flow = theme.fund_flow || {}, daily = flow.daily, intraday = flow.intraday;
   const c = daily?.consensus;

@@ -306,7 +306,9 @@ class StockTopicService:
         with self._fund_flow_lock:
             run_id = self.database.begin_run(f"fund_flow_{slot}")
             try:
-                themes = [t for t in self.database.list_themes() if t.get("status") == "confirmed"]
+                themes = [t for t in self.database.list_themes(
+                    status="confirmed", focus_only=True, include_research=False,
+                ) if t.get("status") == "confirmed"]
                 stamp = current.isoformat(timespec="microseconds")
                 reports, failures = {}, {}
                 probe_error = None
@@ -425,7 +427,8 @@ class StockTopicService:
     def _fund_flow_targets(self) -> list[dict[str, Any]]:
         return [
             dict(owner_type="theme", owner_id=t["id"], **m)
-            for t in self.database.list_themes()
+            for t in self.database.list_themes(status="confirmed", focus_only=True,
+                                               include_research=False)
             if t.get("status") == "confirmed"
             for m in t.get("members", [])
             if m.get("active", 1)
@@ -1009,7 +1012,8 @@ class StockTopicService:
                 if theme_id not in self._ai_inflight
             ]
             self._ai_inflight.update(selected)
-        themes = {int(item["id"]): item for item in self.database.list_themes()}
+        themes = {int(item["id"]): item for item in
+                  self.database.list_themes(theme_ids=selected)}
         try:
             for theme_id in selected:
                 theme = themes.get(theme_id)
@@ -1336,9 +1340,9 @@ class StockTopicService:
             return {"status": "disabled", "updated": 0, "new_catalysts": 0}
         themes = [
             item
-            for item in self.database.list_themes()
-            if item.get("status") in {"confirmed", "watching"}
-            and any(m.get("active", 1) for m in item.get("members", []))
+            for status in ("confirmed", "watching")
+            for item in self.database.list_themes(status=status, focus_only=True)
+            if any(m.get("active", 1) for m in item.get("members", []))
         ]
         configured_slots = sorted(
             value.strip()
@@ -1511,7 +1515,9 @@ class StockTopicService:
         )
 
     def _evaluate_theme_alerts(self, now: datetime, theme_ids: list[int], stale: bool) -> None:
-        themes = {int(item["id"]): item for item in self.database.list_themes(status="confirmed")}
+        themes = {int(item["id"]): item for item in self.database.list_themes(
+            status="confirmed", theme_ids=theme_ids, focus_only=True, include_research=False,
+        )}
         for theme_id in theme_ids:
             theme = themes.get(theme_id)
             if not theme or not theme.get("score"):
@@ -1652,7 +1658,9 @@ class StockTopicService:
                 {code: float(row["pct_change"]) for code, row in quotes.items()},
             )
         total = 0
-        for theme in self.database.list_themes(status="confirmed"):
+        for theme in self.database.list_themes(
+            status="confirmed", focus_only=True, include_research=False,
+        ):
             members = [member for member in theme["members"] if member.get("active", 1)]
             codes = [str(member["code"]) for member in members]
             kpl = self.database.kpl_events_for_codes(compact, codes)

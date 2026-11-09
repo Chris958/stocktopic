@@ -1645,7 +1645,13 @@ class Database:
 
     def list_themes(
         self, status: str | None = None, *, theme_id: int | None = None, focus_only: bool = False,
+        theme_ids: Sequence[int] | None = None, include_research: bool = True, timing=None,
     ) -> list[dict[str, Any]]:
+        def run(name, fn):
+            return timing.phase(name, fn) if timing else fn()
+
+        if theme_ids is not None and not theme_ids:
+            return []
         conditions = []
         params: list[Any] = []
         if status:
@@ -1654,6 +1660,9 @@ class Database:
         if theme_id is not None:
             conditions.append("ct.id=?")
             params.append(theme_id)
+        if theme_ids is not None:
+            conditions.append("ct.id IN (" + ",".join("?" for _ in theme_ids) + ")")
+            params.extend(theme_ids)
         where = " WHERE " + " AND ".join(conditions) if conditions else ""
         with self.connect() as connection:
             themes = [dict(row) for row in connection.execute(
@@ -1678,44 +1687,24 @@ class Database:
             if focus_only:
                 member_sql += (" AND " if conditions else " WHERE ") + "tm.active=1"
             codes = [str(row["code"]) for row in connection.execute(member_sql, params)]
-            board_context = self._load_board_context(connection, codes) if codes else ({}, {})
+            board_context = run(
+                "board_history", lambda: self._load_board_context(connection, codes),
+            ) if codes else ({}, {})
             for theme in themes:
                 theme["direction_context"] = direction_data.get(
                     f"direction_event:{theme['id']}", {})
                 theme["direction_state"] = direction_data.get(f"direction_state:{theme['id']}", {})
                 theme["cluster_aliases"] = json.loads(theme.pop("cluster_aliases_json") or "[]")
                 baseline_at = str(theme.get("confirmed_at") or theme["discovered_at"])
-                member_rows = connection.execute(
+                member_rows = run(
+                    "member_quotes",
+                    lambda baseline_at=baseline_at, theme=theme: connection.execute(
                     """
                     SELECT tm.code, tm.name, tm.membership_source, tm.evidence_json,
                            tm.first_seen_at, tm.last_seen_at, tm.active, tm.role,
-                           (SELECT q.close FROM quote_snapshots q
-                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
-                               AS current_price,
-                           (SELECT q.pct_change FROM quote_snapshots q
-                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
-                               AS current_pct,
-                           (SELECT q.captured_at FROM quote_snapshots q
-                            WHERE q.code=tm.code ORDER BY q.captured_at DESC LIMIT 1)
-                               AS quote_captured_at,
-                           (SELECT m.trade_date FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS metric_trade_date,
-                           (SELECT m.turnover_rate FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS turnover_rate,
-                           (SELECT m.volume_ratio FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS volume_ratio,
-                           (SELECT m.float_share FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS float_share,
-                           (SELECT m.total_mv FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS total_mv,
-                           (SELECT m.circ_mv FROM stock_daily_metrics m
-                            WHERE m.code=tm.code ORDER BY m.trade_date DESC LIMIT 1)
-                               AS circ_mv,
+                           q.close AS current_price,q.pct_change AS current_pct,
+                           q.captured_at AS quote_captured_at,m.trade_date AS metric_trade_date,
+                           m.turnover_rate,m.volume_ratio,m.float_share,m.total_mv,m.circ_mv,
                            COALESCE(
                                (SELECT b.close FROM quote_snapshots b
                                 WHERE b.code=tm.code AND b.captured_at<=?
@@ -1724,10 +1713,17 @@ class Database:
                                 WHERE a.code=tm.code AND a.captured_at>?
                                 ORDER BY a.captured_at ASC LIMIT 1)
                            ) AS baseline_price
-                    FROM theme_members tm WHERE tm.theme_id=?
+                    FROM theme_members tm
+                    LEFT JOIN quote_snapshots q ON q.rowid=(
+                        SELECT rowid FROM quote_snapshots WHERE code=tm.code
+                        ORDER BY captured_at DESC LIMIT 1)
+                    LEFT JOIN stock_daily_metrics m ON m.rowid=(
+                        SELECT rowid FROM stock_daily_metrics WHERE code=tm.code
+                        ORDER BY trade_date DESC LIMIT 1)
+                    WHERE tm.theme_id=?
                     """ + (" AND tm.active=1" if focus_only else ""),
                     (baseline_at, baseline_at, theme["id"]),
-                ).fetchall()
+                ).fetchall())
                 theme["members"] = []
                 for row in member_rows:
                     member = dict(row)
@@ -1754,53 +1750,71 @@ class Database:
                 theme["score"] = dict(score) if score else None
                 if theme["score"]:
                     theme["score"]["details"] = json.loads(theme["score"].pop("details_json"))
-                explanation = connection.execute(
-                    """
-                    SELECT created_at, model, suggested_name, explanation,
-                           catalyst_summary, catalyst_duration, sources_json
-                    FROM ai_explanations WHERE theme_id=?
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (theme["id"],),
-                ).fetchone()
-                theme["latest_explanation"] = dict(explanation) if explanation else None
-                if theme["latest_explanation"]:
-                    theme["latest_explanation"]["sources"] = json.loads(
-                        theme["latest_explanation"].pop("sources_json")
-                    )
-                catalyst_rows = connection.execute(
-                    """
-                    SELECT title, summary, source_name, source_url, published_at,
-                           catalyst_type, evidence_level, source_kind, captured_at
-                    FROM theme_catalysts WHERE theme_id=?
-                    ORDER BY COALESCE(published_at, captured_at) DESC, id DESC LIMIT 12
-                    """,
-                    (theme["id"],),
-                ).fetchall()
-                theme["catalysts"] = [dict(row) for row in catalyst_rows]
-                admission = connection.execute(
-                    """
-                    SELECT created_at, model, is_new_theme, novelty_confidence,
-                           catalyst_confidence, expected_duration_days,
-                           leader_candidate_code, leader_upside_scenario_pct,
-                           admitted, decision_level, decision_reason, historical_matches_json,
-                           proposed_members_json, validated_members_json
-                    FROM theme_admission_reviews WHERE theme_id=?
-                    ORDER BY created_at DESC LIMIT 1
-                    """,
-                    (theme["id"],),
-                ).fetchone()
-                theme["admission_review"] = dict(admission) if admission else None
-                if theme["admission_review"]:
-                    for key in (
-                        "historical_matches_json",
-                        "proposed_members_json",
-                        "validated_members_json",
-                    ):
-                        theme["admission_review"][key.removesuffix("_json")] = json.loads(
-                            theme["admission_review"].pop(key)
-                        )
+                if include_research:
+                    run("research", lambda theme=theme: self._attach_theme_research(
+                        connection, theme,
+                    ))
+                else:
+                    theme.update(latest_explanation=None, catalysts=[], admission_review=None)
         return themes
+
+    def theme_research(self, theme_id: int) -> dict | None:
+        with self.connect() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM candidate_themes WHERE id=?", (theme_id,),
+            ).fetchone():
+                return None
+            theme = {"id": theme_id}
+            self._attach_theme_research(connection, theme)
+            return theme
+
+    def _attach_theme_research(self, connection, theme):
+        explanation = connection.execute(
+            """
+            SELECT created_at, model, suggested_name, explanation,
+                   catalyst_summary, catalyst_duration, sources_json
+            FROM ai_explanations WHERE theme_id=?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (theme["id"],),
+        ).fetchone()
+        theme["latest_explanation"] = dict(explanation) if explanation else None
+        if theme["latest_explanation"]:
+            theme["latest_explanation"]["sources"] = json.loads(
+                theme["latest_explanation"].pop("sources_json")
+            )
+        catalyst_rows = connection.execute(
+            """
+            SELECT title, summary, source_name, source_url, published_at,
+                   catalyst_type, evidence_level, source_kind, captured_at
+            FROM theme_catalysts WHERE theme_id=?
+            ORDER BY COALESCE(published_at, captured_at) DESC, id DESC LIMIT 12
+            """,
+            (theme["id"],),
+        ).fetchall()
+        theme["catalysts"] = [dict(row) for row in catalyst_rows]
+        admission = connection.execute(
+            """
+            SELECT created_at, model, is_new_theme, novelty_confidence,
+                   catalyst_confidence, expected_duration_days,
+                   leader_candidate_code, leader_upside_scenario_pct,
+                   admitted, decision_level, decision_reason, historical_matches_json,
+                   proposed_members_json, validated_members_json
+            FROM theme_admission_reviews WHERE theme_id=?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (theme["id"],),
+        ).fetchone()
+        theme["admission_review"] = dict(admission) if admission else None
+        if theme["admission_review"]:
+            for key in (
+                "historical_matches_json",
+                "proposed_members_json",
+                "validated_members_json",
+            ):
+                theme["admission_review"][key.removesuffix("_json")] = json.loads(
+                    theme["admission_review"].pop(key)
+                )
 
     def set_theme_pin(self, theme_id: int, pinned: bool) -> None:
         with self.connect() as connection:
@@ -2031,17 +2045,10 @@ class Database:
         for offset in range(0, len(codes), 400):
             batch = codes[offset:offset + 400]
             placeholders = ",".join("?" for _ in batch)
-            rows = connection.execute(
-                f"""
-                WITH ranked AS (
-                    SELECT *, ROW_NUMBER() OVER(
-                        PARTITION BY code ORDER BY trade_date DESC, synced_at DESC
-                    ) AS rn
-                    FROM kpl_events WHERE code IN ({placeholders})
-                )
-                SELECT * FROM ranked WHERE rn<=8 ORDER BY code, trade_date DESC
-                """, batch,
-            ).fetchall()
+            # Each stock stops after eight index entries, regardless of history depth.
+            parts = ["SELECT * FROM (SELECT * FROM kpl_events WHERE code=? "
+                     "ORDER BY trade_date DESC,synced_at DESC LIMIT 8)" for _ in batch]
+            rows = connection.execute(" UNION ALL ".join(parts), batch).fetchall()
             for row in rows:
                 item = dict(row)
                 raw = json.loads(item.pop("raw_json") or "{}")
@@ -2622,6 +2629,17 @@ class Database:
             ).fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
+    def theme_flow_members(self, theme_id: int) -> dict | None:
+        with self.connect() as con:
+            theme = con.execute(
+                "SELECT id,status FROM candidate_themes WHERE id=?", (theme_id,),
+            ).fetchone()
+            if not theme:
+                return None
+            return {**dict(theme), "members": [dict(r) for r in con.execute(
+                "SELECT code FROM theme_members WHERE theme_id=? AND active=1", (theme_id,),
+            )]}
+
     def attach_theme_fund_flows(self, themes: list[dict], trade_date: str, slot: str) -> None:
         owners = {
             "theme": sorted({str(theme["id"]) for theme in themes}),
@@ -2637,8 +2655,12 @@ class Database:
                     batch = values[offset:offset + 400]
                     placeholders = ",".join("?" for _ in batch)
                     rows = connection.execute(
-                        "SELECT owner, payload FROM flow_history WHERE kind=? AND trade_date=? "
-                        f"AND owner IN ({placeholders}) ORDER BY captured_at DESC,id DESC",
+                        "WITH ranked AS (SELECT id, ROW_NUMBER() OVER ("
+                        "PARTITION BY owner,(slot='close') ORDER BY captured_at DESC,id DESC) rn "
+                        "FROM flow_history WHERE kind=? AND trade_date=? "
+                        f"AND owner IN ({placeholders})) "
+                        "SELECT f.owner,f.payload FROM ranked r JOIN flow_history f ON f.id=r.id "
+                        "WHERE r.rn=1 ORDER BY f.captured_at DESC,f.id DESC",
                         [kind, trade_date, *batch],
                     ).fetchall()
                     for row in rows:
