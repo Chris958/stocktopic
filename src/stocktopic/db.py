@@ -1558,6 +1558,91 @@ class Database:
                 ORDER BY pinned DESC, updated_at DESC, id DESC
             """)]
 
+    def theme_strength_ranking(self, trade_date: str) -> dict[int, dict]:
+        """Rank confirmed pools on one shared date, without hydrating theme details."""
+        day = trade_date.replace("-", "")
+        iso = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+        with self.connect() as con:
+            members = con.execute(
+                "SELECT m.theme_id,m.code FROM theme_members m "
+                "JOIN candidate_themes t ON t.id=m.theme_id "
+                "JOIN stocks s ON s.code=m.code "
+                "WHERE t.status='confirmed' AND m.active=1 AND s.active=1"
+            ).fetchall()
+            if not members:
+                return {}
+            # Date-first KPL indexes bound this read to one day's market evidence.
+            rows = con.execute("""
+                SELECT e.code,e.name,e.board_tag,e.status,e.synced_at,
+                       q.close AS latest_close,d.upper_limit
+                FROM kpl_events e JOIN stocks s ON s.code=e.code
+                LEFT JOIN daily_limits d ON d.code=e.code AND d.trade_date=?
+                LEFT JOIN quote_snapshots q ON q.rowid=(
+                    SELECT rowid FROM quote_snapshots
+                    WHERE code=e.code AND captured_at>=? AND captured_at<?
+                    ORDER BY captured_at DESC LIMIT 1)
+                WHERE e.trade_date=? AND e.board_tag IN ('涨停','炸板') AND s.active=1
+                ORDER BY e.synced_at DESC,CASE e.board_tag WHEN '炸板' THEN 0 ELSE 1 END
+            """, (iso, iso + "T00:00:00", iso + "T24:00:00", day)).fetchall()
+        previous = {}
+        dates = self.open_trade_dates(day, 2)
+        previous_complete = False
+        if len(dates) == 2 and dates[0] == day:
+            prior_day = dates[1]
+            with self.connect() as con:
+                prior_rows = con.execute(
+                    "SELECT code,status,board_tag FROM kpl_events WHERE trade_date=? "
+                    "AND board_tag IN ('涨停','炸板') ORDER BY synced_at DESC,"
+                    "CASE board_tag WHEN '炸板' THEN 0 ELSE 1 END", (prior_day,),
+                ).fetchall()
+            for row in prior_rows:
+                previous.setdefault(row["code"], dict(row))
+            coverage = json.loads(self.get_metadata(f"kpl_event_coverage:{prior_day}") or "{}")
+            previous_complete = coverage.get("state") == "available"
+        current = {}
+        for row in rows:
+            item = dict(row)
+            if is_mainboard(item["code"]):
+                current.setdefault(item["code"], item)
+        result = {}
+        for member in members:
+            rank = result.setdefault(member["theme_id"], {
+                "trade_date": day, "limit_up_count": 0, "max_board_height": 0,
+                "leaders": [], "unknown_height_count": 0, "inferred_height_count": 0,
+                "data_available": bool(current),
+            })
+            event = current.get(member["code"])
+            if not event:
+                continue
+            sealed = event["board_tag"] == "涨停"
+            if event["latest_close"] is not None and event["upper_limit"]:
+                sealed = event["latest_close"] >= event["upper_limit"] - 0.005
+            if not sealed:
+                continue
+            rank["limit_up_count"] += 1
+            height = consecutive_boards(event["status"])
+            if not height and not str(event["status"] or "").strip():
+                prior = previous.get(event["code"])
+                prior_height = (consecutive_boards(prior["status"])
+                                if prior and prior["board_tag"] == "涨停" else 0)
+                if prior_height:
+                    height = prior_height + 1
+                elif previous_complete and not prior:
+                    height = 1
+                if height:
+                    rank["inferred_height_count"] += 1
+            if not height:
+                rank["unknown_height_count"] += 1
+                continue  # Unknown or N-day-M-board is never invented as consecutive.
+            leader = {"code": event["code"], "name": event["name"]}
+            if height > rank["max_board_height"]:
+                rank["max_board_height"], rank["leaders"] = height, [leader]
+            elif height == rank["max_board_height"]:
+                rank["leaders"].append(leader)
+        for rank in result.values():
+            rank["leaders"].sort(key=lambda e: e["code"])
+        return result
+
     def list_themes(
         self, status: str | None = None, *, theme_id: int | None = None, focus_only: bool = False,
     ) -> list[dict[str, Any]]:

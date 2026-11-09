@@ -315,6 +315,13 @@ function renderCandidates() {
   renderThemes('#candidateList', items, 'audit');
 }
 
+function compareThemeStrength(a, b) {
+  const x = a.market_rank || {}, y = b.market_rank || {};
+  return Number(y.limit_up_count || 0) - Number(x.limit_up_count || 0)
+    || Number(y.max_board_height || 0) - Number(x.max_board_height || 0)
+    || Number(a.id) - Number(b.id);
+}
+
 function renderConfirmed() {
   if (!state.data) return;
   const themes = state.data.themes;
@@ -325,6 +332,7 @@ function renderConfirmed() {
     items = themes.filter(theme => theme.status === 'archived');
     mode = 'archived';
   }
+  if (mode === 'confirmed') items.sort(compareThemeStrength);
   renderThemes('#confirmedList', items, mode);
 }
 
@@ -361,10 +369,17 @@ function themePreview(theme, mode) {
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
   const open = theme.id === state.openTheme;
   const content = open && state.detail ? themeCard(state.detail, mode) : '';
+  const rank = theme.market_rank;
+  const strength = rank ? (rank.data_available
+    ? `${formatDate(rank.trade_date)} · 涨停 ${rank.limit_up_count} 只 · 最高 ${rank.max_board_height ? rank.max_board_height + ' 连板' : '连板待确认'}`
+      + (rank.leaders.length ? ` · ${rank.leaders.map(m => m.name).join('、')}` : '')
+      + (rank.unknown_height_count ? ' · 部分连板待确认' : '')
+    : `${formatDate(rank.trade_date)} · 当日涨停数据待更新`) : '';
   return `<div class="theme-preview">
     <button type="button" class="theme-preview-button" data-open-theme="${theme.id}" aria-expanded="${open}">
       <strong>${theme.pinned ? '置顶 · ' : ''}${escapeHtml(title)}</strong>
       <span>${escapeHtml(themeStageLabel(theme))} · ${theme.member_count}只 · ${escapeHtml(theme.day1_date)}</span>
+      ${strength ? `<small>${escapeHtml(strength)}</small>` : ''}
       ${theme.reason_preview ? `<small>${escapeHtml(theme.reason_preview)}</small>` : ''}
       <span>${open ? '收起详情' : '查看行情、资金与催化'}</span>
     </button>

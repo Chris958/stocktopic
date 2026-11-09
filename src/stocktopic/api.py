@@ -219,6 +219,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         timing.phase("attach_fund_flows", lambda: service.database.attach_theme_fund_flows(
             themes, flow_date, flow_slot,
         ))
+        rankings = timing.phase(
+            "theme_ranking", lambda: service.database.theme_strength_ranking(flow_date),
+        )
+        for theme in themes:
+            if theme["id"] in rankings:
+                theme["market_rank"] = rankings[theme["id"]]
         panels = dashboard_panels(timing, now)
         payload = {**panels, "themes": themes}
         encoded = timing.phase("jsonable_encoder", lambda: jsonable_encoder(payload))
@@ -233,6 +239,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def build_index(timing):
         items = timing.phase("theme_index", service.database.theme_index)
+        day, _ = service.fund_flow_display_context(service.clock.china_now())
+        rankings = timing.phase(
+            "theme_ranking", lambda: service.database.theme_strength_ranking(day),
+        )
+        for theme in items:
+            if theme["id"] in rankings:
+                theme["market_rank"] = rankings[theme["id"]]
         timing.counts["themes"] = len(items)
         return timing.phase("json_response", lambda: JSONResponse({"themes": items}))
 

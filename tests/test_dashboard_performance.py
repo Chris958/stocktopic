@@ -306,7 +306,7 @@ def test_browser_index_skips_bulk_work_and_detail_is_scoped(tmp_path):
     rows = response.json()["themes"]
     assert {r["id"]: r["member_count"] for r in rows} == {first: 2, second: 1}
     assert all("members" not in r for r in rows)
-    assert len([s for s in statements if s.lstrip().startswith("SELECT")]) == 1
+    assert len([s for s in statements if s.lstrip().startswith("SELECT")]) == 3
     assert not any("quote_snapshots" in s or "evidence_json" in s for s in statements)
 
     panels = client.get("/api/v1/dashboard?view=panels", headers=headers)
