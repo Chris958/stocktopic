@@ -7,6 +7,7 @@ import json
 import re
 import threading
 from datetime import datetime
+from functools import lru_cache
 
 from .market_clock import MarketClock
 from .market_scope import is_mainboard
@@ -47,20 +48,23 @@ DIRECTION_ALIASES = {
 }
 
 
+@lru_cache(maxsize=8192)
 def _compact(value: str) -> str:
-    return re.sub(r"\s|(?:概念|板块)$", "", str(value or "")).casefold()
+    return re.sub(r"\s|(?:概念|板块)$", "", value).casefold()
+
+
+# Preserve the first matching direction if aliases ever overlap, as the previous
+# next(...) lookup did. This static taxonomy is normalized once, not per stock/tag.
+_DIRECTION_BY_ALIAS: dict[str, str] = {}
+for _direction, _aliases in DIRECTION_ALIASES.items():
+    for _alias in _aliases:
+        _DIRECTION_BY_ALIAS.setdefault(_compact(_alias), _direction)
 
 
 def label_direction(value: str) -> str | None:
-    text = _compact(value)
-    return next(
-        (
-            name
-            for name, aliases in DIRECTION_ALIASES.items()
-            if text in {_compact(a) for a in aliases}
-        ),
-        None,
-    )
+    # Coerce before the bounded cache: imported/legacy metadata can contain None
+    # or other JSON values, and unhashable values must retain their old behavior.
+    return _DIRECTION_BY_ALIAS.get(_compact(str(value or "")))
 
 
 def event_direction(
