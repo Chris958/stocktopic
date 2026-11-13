@@ -116,7 +116,8 @@ const frames=[];
 const window={dispatchEvent(){}};
 function CustomEvent(){};
 function renderActiveView(){frames.push(state.detail?.id);}
-function api(path, options){
+function displayApi(path, signal){
+  const options = {signal};
   return new Promise((resolve,reject)=>requests.push({path,options,resolve,reject}));
 }
 const tick=()=>new Promise(setImmediate);
@@ -146,6 +147,16 @@ const tick=()=>new Promise(setImmediate);
   assert.equal(state.detail.detail_sections['fund-flows'],'error');
   assert.equal(state.detail.detail_sections.research,'ready');
   assert.equal(themeDetailCache.has(3),false); // Partial failure is retryable, not cached as fresh.
+  const waiting=fetchThemeDetail(4);
+  requests[7].resolve({id:4,members:[]}); await tick();
+  const newer=fetchThemeDetail(4,true); // Slow funds cannot block the next quote refresh.
+  assert.equal(requests.length,11);
+  assert.ok(requests[8].options.signal.aborted);
+  requests[8].resolve({members:[]}); requests[9].resolve({catalysts:[]});
+  requests[10].resolve({id:4,members:[],newQuotes:true}); await tick();
+  requests[11].resolve({members:[]}); requests[12].resolve({catalysts:[]});
+  await Promise.all([waiting,newer]);
+  assert.equal(state.detail.newQuotes,true);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """
     result = subprocess.run(["node", "-e", function + script], capture_output=True, text=True)

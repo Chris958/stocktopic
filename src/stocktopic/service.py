@@ -27,6 +27,7 @@ from .discovery_ai_policy import (
     MAX_NEGATIVE_REVIEWS_PER_INPUT,
     NEGATIVE_REVIEW_MINUTES,
 )
+from .display_snapshots import DisplaySnapshots
 from .domain import StockContext
 from .feishu import FeishuNotifier, redact_feishu_webhook
 from .fund_flow import EastmoneyFlowClient
@@ -69,6 +70,7 @@ class StockTopicService:
             settings.feishu_bot_webhook, secret=settings.feishu_bot_secret,
         )
         self.clock = MarketClock()
+        self.display = DisplaySnapshots(self.database, self.clock)
         self.data_readiness = DiscoveryDataReadiness(self)
         self.market_cycles = MarketCycleTracker(self.database)
         self.direction_pool = ThemeDirectionPool(self.database)
@@ -1797,6 +1799,7 @@ class StockTopicService:
 
     def stop(self) -> None:
         self._stop_event.set()
+        self.display.stop()
 
     def _reconcile_completed_sources(self, day: str, now: datetime) -> None:
         try:
@@ -1837,6 +1840,7 @@ class StockTopicService:
                 missing_mainboard and state.in_realtime_window and now.time() >= time(9, 30)
             ) else "degraded",
             "version": __version__,
+            "display_snapshots": self.display.status(),
             "china_time": now.isoformat(timespec="seconds"),
             "database": "reachable" if database_ready else "unavailable",
             "market": {

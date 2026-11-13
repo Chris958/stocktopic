@@ -212,10 +212,10 @@ vm.runInContext('function load(manual=false) {' + LOAD, context);
 (async () => {
   const a = context.load(), b = context.load(true);
   assert.equal(a, b);
-  assert.deepEqual(paths, ['/api/v1/dashboard?view=index']);
+  assert.deepEqual(paths, ['/api/v1/theme-display']);
   resolve({themes:[]}); await Promise.resolve(); await new Promise(setImmediate);
   assert.deepEqual(events, ['render']);  // No dependency on the slower panels response.
-  assert.deepEqual(paths, ['/api/v1/dashboard?view=index', '/api/v1/dashboard?view=panels']);
+  assert.deepEqual(paths, ['/api/v1/theme-display', '/api/v1/dashboard?view=panels']);
   resolve({alerts:[]}); await a;
   assert.deepEqual(events, ['render','panels']);
   let handler, timers = [];
