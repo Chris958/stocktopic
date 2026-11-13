@@ -87,7 +87,8 @@ class DashboardTimingRoute(APIRoute):
     def get_route_handler(self):
         original = super().get_route_handler()
         if self.path not in {
-            PATH, "/api/v1/themes/{theme_id}", "/api/v1/themes/{theme_id}/research",
+            PATH, "/api/v1/theme-display", "/api/v1/theme-display/{theme_id}",
+            "/api/v1/themes/{theme_id}", "/api/v1/themes/{theme_id}/research",
             "/api/v1/themes/{theme_id}/fund-flows",
         }:
             return original
@@ -119,7 +120,10 @@ class DashboardTimingMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
-        detail = bool(re.fullmatch(r"/api/v1/themes/\d+(?:/(?:research|fund-flows))?", path))
+        detail = bool(re.fullmatch(
+            r"/api/v1/(?:themes/\d+(?:/(?:research|fund-flows))?|theme-display(?:/\d+)?)",
+            path,
+        ))
         if scope["type"] != "http" or (path != PATH and not detail):
             await self.app(scope, receive, send)
             return

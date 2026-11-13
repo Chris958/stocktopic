@@ -191,9 +191,9 @@ function load(manual = false) {
     const refresh = $('#refresh');
     refresh.classList.add('loading');
     try {
-      const index = await api('/api/v1/dashboard?view=index');
+      const index = await api('/api/v1/theme-display');
       if (!state.authenticated) return;
-      state.data = { ...state.data, themes: index.themes };
+      state.data = { ...state.data, themes: index.themes, display_snapshot: index.snapshot };
       if (state.openTheme != null && !index.themes.some(theme => theme.id === state.openTheme
           && (state.view === 'candidates' ? candidateMatchesFilter(theme, state.candidateFilter)
             : theme.status === (state.themeFilter === 'archived' ? 'archived' : 'confirmed')
@@ -212,7 +212,12 @@ function load(manual = false) {
     } finally {
       refresh.classList.remove('loading');
     }
-  })().finally(() => { dashboardLoadInFlight = null; });
+  })().finally(() => {
+    dashboardLoadInFlight = null;
+    if (state.authenticated && ['building', 'stale'].includes(state.data?.display_snapshot?.state)) {
+      setTimeout(() => { if (state.authenticated) load(); }, 1500);
+    }
+  });
   return dashboardLoadInFlight;
 }
 
@@ -356,8 +361,26 @@ function resetThemeList() {
   state.listLimit = 24;
 }
 
+async function displayApi(path, signal) {
+  for (let attempt = 0; attempt < 30; attempt++) {
+    const result = await api(path, { signal });
+    if (result.snapshot?.state !== 'building') return result;
+    await new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
+      const abort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort);
+        resolve();
+      }, 1000);
+      signal?.addEventListener('abort', abort, { once: true });
+    });
+  }
+  throw new Error('后台正在准备展示快照，请稍后重试');
+}
+
 function fetchThemeDetail(id, force = false) {
-  if (activeDetailLoad?.id === id && !activeDetailLoad.controller.signal.aborted) {
+  if (activeDetailLoad?.id === id && !activeDetailLoad.coreDone
+      && !activeDetailLoad.controller.signal.aborted) {
     return activeDetailLoad.promise;
   }
   activeDetailLoad?.controller.abort();
@@ -378,14 +401,18 @@ function fetchThemeDetail(id, force = false) {
   };
   const promise = (async () => {
     try {
-      const theme = await api(`/api/v1/themes/${id}?view=core`, { signal: controller.signal });
+      const theme = await displayApi(`/api/v1/theme-display/${id}`, controller.signal);
       if (!current()) return;
       theme.detail_sections = { 'fund-flows': 'loading', research: 'loading' };
+      theme.section_snapshots = {};
+      if (activeDetailLoad?.controller === controller) activeDetailLoad.coreDone = true;
       state.detail = theme;
       refresh(); // First paint only waits for member quotes, not funds/research.
       await Promise.all(['fund-flows', 'research'].map(async section => {
         try {
-          const data = await api(`/api/v1/themes/${id}/${section}`, { signal: controller.signal });
+          const data = await displayApi(
+            `/api/v1/theme-display/${id}?section=${section === 'fund-flows' ? 'funds' : 'research'}`,
+            controller.signal);
           if (!current()) return;
           if (section === 'research') {
             for (const key of ['latest_explanation', 'catalysts', 'admission_review']) {
@@ -396,6 +423,7 @@ function fetchThemeDetail(id, force = false) {
             const flows = new Map(data.members.map(m => [m.code, m.fund_flow]));
             theme.members.forEach(m => { m.fund_flow = flows.get(m.code); });
           }
+          theme.section_snapshots[section] = data.snapshot;
           theme.detail_sections[section] = 'ready';
         } catch (error) {
           if (!current()) return;
@@ -404,7 +432,9 @@ function fetchThemeDetail(id, force = false) {
         refresh();
       }));
       if (!current()) return;
-      if (Object.values(theme.detail_sections).every(v => v === 'ready')) {
+      if (theme.snapshot?.state !== 'stale'
+          && Object.values(theme.section_snapshots).every(m => m?.state !== 'stale')
+          && Object.values(theme.detail_sections).every(v => v === 'ready')) {
         themeDetailCache.set(id, { at: Date.now(), theme });
         if (themeDetailCache.size > 24) themeDetailCache.delete(themeDetailCache.keys().next().value);
       }
@@ -418,6 +448,13 @@ function fetchThemeDetail(id, force = false) {
   })();
   activeDetailLoad = { id, controller, promise };
   return promise;
+}
+
+function sectionSnapshotNote(theme, section) {
+  const meta = theme.section_snapshots?.[section];
+  if (!meta || (meta.state !== 'stale' && !meta.last_error)) return '';
+  return `<p class="theme-footnote">数据截至 ${escapeHtml(formatDataTime(meta.built_at))}
+    · 后台更新中，保留上一版有效结果</p>`;
 }
 
 function detailSectionState(theme, section) {
@@ -442,7 +479,7 @@ function themePreview(theme, mode) {
   return `<div class="theme-preview">
     <button type="button" class="theme-preview-button" data-open-theme="${theme.id}" aria-expanded="${open}">
       <strong>${theme.pinned ? '置顶 · ' : ''}${escapeHtml(title)}</strong>
-      <span>${escapeHtml(themeStageLabel(theme))} · ${theme.member_count}只 · ${escapeHtml(theme.day1_date)}</span>
+      <span>${escapeHtml(themeStageLabel(theme))} · ${theme.member_count == null ? '成员待更新' : theme.member_count + '只'} · ${escapeHtml(theme.day1_date)}</span>
       ${strength ? `<small>${escapeHtml(strength)}</small>` : ''}
       ${theme.reason_preview ? `<small>${escapeHtml(theme.reason_preview)}</small>` : ''}
       <span>${open ? '收起详情' : '查看行情、资金与催化'}</span>
@@ -515,6 +552,11 @@ function themeCard(theme, mode) {
   const archived = mode === 'archived';
   const title = theme.final_name || theme.suggested_name || theme.provisional_name;
   const eventName = theme.direction_state?.latest_event_name || theme.direction_context?.event_name;
+  const displayState = theme.snapshot;
+  const displayNote = displayState ? `<p class="theme-footnote">展示更新
+    ${escapeHtml(formatDataTime(displayState.built_at))}
+    ${displayState.state === 'stale' ? ' · 后台更新中，当前为上一版有效结果' : ''}
+    ${displayState.last_error ? ' · 部分数据更新失败，保留已有结果' : ''}</p>` : '';
   const activeMembers = theme.members.filter(member => member.active);
   const returnLabel = pending || watching || rejected ? '触发后' : '入库后';
   const backtest = state.data?.backtest || { entries: [] };
@@ -573,7 +615,8 @@ function themeCard(theme, mode) {
     <summary><span><strong>新闻催化</strong><small>定时更新 · ${catalysts.length}条</small></span><i>⌄</i></summary>
     ${catalystContent(catalysts, explanation)}
   </details>` : '';
-  newsDetails = detailSectionState(theme, 'research') || newsDetails;
+  newsDetails = detailSectionState(theme, 'research')
+    || (sectionSnapshotNote(theme, 'research') + newsDetails);
   let actions = '';
   if ((watching || theme.status === 'confirmed') && !archived) {
     actions = `<div class="card-actions">
@@ -587,7 +630,7 @@ function themeCard(theme, mode) {
   return `<article class="theme-card ${theme.pinned ? 'pinned-theme' : ''} stage-${escapeHtml(theme.theme_level || theme.status)}">
     <div class="theme-head"><div><div class="theme-title">${theme.pinned ? '<span class="pin-mark">置顶</span>' : ''}${escapeHtml(title)}</div><p>${escapeHtml(theme.discovery_reason)}</p></div><span class="theme-tag">${escapeHtml(theme.shared_tag)}</span></div>
     ${eventName ? `<p class="catalyst-summary">当前催化：${escapeHtml(eventName)}</p>` : ''}
-    ${statusHtml}${scoreHtml}${reviewHtml}${decisionHtml}${summaryHtml}${fundFlowHtml}${stockDetails}
+    ${displayNote}${statusHtml}${scoreHtml}${reviewHtml}${decisionHtml}${summaryHtml}${fundFlowHtml}${stockDetails}
     <p class="theme-footnote">Day 1 ${escapeHtml(theme.day1_date)} · 行情 ${escapeHtml(formatDataTime(summary.market_data_at))} · 市值 ${escapeHtml(formatDate(summary.metric_trade_date))}</p>
     ${newsDetails}${actions}
   </article>`;
@@ -651,7 +694,7 @@ function themeFundFlow(theme) {
   if (theme.status !== 'confirmed' && theme.status !== 'archived') return '';
   const flow = theme.fund_flow || {}, daily = flow.daily, intraday = flow.intraday;
   const c = daily?.consensus;
-  return `<section class="theme-fund-flow"><div class="fund-flow-head"><strong>正式题材资金流</strong>
+  return sectionSnapshotNote(theme, 'fund-flows') + `<section class="theme-fund-flow"><div class="fund-flow-head"><strong>正式题材资金流</strong>
     <small>${escapeHtml(flow.trade_date || '')} · ${daily?.covered_count ?? 0}/${daily?.target_count ?? (theme.members || []).filter(m => m.active !== 0).length}只</small></div>
     <div class="fund-flow-metrics">
       ${fundFlowMetric('盘中主力资金', formatFlowMoney(intraday?.main_net, true))}

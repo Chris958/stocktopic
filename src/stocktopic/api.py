@@ -83,6 +83,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         await asyncio.to_thread(service.initialize_storage)
+        service.display.start()
         background_services = asyncio.create_task(
             run_background_services(), name="stocktopic-background-services"
         )
@@ -332,6 +333,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def detail_response(timing, payload):
         response = timing.phase("json_response", lambda: JSONResponse(payload))
         timing.endpoint_done = time.perf_counter()
+        return response
+
+    @app.get("/api/v1/theme-display")
+    def display_index(request: Request):
+        timing = detail_timing(request)
+        service.display.start()
+        result = timing.phase("snapshot_read", service.display.read_index)
+        timing.counts["themes"] = len(result["themes"])
+        return detail_response(timing, result)
+
+    @app.get("/api/v1/theme-display/{theme_id}")
+    def display_theme(
+        theme_id: int, request: Request, section: Literal["core", "funds", "research"] = "core",
+    ):
+        timing = detail_timing(request)
+        service.display.start()
+        result = timing.phase(
+            "snapshot_read", lambda: service.display.read_theme(theme_id, section),
+        )
+        if result is None:
+            raise HTTPException(status_code=404, detail="Theme not found")
+        response = detail_response(timing, result)
+        state = result["snapshot"]["state"]
+        if state in {"building", "stale"}:
+            service.display.request(theme_id, (section,))
+        if state == "building":
+            response.status_code = 202
+            response.headers["Retry-After"] = "1"
         return response
 
     @app.get("/api/v1/themes/{theme_id}")

@@ -11,6 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from .board_status import consecutive_boards
+from .display_invalidation import (
+    display_flow_mutation,
+    display_metadata_mutation,
+    display_mutation,
+    invalidate_transaction,
+)
 from .domain import Anomaly, Quote
 from .market_clock import MarketClock
 from .market_scope import MAINBOARD_SQL, is_mainboard
@@ -21,18 +27,22 @@ def utc_now_iso() -> str:
 
 
 class Database:
-    def __init__(self, path: Path, archive_dir: Path):
+    def __init__(self, path: Path, archive_dir: Path, *, read_only: bool = False):
         self.path = path
         self.archive_dir = archive_dir
+        self.read_only = read_only
 
     @contextmanager
     def connect(self):
-        connection = sqlite3.connect(self.path, timeout=30)
+        location = self.path.resolve().as_uri() + "?mode=ro" if self.read_only else self.path
+        connection = sqlite3.connect(location, uri=self.read_only, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 30000")
         try:
             yield connection
+            if connection.total_changes and not self.read_only:
+                invalidate_transaction(connection)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -40,6 +50,7 @@ class Database:
         finally:
             connection.close()
 
+    @display_mutation("core")
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
@@ -134,6 +145,7 @@ class Database:
             if name not in test_pool_columns:
                 connection.execute(f"ALTER TABLE test_pool_entries ADD COLUMN {name} {definition}")
 
+    @display_metadata_mutation
     def set_metadata(self, key: str, value: str) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -149,6 +161,7 @@ class Database:
             row = connection.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()
         return str(row["value"]) if row else None
 
+    @display_mutation("core")
     def replace_calendar(self, rows: Sequence[dict[str, Any]]) -> None:
         synced_at = utc_now_iso()
         values = [
@@ -222,6 +235,7 @@ class Database:
             ).fetchall()
         return [str(row["cal_date"]) for row in rows]
 
+    @display_mutation("core")
     def upsert_stocks(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
         values: list[tuple[Any, ...]] = []
@@ -301,6 +315,7 @@ class Database:
             ).fetchone()
         return int(row["count"])
 
+    @display_mutation("core")
     def upsert_daily_limits(self, trade_date: str, rows: Sequence[dict[str, Any]]) -> int:
         values = [
             (
@@ -345,6 +360,7 @@ class Database:
             ).fetchall()
         return {row["market"]: row["n"] for row in rows}
 
+    @display_mutation("core")
     def prune_direction_members(self, day: str) -> dict:
         """Only recent sealed main-board stocks remain live; retain historical membership."""
         dates = self.open_trade_dates(day.replace("-", ""), 5)
@@ -403,12 +419,14 @@ class Database:
             row["direction_state"] = states.get(row["id"], {})
         return rows
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def name_theme_direction(self, theme_id: int, name: str) -> None:
         with self.connect() as con:
             con.execute("UPDATE candidate_themes SET final_name=?,suggested_name=? "
                         "WHERE id=? AND (final_name IS NULL OR final_name<>?)",
                         (name, name, theme_id, name))
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def update_direction_members(self, theme_id: int, members: Sequence[dict], seen_at: str) -> int:
         members = [m for m in members if is_mainboard(m["code"])]
         with self.connect() as con:
@@ -427,6 +445,7 @@ class Database:
             )
         return len({m["code"] for m in members} - old)
 
+    @display_mutation("core", "funds", "research")
     def adopt_direction_event(
         self, target_id: int, source_id: int, name: str, observed_at: str,
         archive_epoch: str | None, strength: float, duration: str,
@@ -524,6 +543,7 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @display_mutation("core")
     def backfill_mainboard_limit_events(self, trade_date: str, observed_at: datetime) -> int:
         """Replay official daily highs without inventing intraday seal times or reasons."""
         day = trade_date.replace("-", "")
@@ -559,6 +579,7 @@ class Database:
                 count += 1
         return count
 
+    @display_mutation("core")
     def upsert_daily_metrics(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
         active = self.active_stock_map()
@@ -597,6 +618,7 @@ class Database:
             )
         return len(values)
 
+    @display_mutation("core")
     def upsert_daily_bars(self, rows: Sequence[dict[str, Any]]) -> int:
         updated_at = utc_now_iso()
         values = []
@@ -672,6 +694,7 @@ class Database:
             result.setdefault(str(row["code"]), []).append(dict(row))
         return result
 
+    @display_mutation("core")
     def save_quotes(self, quotes: Iterable[Quote], trade_date: str, slot: str) -> int:
         values = [
             (
@@ -705,6 +728,7 @@ class Database:
             )
         return len(values)
 
+    @display_mutation("core")
     def save_anomalies(self, anomalies: Sequence[Anomaly]) -> int:
         values = [
             (
@@ -814,6 +838,7 @@ class Database:
             result.setdefault(str(row["code"]), []).append(dict(row))
         return result
 
+    @display_mutation("core")
     def upsert_kpl_events(self, rows: Sequence[dict[str, Any]]) -> int:
         now = utc_now_iso()
         active = self.active_stock_map()
@@ -874,6 +899,7 @@ class Database:
             )
         return len(event_values)
 
+    @display_mutation("core")
     def upsert_mainboard_limit_events(
         self, trade_date: str, quotes: Sequence[Quote],
         limits: dict[str, tuple[float | None, float | None]],
@@ -1435,6 +1461,7 @@ class Database:
             ).fetchall()
         return {str(row["fingerprint"]): dict(row) for row in rows}
 
+    @display_mutation("core", "funds", "research")
     def upsert_candidate(
         self,
         *,
@@ -1816,6 +1843,7 @@ class Database:
                     theme["admission_review"].pop(key)
                 )
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def set_theme_pin(self, theme_id: int, pinned: bool) -> None:
         with self.connect() as connection:
             cursor = connection.execute(
@@ -1825,6 +1853,7 @@ class Database:
             if not cursor.rowcount:
                 raise KeyError(f"Theme {theme_id} not found")
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def archive_theme(self, theme_id: int) -> None:
         now = utc_now_iso()
         with self.connect() as connection:
@@ -1856,6 +1885,7 @@ class Database:
                 (now, now, theme_id),
             )
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def restore_theme(self, theme_id: int) -> None:
         now = utc_now_iso()
         with self.connect() as connection:
@@ -1875,6 +1905,7 @@ class Database:
             if not cursor.rowcount:
                 raise KeyError(f"Archived theme {theme_id} not found")
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def set_admission_status(
         self, theme_id: int, status: str, reason: str, evidence_grade: str | None = None
     ) -> None:
@@ -1897,6 +1928,7 @@ class Database:
             if not cursor.rowcount:
                 raise KeyError(f"Theme {theme_id} not found")
 
+    @display_mutation("core")
     def recover_interrupted_ai_analyses(self) -> int:
         """Reset persisted in-flight states because no AI request survives a service restart."""
         now = utc_now_iso()
@@ -1915,6 +1947,7 @@ class Database:
             )
         return int(cursor.rowcount)
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def add_validated_members(
         self, theme_id: int, members: Sequence[dict[str, Any]], seen_at: str
     ) -> int:
@@ -1945,6 +1978,7 @@ class Database:
                 inserted += int(cursor.rowcount > 0)
         return inserted
 
+    @display_mutation("research", theme_arg="theme_id")
     def save_admission_review(
         self,
         theme_id: int,
@@ -1987,6 +2021,7 @@ class Database:
                 ),
             )
 
+    @display_mutation("core")
     def reclassify_legacy_pending(self, minimum_touches: int) -> dict[str, int]:
         """Re-evaluate old pending themes using retained KPL evidence."""
         with self.connect() as connection:
@@ -2234,6 +2269,7 @@ class Database:
     def get_theme(self, theme_id: int) -> dict[str, Any] | None:
         return next(iter(self.list_themes(theme_id=theme_id)), None)
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def set_theme_status(
         self,
         theme_id: int,
@@ -2283,6 +2319,7 @@ class Database:
                 ),
             )
 
+    @display_mutation("core", "funds", "research", theme_arg="theme_id")
     def set_suggested_name(self, theme_id: int, suggested_name: str) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -2290,6 +2327,7 @@ class Database:
                 (suggested_name, utc_now_iso(), theme_id),
             )
 
+    @display_mutation("core", "funds", "research")
     def merge_themes(self, target_id: int, source_ids: Sequence[int]) -> None:
         if target_id in source_ids:
             raise ValueError("Target theme cannot also be a merge source")
@@ -2334,6 +2372,7 @@ class Database:
                     (target_id, now, source_id),
                 )
 
+    @display_mutation("core", "funds", "research")
     def split_theme(
         self, source_id: int, member_codes: Sequence[str], new_name: str, fingerprint: str
     ) -> int:
@@ -2400,6 +2439,7 @@ class Database:
             )
         return new_id
 
+    @display_mutation("core", theme_arg="theme_id")
     def save_score(self, theme_id: int, score: dict[str, Any]) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -2484,6 +2524,7 @@ class Database:
             ).fetchone()
         return dict(row) if row else {}
 
+    @display_mutation("research", theme_arg="theme_id")
     def save_ai_explanation(self, theme_id: int, item: dict[str, Any]) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -2508,6 +2549,7 @@ class Database:
                 ),
             )
 
+    @display_mutation("research", theme_arg="theme_id")
     def save_theme_catalysts(self, theme_id: int, catalysts: Sequence[dict[str, Any]]) -> int:
         captured_at = utc_now_iso()
         inserted = 0
@@ -2593,6 +2635,7 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @display_flow_mutation
     def save_flow(
         self, kind: str, owner: str, trade_date: str, slot: str, captured_at: str, payload: dict
     ) -> None:
