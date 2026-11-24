@@ -7,12 +7,13 @@
   }[character]));
 
   const num = (value, digits = 0) => {
+    if (value == null) return '—';
     const number = Number(value);
     return Number.isFinite(number) ? number.toFixed(digits) : '—';
   };
 
   const pct = (value, digits = 1, available = true) => {
-    if (!available) return '—';
+    if (!available || value == null) return '—';
     const number = Number(value);
     if (!Number.isFinite(number)) return '—';
     return `${number > 0 ? '+' : ''}${number.toFixed(digits)}%`;
@@ -84,7 +85,12 @@
 
   function marketSection(market) {
     const hasYesterday = Number(market.yesterday_limit_sample_count || 0) > 0;
-    const hasPromotion = Number(market.promotion_base_count || 0) > 0;
+    const sample = market.yesterday_limit_expected_count == null
+      ? (hasYesterday ? `${num(market.yesterday_limit_sample_count)} 只有效` : '样本待补')
+      : `${num(market.yesterday_limit_sample_count)}/${num(market.yesterday_limit_expected_count)} 只已观测`;
+    const feedbackNote = market.feedback_ready === false ? sample + ' · 待验证' : sample;
+    const promotionSample = market.promotion_sample_count == null ? feedbackNote
+      : `${num(market.promotion_sample_count)}/${num(market.promotion_base_count)} 只封板状态可核对`;
     const hasBreak = Number(market.break_board_sample_count || 0) > 0;
     return `<section class="intel-block market-block">
       <div class="intel-block-head"><strong>市场环境 · ${escapeHtml(market.label || '—')}</strong><b>${num(market.score)}</b></div>
@@ -92,12 +98,12 @@
         ${metric('涨停 / 跌停', `${num(market.limit_up_count)} / ${num(market.limit_down_count)}`)}
         ${metric('封板率', pct(market.seal_rate, 1))}
         ${metric('炸板率', pct(market.failed_rate, 1))}
-        ${metric('连板高度', `${num(market.max_board_height)}板`)}
-        ${metric('真实晋级率', hasPromotion ? pct(market.promotion_rate, 1) : '—', hasPromotion ? `${num(market.promoted_count)}/${num(market.promotion_base_count)}` : '无昨日样本')}
-        ${metric('昨日涨停收益', pct(market.yesterday_limit_return, 2, hasYesterday), hasYesterday ? `${num(market.yesterday_limit_sample_count)}只样本` : '无昨日样本')}
-        ${metric('打板盈亏', pct(market.board_trade_return, 2, hasYesterday), hasYesterday ? `盈利率 ${pct(market.board_trade_win_rate, 1)}` : '无昨日样本')}
-        ${metric('天地板', `${num(market.earth_sky_count)}只`)}
-        ${metric('核按钮', `${num(market.nuclear_button_count)}只`, hasPromotion || hasYesterday ? `占昨日板 ${pct(market.nuclear_button_ratio, 1)}` : '')}
+        ${metric('连板高度', market.max_board_height > 0 ? `${num(market.max_board_height)}板` : '—')}
+        ${metric('晋级率', pct(market.promotion_rate, 1), promotionSample)}
+        ${metric('昨日涨停收益', pct(market.yesterday_limit_return, 2, hasYesterday), feedbackNote)}
+        ${metric('昨日强股中位数', pct(market.board_trade_return, 2, hasYesterday), hasYesterday ? `上涨比例 ${pct(market.board_trade_win_rate, 1)}` : '样本待补')}
+        ${metric('触及上下限', `${num(market.earth_sky_count)}只`)}
+        ${metric('核按钮', hasYesterday ? `${num(market.nuclear_button_count)}只` : '—', hasYesterday ? `占已观测 ${pct(market.nuclear_button_ratio, 1)}` : feedbackNote)}
         ${metric('断板亏损', pct(market.break_board_return, 2, hasBreak), hasBreak ? `${num(market.break_board_count)}只断板` : '无断板样本')}
       </div>
       <p class="intel-source-note">${escapeHtml(market.version || 'market-environment')} · 前一交易日 ${escapeHtml(market.previous_trade_date || '—')}</p>

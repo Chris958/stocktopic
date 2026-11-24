@@ -13,7 +13,7 @@
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="icon" href="/static/app-icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" sizes="180x180" href="/static/app-icon-180.png">
-  <link rel="stylesheet" href="/static/style.css?v=0.12.1">
+  <link rel="stylesheet" href="/static/style.css?v=0.14.0">
   <link rel="stylesheet" href="/static/graph-nav.css?v=1">
   <link rel="stylesheet" href="/static/intelligence-panel.css?v=1">
 </head>
@@ -95,6 +95,24 @@
       </div>
 
       <section id="candidates" class="view-panel active" aria-label="候选题材">
+        <section id="leaderPanel" class="leader-panel" aria-labelledby="leaderTitle">
+          <div class="leader-heading">
+            <div>
+              <h3 id="leaderTitle">龙头候选池</h3>
+              <p>跨题材跟踪强势股。优先看低位承接，留池不等于出现入场窗口。</p>
+            </div>
+            <p id="leaderStatus" class="leader-status" role="status">等待行情</p>
+          </div>
+          <div id="leaderList" class="leader-list"></div>
+          <button id="leaderExpand" class="filter-chip pressable" type="button"
+            aria-expanded="false" aria-controls="leaderList" hidden>查看全部候选</button>
+          <details id="leaderHistory" class="leader-history">
+            <summary>入池与移出记录</summary>
+            <ol id="leaderHistoryList" class="leader-history-list"></ol>
+            <p id="leaderHistoryStatus" role="status"></p>
+            <button id="leaderHistoryMore" class="filter-chip pressable" type="button" hidden>加载更早记录</button>
+          </details>
+        </section>
         <div id="marketCyclePanel" hidden>
           <p class="section-kicker">市场周期跟踪</p>
           <p>持续记录市场共振与梯队变化，事件是否准入单独标示。本地早期观察不发送通知。</p>
@@ -186,7 +204,8 @@
   </div>
 
   <div id="toast" role="status" aria-live="polite"><span id="toastIcon">✓</span><span id="toastText"></span></div>
-  <script src="/static/app.js?v=theme-index1" defer></script>
-  <script src="/static/intelligence-panel.js?v=2" defer></script>
+  <script src="/static/app.js?v=0.14.0" defer></script>
+  <script src="/static/leader-panel.js?v=0.14.0" defer></script>
+  <script src="/static/intelligence-panel.js?v=3" defer></script>
 </body>
 </html>

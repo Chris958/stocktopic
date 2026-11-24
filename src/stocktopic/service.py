@@ -31,8 +31,10 @@ from .display_snapshots import DisplaySnapshots
 from .domain import StockContext
 from .feishu import FeishuNotifier, redact_feishu_webhook
 from .fund_flow import EastmoneyFlowClient
+from .leader_pool import LeaderPool
 from .market_clock import MarketClock
 from .market_cycles import MarketCycleTracker
+from .market_feedback import day_limits, day_prices, latest_boards, price_board
 from .providers import TushareClient
 from .scoring import ThemeScorer
 from .theme_directions import DirectionDeferred, ThemeDirectionPool
@@ -79,6 +81,7 @@ class StockTopicService:
         self.data_readiness = DiscoveryDataReadiness(self)
         self.market_cycles = MarketCycleTracker(self.database)
         self.direction_pool = ThemeDirectionPool(self.database)
+        self.leaders = LeaderPool(self.database)
         self._collector_lock = threading.Lock()
         self._discovery_lock = threading.Lock()
         self._ai_lock = threading.Lock()
@@ -123,7 +126,10 @@ class StockTopicService:
 
     def initialize_reference_data(self) -> None:
         self.bootstrap_reference_data()
-        self.refresh_test_pool_prices(self.clock.china_now())
+        now = self.clock.china_now()
+        repaired = self.database.repair_recent_cohort_feedback(now.strftime("%Y%m%d"))
+        logger.info("Recent next-day feedback repaired: %s observations", repaired)
+        self.refresh_test_pool_prices(now)
 
     def bootstrap_reference_data(self) -> None:
         now = self.clock.china_now()
@@ -249,6 +255,7 @@ class StockTopicService:
             if count < 2000:
                 raise RuntimeError(f"Daily price coverage abnormal: {count}")
             self.database.set_metadata(f"daily_prices_synced:{trade_date}", "true")
+            self.database.settle_cohort_next_day_returns(trade_date)
             self.database.finish_run(run_id, "success", count)
             return count
         except Exception as error:
@@ -977,11 +984,19 @@ class StockTopicService:
                 signal_coverage = self.data_readiness.signal_coverage(
                     compact, started, quotes, limits,
                 )
-                self.direction_pool.observe(
-                    compact, started, self.database.limit_touch_events(compact),
-                )
+                events = self.database.limit_touch_events(compact)
+                self.direction_pool.observe(compact, started, events)
+                try:
+                    self.leaders.observe(
+                        started, quotes, limits, events, universe,
+                        coverage_complete=signal_coverage["mainboard_available"],
+                    )
+                except Exception:
+                    logger.exception("Leader watchlist refresh failed")
                 scored_ids = self.scorer.score_confirmed(started)
-                self._evaluate_theme_alerts(started, scored_ids, stale=False)
+                self._evaluate_theme_alerts(
+                    started, scored_ids, stale=not signal_coverage["mainboard_available"],
+                )
                 self.database.finish_run(
                     run_id,
                     "success" if signal_coverage["mainboard_available"] else "degraded",
@@ -1551,11 +1566,14 @@ class StockTopicService:
             if not theme or not theme.get("score"):
                 continue
             score = theme["score"]
+            details = score.get("details") or {}
             name = (
                 theme.get("final_name") or theme.get("suggested_name") or theme["provisional_name"]
             )
             if (
                 not stale
+                and details.get("quote_feedback_ready")
+                and details.get("market_environment", {}).get("feedback_ready")
                 and float(score["heat"]) >= 55
                 and float(score["persistence"]) >= 70
                 and float(score["entry_risk"]) <= 45
@@ -1683,34 +1701,30 @@ class StockTopicService:
     def _record_daily_cohorts(self, now: datetime) -> int:
         compact = now.strftime("%Y%m%d")
         trade_date = now.date().isoformat()
-        quotes = {str(row["code"]): row for row in self.database.latest_quotes()}
-        previous = self.database.previous_trade_date(compact)
-        if previous:
-            self.database.update_cohort_next_day_returns(
-                previous,
-                {code: float(row["pct_change"]) for code, row in quotes.items()},
-            )
+        self.database.settle_cohort_next_day_returns(compact)
+        with self.database.connect() as con:
+            quotes = day_prices(con, compact, as_of=now, close_only=True)
+            limits = day_limits(con, compact)
+            boards = latest_boards(con, compact)
         total = 0
-        for theme in self.database.list_themes(
-            status="confirmed", focus_only=True, include_research=False,
-        ):
+        for theme in self.database.direction_tracking_rows():
+            if theme["status"] != "confirmed":
+                continue
             members = [member for member in theme["members"] if member.get("active", 1)]
-            codes = [str(member["code"]) for member in members]
-            kpl = self.database.kpl_events_for_codes(compact, codes)
-            by_code = {str(event["code"]): event for event in kpl}
             cohort = []
             for member in members:
                 code = str(member["code"])
-                event = by_code.get(code)
-                quote = quotes.get(code, {})
-                outcome = str(event["board_tag"]) if event else "普通"
-                if not event and float(quote.get("pct_change", 0)) <= -5:
+                quote = quotes.get(code)
+                event = boards.get(code) or {}
+                outcome = price_board(quote, limits.get(code, (None, None))) if quote else None
+                if outcome == "普通" and quote["pct_change"] <= -5:
                     outcome = "大幅负反馈"
                 cohort.append(
                     {
                         "code": code,
-                        "board_level": _parse_board_height(event.get("status") if event else None),
-                        "outcome": outcome,
+                        "board_level": _parse_board_height(event.get("status"))
+                        if outcome == "涨停" else 0,
+                        "outcome": outcome or "待结算",
                     }
                 )
             self.database.record_cohort(int(theme["id"]), trade_date, cohort)
