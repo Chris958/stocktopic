@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from stocktopic import __version__
 from stocktopic.api import create_app
 from stocktopic.config import Settings
 
@@ -36,7 +37,7 @@ def test_api_auth_and_csrf_guard():
 
         page = client.get("/")
         assert page.status_code == 200
-        assert "app.js?v=theme-index1" in page.text
+        assert f"app.js?v={__version__}" in page.text
         assert 'data-view="anomalies"' not in page.text
         assert page.headers["cache-control"] == "no-store, must-revalidate"
         script = client.get("/static/app.js")

@@ -72,6 +72,7 @@ async function api(path, options = {}) {
 
 function showLogin(message = '') {
   state.authenticated = false;
+  window.clearLeaderPanel?.();
   themeDetailCache.clear();
   state.data = null;
   resetThemeList();
@@ -186,6 +187,7 @@ document.addEventListener('keydown', event => {
 });
 
 function load(manual = false) {
+  if (state.authenticated) window.refreshLeaderPanel?.();
   if (dashboardLoadInFlight) return dashboardLoadInFlight;
   dashboardLoadInFlight = (async () => {
     const refresh = $('#refresh');

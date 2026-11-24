@@ -6,7 +6,10 @@ from typing import Any
 
 from .board_status import consecutive_boards
 from .db import Database
+from .market_clock import MarketClock
 from .market_environment import build_market_environment
+from .market_feedback import MIN_FEEDBACK_COVERAGE, fresh_trade_sample, price_board
+from .market_scope import is_mainboard
 from .theme_intelligence import (
     catalyst_quality,
     core_stock_structure,
@@ -24,22 +27,41 @@ class ThemeScorer:
         self.database = database
 
     def score_confirmed(self, now: datetime) -> list[int]:
+        now = MarketClock.normalize(now)
         scored: list[int] = []
-        for theme in self.database.list_themes(status="confirmed"):
-            score = self.calculate(theme, now)
+        themes = self.database.list_themes(status="confirmed")
+        if not themes:
+            return scored
+        environment = build_market_environment(
+            self.database, now.strftime("%Y%m%d"), as_of=now,
+        )
+        limits = self.database.daily_limit_map(now.date().isoformat())
+        for theme in themes:
+            score = self.calculate(theme, now, environment=environment, limits=limits)
             if score:
                 self.database.save_score(int(theme["id"]), score)
                 scored.append(int(theme["id"]))
         return scored
 
-    def calculate(self, theme: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+    def calculate(
+        self, theme: dict[str, Any], now: datetime, *, environment=None, limits=None,
+    ) -> dict[str, Any] | None:
         if theme.get("status") != "confirmed":
             return None
-        members = [member for member in theme.get("members", []) if member.get("active", 1)]
+        now = MarketClock.normalize(now)
+        members = [member for member in theme.get("members", [])
+                   if member.get("active", 1) and is_mainboard(member["code"])]
         codes = [str(member["code"]) for member in members]
         if not codes:
             return None
-        quotes = self.database.latest_quotes(codes)
+        quotes = [q for q in self.database.latest_quotes(codes, trade_date=now.date().isoformat())
+                  if q["close"] > 0 and q["pre_close"] > 0 and q["volume"] > 0]
+        at_market = MarketClock.session_name(now) in {"morning", "afternoon"}
+        if at_market:
+            quotes = [q for q in quotes if fresh_trade_sample(
+                now, MarketClock.normalize(datetime.fromisoformat(q["captured_at"])),
+                q.get("provider_trade_time") or "",
+            )]
         if not quotes:
             return None
 
@@ -52,12 +74,10 @@ class ThemeScorer:
         follower_average = mean(follower_pct) if follower_pct else 0.0
         median_pct = median(pct)
         strong_count = sum(value >= 5.0 for value in pct)
-        limit_like_count = sum(value >= 9.5 for value in pct)
-        negative_count = sum(value <= -5.0 for value in pct)
+        severe_codes = {q["code"] for q in quotes if q["pct_change"] <= -5.0}
         up_count = sum(value > 0 for value in pct)
         breadth_ratio = up_count / len(pct)
         strong_ratio = strong_count / len(pct)
-        negative_ratio = negative_count / len(pct)
         concentration = max(0.0, leader_pct) / max(
             1.0, sum(max(0.0, value) for value in pct)
         )
@@ -66,21 +86,23 @@ class ThemeScorer:
         recent = self.database.recent_anomalies(now - timedelta(minutes=45))
         member_events = [event for event in recent if event["code"] in codes]
         kpl_events = self.database.kpl_events_for_codes(trade_date, codes)
-        kpl_limit_count = sum(
-            event["board_tag"] in {"涨停", "创业板涨幅超10%"} for event in kpl_events
-        )
-        kpl_failed_count = sum(event["board_tag"] == "炸板" for event in kpl_events)
-        kpl_down_count = sum(event["board_tag"] == "跌停" for event in kpl_events)
-        failed_count = max(
-            kpl_failed_count,
-            sum("failed_limit" in event["event_types"] for event in member_events),
-        )
-        if kpl_events:
-            limit_like_count = kpl_limit_count
-            negative_count = max(negative_count, kpl_down_count)
-            negative_ratio = negative_count / len(pct)
+        known_boards = {}
+        for event in sorted(kpl_events, key=lambda e: (e["synced_at"], e["board_tag"] != "涨停")):
+            known_boards[event["code"]] = event
+        if limits is None:
+            limits = self.database.daily_limit_map(now.date().isoformat())
+        boards = {
+            q["code"]: price_board(q, limits.get(q["code"], (None, None)))
+            or known_boards.get(q["code"], {}).get("board_tag") for q in quotes
+        }
+        limit_like_count = sum(tag == "涨停" for tag in boards.values())
+        failed_count = sum(tag == "炸板" for tag in boards.values())
+        severe_codes.update(code for code, tag in boards.items() if tag == "跌停")
+        negative_count = len(severe_codes)
+        negative_ratio = negative_count / len(pct)
         max_board_height = max(
-            (_board_height(event.get("status")) for event in kpl_events), default=0
+            (_board_height(known_boards.get(code, {}).get("status"))
+             for code, tag in boards.items() if tag == "涨停"), default=0,
         )
         hard_positive = sum(
             event["direction"] == "positive" and event["is_hard_event"]
@@ -99,9 +121,14 @@ class ThemeScorer:
         effective_catalyst_strength = max(
             legacy_catalyst_strength, catalyst_score["score"]
         )
-        cohort_stats = self.database.cohort_stats(int(theme["id"]))
-        avg_next_day_return = float(cohort_stats.get("avg_next_day_return") or 0.0)
-        cohort_loss_ratio = float(cohort_stats.get("loss_ratio") or 0.0)
+        # Yesterday's cohort doesn't have a realized T+1 close during the live session.
+        before = self.database.previous_trade_date(trade_date) if at_market else trade_date
+        cohort_stats = self.database.cohort_stats(int(theme["id"]), before or trade_date)
+        observed = cohort_stats["observations"]
+        expected = cohort_stats["expected_count"]
+        avg_next_day_return = cohort_stats["avg_next_day_return"]
+        cohort_loss_ratio = cohort_stats["loss_ratio"]
+        cohort_ready = bool(expected) and observed / expected >= MIN_FEEDBACK_COVERAGE
 
         sync_values = [
             float(member.get("evidence", {}).get("synchronization_score") or 0)
@@ -141,12 +168,14 @@ class ThemeScorer:
             + recurrence
             + ladder_proxy
             + min(15.0, effective_catalyst_strength * 0.15)
-            + max(-10.0, min(10.0, avg_next_day_return * 2.0))
+            + max(-10.0, min(10.0, (avg_next_day_return or 0) * 2.0)) * cohort_ready
             + max(0.0, 5.0 - negative_ratio * 20.0)
             - failed_count * 3.0
         )
 
-        market_environment = self._market_environment(trade_date)
+        market_environment = environment or build_market_environment(
+            self.database, trade_date, as_of=now,
+        )
         market_label = str(market_environment.get("label") or "震荡")
         market_penalty = {
             "主升": -6,
@@ -169,7 +198,7 @@ class ThemeScorer:
             age_risk
             + climax_risk
             + negative_ratio * 22.0
-            + cohort_loss_ratio * 15.0
+            + (cohort_loss_ratio or 0) * 15.0
             + min(18.0, failed_count * 4.5)
             + max(0.0, concentration - 0.45) * 25.0
             + float(negative["score"]) * 0.28
@@ -198,6 +227,8 @@ class ThemeScorer:
         details = {
             "day_number": day_number,
             "member_count": len(codes),
+            "quote_sample_count": len(quotes),
+            "quote_feedback_ready": len(quotes) / len(codes) >= MIN_FEEDBACK_COVERAGE,
             "median_pct": round(median_pct, 3),
             "up_count": up_count,
             "strong_count": strong_count,
@@ -218,9 +249,11 @@ class ThemeScorer:
                 **market_environment,
                 "risk_adjustment": market_penalty,
             },
-            "cohort_observations": int(cohort_stats.get("observations") or 0),
-            "cohort_avg_next_day_return": round(avg_next_day_return, 3),
-            "cohort_loss_ratio": round(cohort_loss_ratio, 3),
+            "cohort_observations": observed,
+            "cohort_expected_count": expected,
+            "cohort_avg_next_day_return": avg_next_day_return,
+            "cohort_loss_ratio": cohort_loss_ratio,
+            "cohort_feedback_ready": cohort_ready,
             "score_limitations": [
                 "催化新颖度目前主要依据首次催化/强化催化标签，"
                 "并由准入AI补充90日历史新颖度",
@@ -284,10 +317,6 @@ class ThemeScorer:
                 }
             )
         return catalyst_quality(items)
-
-    def _market_environment(self, trade_date: str) -> dict[str, Any]:
-        return build_market_environment(self.database, trade_date)
-
 
 def _duration_score(value: Any) -> float:
     text = str(value or "")

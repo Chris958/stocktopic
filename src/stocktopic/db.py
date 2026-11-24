@@ -19,6 +19,7 @@ from .display_invalidation import (
 )
 from .domain import Anomaly, Quote
 from .market_clock import MarketClock
+from .market_feedback import date_forms, day_prices
 from .market_scope import MAINBOARD_SQL, is_mainboard
 from .tracking_policy import ARCHIVED_TRACKING_DAYS, archive_tracking_active
 
@@ -1468,12 +1469,18 @@ class Database:
             ).fetchone()
         return str(row["fingerprint"]) if row else None
 
-    def latest_quotes(self, codes: Sequence[str] | None = None) -> list[dict[str, Any]]:
-        condition = ""
+    def latest_quotes(
+        self, codes: Sequence[str] | None = None, *, trade_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = []
         params: list[Any] = []
         if codes:
-            condition = f"WHERE code IN ({','.join('?' for _ in codes)})"
+            clauses.append(f"code IN ({','.join('?' for _ in codes)})")
             params.extend(codes)
+        if trade_date:
+            clauses.append("trade_date IN (?,?) AND slot BETWEEN '09:30' AND '15:00'")
+            params.extend(date_forms(trade_date))
+        condition = "WHERE " + " AND ".join(clauses) if clauses else ""
         with self.connect() as connection:
             rows = connection.execute(
                 f"""
@@ -2527,34 +2534,49 @@ class Database:
                 ],
             )
 
-    def update_cohort_next_day_returns(
-        self, previous_trade_date: str, returns: dict[str, float]
-    ) -> int:
-        updated = 0
-        with self.connect() as connection:
-            for code, value in returns.items():
-                cursor = connection.execute(
-                    """
-                    UPDATE theme_cohorts SET next_day_return=?
-                    WHERE trade_date=? AND code=?
-                    """,
-                    (value, previous_trade_date, code),
-                )
-                updated += cursor.rowcount
-        return updated
+    def settle_cohort_next_day_returns(self, trade_date: str) -> int:
+        """T+1 is the next open session; settlement needs a valid close from that date."""
+        day = date_forms(trade_date)[0]
+        previous = self.previous_trade_date(day)
+        if not previous or date_forms(previous)[0] >= day:
+            return 0
+        dates = date_forms(previous)
+        with self.connect() as con:
+            codes = {row[0] for row in con.execute(
+                "SELECT DISTINCT code FROM theme_cohorts WHERE trade_date IN (?,?)", dates,
+            )}
+            if not codes:
+                return 0
+            prices = day_prices(con, trade_date, close_only=True)
+            return con.executemany(
+                "UPDATE theme_cohorts SET next_day_return=? "
+                "WHERE trade_date IN (?,?) AND code=? AND next_day_return IS NOT ?",
+                ((prices[c]["pct_change"], *dates, c, prices[c]["pct_change"])
+                 for c in codes & prices.keys()),
+            ).rowcount
 
-    def cohort_stats(self, theme_id: int) -> dict[str, Any]:
+    def repair_recent_cohort_feedback(self, today: str) -> int:
+        # Only previously completed sessions; local data may cover fewer than 20.
+        dates = [day for day in self.open_trade_dates(today, 21) if day < today][:20]
+        return sum(self.settle_cohort_next_day_returns(day) for day in dates)
+
+    def cohort_stats(self, theme_id: int, before: str) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute(
                 """
                 SELECT
-                    COUNT(*) AS observations,
+                    COUNT(*) AS expected_count,
+                    COUNT(next_day_return) AS observations,
                     AVG(next_day_return) AS avg_next_day_return,
-                    AVG(CASE WHEN next_day_return <= -5 THEN 1.0 ELSE 0.0 END) AS loss_ratio,
+                    AVG(CASE WHEN next_day_return IS NULL THEN NULL
+                             WHEN next_day_return <= -5 THEN 1.0 ELSE 0.0 END) AS loss_ratio,
                     AVG(CASE WHEN outcome='炸板' THEN 1.0 ELSE 0.0 END) AS failed_ratio
-                FROM theme_cohorts WHERE theme_id=?
+                FROM theme_cohorts WHERE theme_id=? AND replace(trade_date,'-','') IN (
+                    SELECT cal_date FROM trading_calendar WHERE is_open=1 AND cal_date<?
+                    ORDER BY cal_date DESC LIMIT 20
+                )
                 """,
-                (theme_id,),
+                (theme_id, date_forms(before)[0]),
             ).fetchone()
         return dict(row) if row else {}
 

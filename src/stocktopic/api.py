@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -287,6 +287,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @app.get("/api/v1/leader-pool")
+    def leader_pool():
+        return service.leaders.read(service.clock.china_now())
+
+    @app.get("/api/v1/leader-pool/history")
+    def leader_pool_history(
+        before: str | None = Query(default=None, max_length=80),
+        limit: int = Query(default=20, ge=1, le=50),
+    ):
+        return service.leaders.history(before=before, limit=limit)
 
     @app.get("/api/v1/test-pool")
     async def test_pool():
