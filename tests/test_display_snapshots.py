@@ -309,3 +309,29 @@ def test_live_coordinator_builds_and_updates_without_any_get_recomputation(env):
         svc.display.stop()
         svc.display._thread.join(timeout=5)
         assert not svc.display._thread.is_alive()
+
+
+def test_expired_archives_keep_stored_snapshot_without_background_rebuild(env):
+    app, svc, (identifier, _) = env
+    svc.display.refresh_once()
+    with svc.database.connect() as con:
+        con.execute("UPDATE candidate_themes SET discovered_at='2026-10-01T10:00:00+08:00' "
+                    "WHERE id=?", (identifier,))
+    svc.database.archive_theme(identifier)
+    for section in ("core", "funds", "research"):
+        saved = svc.display.read_theme(identifier, section)
+        assert saved["snapshot"]["state"] == "frozen" and saved["tracking_active"] is False
+    index = svc.display.read_index()
+    assert next(t for t in index["themes"] if t["id"] == identifier)["tracking_active"] is False
+    svc.display.request(identifier)
+    _, _, _, plan = svc.display.prepare()
+    assert str(identifier) not in plan
+    svc.display.refresh_once()
+    assert svc.display.prepare() is None
+    client = TestClient(app)
+    response = client.get(f"/api/v1/theme-display/{identifier}", headers=AUTH)
+    assert response.status_code == 200 and response.json()["snapshot"]["state"] == "frozen"
+    assert svc.display.prepare() is None  # No stale refresh request on viewing history.
+    svc.database.restore_theme(identifier)
+    assert svc.display.read_theme(identifier)["tracking_active"] is True
+    assert svc.display.read_theme(identifier)["snapshot"]["state"] == "stale"

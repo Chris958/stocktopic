@@ -249,7 +249,7 @@ def test_channel_aware_delivery_keeps_old_alerts_and_records_feishu_failures(set
     db = service.database
     old_id = db.create_alert("old", "formal_theme", "high", "历史企业微信", "历史")
     db.mark_alert_pushed(old_id)
-    with patch("stocktopic.feishu.open_url", return_value=JsonResponse({"code": 0})):
+    with patch("stocktopic.feishu.open_url", return_value=JsonResponse({"code": 0})) as opener:
         for category in (
             "formal_theme",
             "early_watch_theme",
@@ -272,11 +272,19 @@ def test_channel_aware_delivery_keeps_old_alerts_and_records_feishu_failures(set
             title="不重复",
             body="不重复",
         )
+    assert opener.call_count == 2  # Only formal and high-value opportunities leave the system.
     rows = db.recent_alerts()
     assert len(rows) == 7
     for row in rows:
-        assert row["pushed"] == 1
-        assert row["push_channel"] == ("wecom" if row["id"] == old_id else "feishu")
+        opportunity = row["category"] in {"formal_theme", "high_value_opportunity"}
+        assert row["pushed"] == int(opportunity)
+        if row["id"] == old_id:
+            assert row["push_channel"] == "wecom"
+        elif opportunity:
+            assert row["push_channel"] == "feishu"
+        else:
+            assert row["push_channel"] == ""
+            assert json.loads(row["push_policy"])["delivery"] == "local_only"
     with patch(
         "stocktopic.feishu.open_url",
         return_value=JsonResponse(
@@ -288,7 +296,7 @@ def test_channel_aware_delivery_keeps_old_alerts_and_records_feishu_failures(set
     ):
         service._send_alert(
             dedupe_key="failure",
-            category="data_pull_failed",
+            category="high_value_opportunity",
             severity="high",
             title="失败",
             body="失败",

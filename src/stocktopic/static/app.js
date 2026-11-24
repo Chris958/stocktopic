@@ -40,7 +40,7 @@ const views = {
   alerts: {
     kicker: '系统预警',
     title: '重要机会与数据故障',
-    description: '题材、风险和数据异常推送至飞书；本地早期观察仅在网页展示。'
+    description: '飞书仅推送正式题材机会和高价值机会；风险、数据异常及早期观察仅在系统内展示。'
   }
 };
 
@@ -452,6 +452,7 @@ function fetchThemeDetail(id, force = false) {
 
 function sectionSnapshotNote(theme, section) {
   const meta = theme.section_snapshots?.[section];
+  if (meta?.state === 'frozen') return `<p class="theme-footnote">已停止自动跟踪 · 历史快照截至 ${escapeHtml(formatDataTime(meta.built_at))}</p>`;
   if (!meta || (meta.state !== 'stale' && !meta.last_error)) return '';
   return `<p class="theme-footnote">数据截至 ${escapeHtml(formatDataTime(meta.built_at))}
     · 后台更新中，保留上一版有效结果</p>`;
@@ -479,7 +480,7 @@ function themePreview(theme, mode) {
   return `<div class="theme-preview">
     <button type="button" class="theme-preview-button" data-open-theme="${theme.id}" aria-expanded="${open}">
       <strong>${theme.pinned ? '置顶 · ' : ''}${escapeHtml(title)}</strong>
-      <span>${escapeHtml(themeStageLabel(theme))} · ${theme.member_count == null ? '成员待更新' : theme.member_count + '只'} · ${escapeHtml(theme.day1_date)}</span>
+      <span>${escapeHtml(themeStageLabel(theme))} · ${theme.member_count == null ? '成员待更新' : theme.member_count + '只'} · ${escapeHtml(theme.day1_date)}${theme.tracking_active === false ? ' · 已停止自动跟踪' : ''}</span>
       ${strength ? `<small>${escapeHtml(strength)}</small>` : ''}
       ${theme.reason_preview ? `<small>${escapeHtml(theme.reason_preview)}</small>` : ''}
       <span>${open ? '收起详情' : '查看行情、资金与催化'}</span>
@@ -555,7 +556,8 @@ function themeCard(theme, mode) {
   const displayState = theme.snapshot;
   const displayNote = displayState ? `<p class="theme-footnote">展示更新
     ${escapeHtml(formatDataTime(displayState.built_at))}
-    ${displayState.state === 'stale' ? ' · 后台更新中，当前为上一版有效结果' : ''}
+    ${displayState.state === 'frozen' ? ' · 已停止自动跟踪，保留历史快照'
+      : displayState.state === 'stale' ? ' · 后台更新中，当前为上一版有效结果' : ''}
     ${displayState.last_error ? ' · 部分数据更新失败，保留已有结果' : ''}</p>` : '';
   const activeMembers = theme.members.filter(member => member.active);
   const returnLabel = pending || watching || rejected ? '触发后' : '入库后';
@@ -622,7 +624,7 @@ function themeCard(theme, mode) {
     actions = `<div class="card-actions">
       <button class="secondary-button pressable" data-action="toggle-pin" data-id="${theme.id}">${theme.pinned ? '取消置顶' : '置顶'}</button>
       <button class="secondary-button pressable" data-action="explain" data-id="${theme.id}">更新新闻催化</button>
-      <button class="text-button danger pressable" data-action="archive" data-id="${theme.id}">归档并继续跟踪</button>
+      <button class="text-button danger pressable" data-action="archive" data-id="${theme.id}">归档题材</button>
     </div>`;
   } else if (archived) {
     actions = `<div class="card-actions"><button class="secondary-button pressable" data-action="restore" data-id="${theme.id}">恢复到题材库</button></div>`;
@@ -878,8 +880,8 @@ function sheetContent(action, title) {
       hint: '将搜索近期及海外隔夜催化，保存来源、时间和证据等级。'
     },
     archive: {
-      kicker: '归档题材', title: `归档“${title}”`, submit: '归档并继续跟踪',
-      hint: '暂时移出当前池并保留历史。后续四股再共振并通过验证时，可自动重新入池；也可手动恢复。'
+      kicker: '归档题材', title: `归档“${title}”`, submit: '归档题材',
+      hint: '保留历史；仅在首次创建后的14个自然日内继续跟踪。期间当日至少4只实际涨停并通过准入，才自动重新入池；超过14天停止自动跟踪，也可手动恢复。'
     },
     feishu: {
       kicker: '通知通道', title: '测试飞书机器人', submit: '发送测试消息',
@@ -938,7 +940,9 @@ function renderAlerts(items) {
       ? `<span class="delivery-ok">${channel}已送达</span>`
       : item.push_error
         ? `<span class="delivery-failed" title="${escapeHtml(item.push_error)}">${channel}失败</span>`
-        : '<span class="delivery-pending">未推送</span>';
+        : item.push_policy
+          ? '<span class="delivery-pending">仅系统内提示</span>'
+          : '<span class="delivery-pending">未推送</span>';
     return `<article class="event-card">
       <time class="event-time">${escapeHtml(formatDataTime(item.created_at))}</time>
       <div class="event-main"><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.body)}</small>${item.push_error ? `<p class="push-error">${escapeHtml(item.push_error)}</p>` : ''}</div>

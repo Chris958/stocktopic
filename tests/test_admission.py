@@ -106,7 +106,7 @@ def test_candidate_is_auto_admitted_only_after_ai_and_member_validation():
                     "trade_date": "20260826",
                     "ts_code": f"60000{i}.SH",
                     "name": f"股票{i}",
-                    "tag": "涨停" if i < 3 else "炸板",
+                    "tag": "涨停",
                     "theme": "液冷超节点",
                     "status": "首板",
                     "lu_time": f"093{i}00",
@@ -151,7 +151,7 @@ class SupplyChainAdmissionExplainer(PassingAdmissionExplainer):
         return item
 
 
-def test_supply_chain_theme_enters_early_watch_and_pushes_without_formal_confirmation():
+def test_supply_chain_theme_enters_early_watch_locally_without_formal_confirmation():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         service = StockTopicService(
@@ -222,7 +222,8 @@ def test_supply_chain_theme_enters_early_watch_and_pushes_without_formal_confirm
         assert theme["theme_level"] == "early_watch"
         assert theme["evidence_grade"] == "supply_chain_unconfirmed"
         assert theme["admission_review"]["decision_level"] == "early_watch"
-        assert service.notifier.messages[0][0] == "早期观察：PCB"
+        assert service.notifier.messages == []
+        assert service.database.recent_alerts()[0]["category"] == "early_watch_theme"
 
 
 class RepeatedThemeExplainer(PassingAdmissionExplainer):

@@ -490,3 +490,122 @@ def test_tesla_or_bearing_labels_alone_do_not_force_robot_membership():
         )
         is None
     )
+
+
+def test_archive_expiry_uses_original_creation_not_recent_archive(service):
+    discover(service, [event(i) for i in range(4)])
+    original = formal(service)[0]["id"]
+    service.test_now = now(29)
+    service.database.archive_theme(original)
+    old = service.database.get_theme(original)
+    state = service.database.get_metadata(f"direction_state:{original}")
+    calls = len(service.graph_calls), len(service.admission_calls)
+    discover(service, [event(i, day=30) for i in range(4, 7)], now(30, minute=1))
+    stored = service.database.get_theme(original)
+    assert stored["status"] == "archived"
+    assert stored["discovered_at"] == old["discovered_at"]
+    assert {m["code"] for m in stored["members"]} == {f"6000{i:02}.SH" for i in range(4)}
+    assert service.database.get_metadata(f"direction_state:{original}") == state
+    assert (len(service.graph_calls), len(service.admission_calls)) == calls
+    stopped = json.loads(service.database.get_metadata(f"direction_tracking_stopped:{original}"))
+    assert stopped["reason"] == "archived_creation_age_exceeded"
+    assert not service.database.get_metadata(f"direction_tracking:20261030:{original}")
+    for day in (26, 27, 28, 29, 30):
+        service.database.set_metadata(f"kpl_event_coverage:202610{day}", '{"state":"available"}')
+    service.database.prune_direction_members("20261030", service.test_now)
+    assert all(m["active"] for m in service.database.get_theme(original)["members"])
+
+
+def test_expired_archive_does_not_block_a_genuinely_new_four_stock_event(service):
+    discover(service, [event(i) for i in range(4)])
+    original = formal(service)[0]["id"]
+    service.test_now = now(29)
+    service.database.archive_theme(original)
+    discover(service, [event(i, day=30) for i in range(4, 8)], now(30, minute=1))
+    assert service.database.get_theme(original)["status"] == "archived"
+    assert len(formal(service)) == 1
+    assert formal(service)[0]["id"] != original
+    assert service.admission_calls[-1]["direction_context"]["known_formal"] is False
+
+
+def test_archive_expiry_during_ai_defers_reentry(service):
+    discover(service, [event(i) for i in range(4)])
+    original = formal(service)[0]["id"]
+    service.test_now = now(29)
+    service.database.archive_theme(original)
+    service.during_admission = lambda: setattr(service, "test_now", now(30, minute=1))
+    ids = discover(service, [event(i, day=30) for i in range(4)], now(30, hour=9, minute=59))
+    assert formal(service) == []
+    assert service.database.get_theme(original)["status"] == "archived"
+    trace = json.loads(service.database.get_metadata(f"admission_trace:{ids[0]}"))
+    assert trace["final_reject_reason"] == "archived_tracking_expired_during_verification"
+
+
+def test_atomic_adoption_cannot_revive_expired_archive(service):
+    discover(service, [event(i) for i in range(4)])
+    original = formal(service)[0]["id"]
+    service.test_now = now(29)
+    service.database.archive_theme(original)
+    epoch = service.database.get_theme(original)["archived_at"]
+    assert service.database.adopt_direction_event(
+        original, original, "机器人", now(30, minute=1).isoformat(), epoch, 90, "4天",
+    ) is None
+    assert service.database.get_theme(original)["status"] == "archived"
+
+
+def test_three_sealed_and_one_failed_never_auto_admit_but_four_sealed_can(service):
+    rows = [event(i) for i in range(4)]
+    rows[-1]["tag"] = "炸板"
+    ids = discover(service, rows)
+    assert ids and service.admission_calls == [] and formal(service) == []
+    trace = json.loads(service.database.get_metadata(f"admission_market_gate:{ids[0]}"))
+    assert len(trace["sealed_codes"]) == 3
+    assert trace["reason"] == "fewer_than_four_sealed_limit_ups"
+    service.test_now = now(minute=5)
+    service.database.upsert_kpl_events([event(3)])
+    service._assess_and_admit_candidates(ids)
+    assert len(formal(service)) == 1
+    assert len(service.admission_calls) == 1
+
+
+def test_archived_pool_needs_four_sealed_not_four_touches(service):
+    discover(service, [event(i) for i in range(4)])
+    original = formal(service)[0]["id"]
+    service.test_now = now(hour=11)
+    service.database.archive_theme(original)
+    calls = len(service.admission_calls)
+    rows = [event(i, day=19) for i in range(4)]
+    rows[-1]["tag"] = "炸板"
+    discover(service, rows, now(19))
+    assert service.database.get_theme(original)["status"] == "archived"
+    assert len(service.admission_calls) == calls and formal(service) == []
+    trace = json.loads(service.database.get_metadata(f"direction_tracking:20261019:{original}"))
+    assert trace["sealed_count"] == 3 and trace["archive_eligible"] is False
+
+
+def test_fourth_stock_breaking_board_during_ai_cannot_admit(service):
+    def break_board():
+        service.test_now = now(minute=5)
+        service.database.upsert_kpl_events([{**event(3), "tag": "炸板"}])
+    service.during_admission = break_board
+    discover(service, [event(i) for i in range(4)])
+    assert len(service.admission_calls) == 1 and formal(service) == []
+    trace = json.loads(service.database.get_metadata(
+        f"admission_trace:{service.admission_calls[0]['id']}"))
+    assert trace["checks"]["market_breadth"] is False
+
+
+def test_latest_quote_overrides_stale_sealed_event_and_counts_unique_current_stocks(service):
+    rows = [event(i) for i in range(4)] + [event(4, day=15)]
+    service.database.upsert_kpl_events(rows)
+    service.database.upsert_daily_limits("2026-10-16", [
+        {"ts_code": "600003.SH", "up_limit": 11, "down_limit": 9, "pre_close": 10},
+    ])
+    service.database.save_quotes([Quote(
+        code="600003.SH", name="合成股票3", pre_close=10, open=10, high=11, low=10,
+        close=10.5, volume=1, amount=1, trades=1, trade_time="10:00", captured_at=now(),
+    )], "2026-10-16", "10:00")
+    codes = [f"6000{i:02}.SH" for i in range(5)] * 2
+    assert service.database.sealed_codes_for_date("20261016", codes) == {
+        "600000.SH", "600001.SH", "600002.SH",
+    }

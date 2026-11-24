@@ -6,7 +6,7 @@ import json
 import sqlite3
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from .display_invalidation import (
 from .domain import Anomaly, Quote
 from .market_clock import MarketClock
 from .market_scope import MAINBOARD_SQL, is_mainboard
+from .tracking_policy import ARCHIVED_TRACKING_DAYS, archive_tracking_active
 
 
 def utc_now_iso() -> str:
@@ -361,7 +362,7 @@ class Database:
         return {row["market"]: row["n"] for row in rows}
 
     @display_mutation("core")
-    def prune_direction_members(self, day: str) -> dict:
+    def prune_direction_members(self, day: str, now: datetime | None = None) -> dict:
         """Only recent sealed main-board stocks remain live; retain historical membership."""
         dates = self.open_trade_dates(day.replace("-", ""), 5)
         coverage_keys = [f"{source}:{date}" for date in dates for source in
@@ -381,14 +382,17 @@ class Database:
             self.set_metadata("direction_member_scope", json.dumps(summary))
             return summary
         marks = ",".join("?" for _ in dates)
+        cutoff = (MarketClock.normalize(now or MarketClock.china_now())
+                  - timedelta(days=ARCHIVED_TRACKING_DAYS)).isoformat()
         with self.connect() as con:
             result = con.execute(
                 f"UPDATE theme_members SET active=0 WHERE active=1 AND theme_id IN "
-                "(SELECT id FROM candidate_themes WHERE status IN ('confirmed','archived')) "
+                "(SELECT id FROM candidate_themes WHERE status='confirmed' OR "
+                "(status='archived' AND datetime(discovered_at)>=datetime(?))) "
                 f"AND (NOT {MAINBOARD_SQL} OR code NOT IN "
                 f"(SELECT code FROM kpl_events WHERE trade_date IN ({marks}) "
                 "AND board_tag='涨停'))",
-                dates,
+                [cutoff, *dates],
             )
             changed = result.rowcount
         summary = {"status": "applied", "trade_dates": dates, "deactivated": changed,
@@ -461,7 +465,10 @@ class Database:
                     or target["status"] in {"merged", "rejected"}):
                 return None
             reactivated = target["status"] == "archived"
-            if reactivated and (not archive_epoch or target["archived_at"] != archive_epoch):
+            if reactivated and (not archive_epoch or target["archived_at"] != archive_epoch
+                    or not archive_tracking_active(
+                        dict(target), datetime.fromisoformat(observed_at),
+                    )):
                 return None
             if target_id != source_id:
                 con.execute(
@@ -1048,6 +1055,33 @@ class Database:
                 membership_values,
             )
         return len(membership_values)
+
+    def sealed_codes_for_date(self, trade_date: str, member_codes) -> set[str]:
+        """Count unique actual limit-ups; same-day quotes override a stale sealed tag."""
+        codes = {str(c) for c in member_codes if is_mainboard(c)}
+        if not codes:
+            return set()
+        day = trade_date.replace("-", "")
+        iso = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+        with self.connect() as con:
+            rows = con.execute("""
+                SELECT e.code,e.board_tag,q.close,d.upper_limit
+                FROM kpl_events e JOIN stocks s ON s.code=e.code
+                LEFT JOIN daily_limits d ON d.code=e.code AND d.trade_date=?
+                LEFT JOIN quote_snapshots q ON q.rowid=(
+                    SELECT rowid FROM quote_snapshots WHERE code=e.code
+                    AND captured_at>=? AND captured_at<? ORDER BY captured_at DESC LIMIT 1)
+                WHERE e.trade_date=? AND s.active=1 AND e.board_tag IN ('涨停','炸板')
+                ORDER BY e.synced_at DESC,CASE e.board_tag WHEN '炸板' THEN 0 ELSE 1 END
+            """, (iso, iso + "T00:00:00", iso + "T24:00:00", day)).fetchall()
+        latest = {}
+        for row in rows:
+            latest.setdefault(row["code"], row)
+        return {code for code in codes if code in latest and (
+            latest[code]["close"] >= latest[code]["upper_limit"] - 0.005
+            if latest[code]["close"] is not None and latest[code]["upper_limit"]
+            else latest[code]["board_tag"] == "涨停"
+        )}
 
     def limit_touch_events(self, trade_date: str) -> list[dict[str, Any]]:
         """Return one deterministic limit-touch record per stock for semantic clustering."""
@@ -2629,8 +2663,10 @@ class Database:
             rows = connection.execute(
                 """SELECT a.*, a.pushed_wecom AS pushed,
                    COALESCE(m.value, CASE WHEN a.pushed_wecom=1 OR a.push_error IS NOT NULL
-                       THEN 'wecom' ELSE '' END) AS push_channel
+                       THEN 'wecom' ELSE '' END) AS push_channel,
+                   p.value AS push_policy
                    FROM alerts a LEFT JOIN metadata m ON m.key='alert_push_channel:' || a.id
+                   LEFT JOIN metadata p ON p.key='alert_push_policy:' || a.id
                    ORDER BY a.created_at DESC, a.id DESC LIMIT ?""", (limit,)
             ).fetchall()
         return [dict(row) for row in rows]
