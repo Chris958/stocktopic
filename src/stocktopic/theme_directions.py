@@ -12,6 +12,7 @@ from functools import lru_cache
 from .market_clock import MarketClock
 from .market_scope import is_mainboard
 from .theme_graph import is_broad_parent_tag
+from .tracking_policy import MINIMUM_FORMAL_LIMIT_UPS, archive_tracking_active
 
 # These are investable directions, not generic industry parents. Component labels
 # such as bearings, reducers or Tesla alone do NOT imply a robot relationship.
@@ -195,7 +196,7 @@ class ThemeDirectionPool:
         self.lock = threading.RLock()
 
     def normalize_existing(self, now: datetime | None = None) -> None:
-        for name, root in self._roots().items():
+        for name, root in self._roots(now or MarketClock.china_now()).items():
             self.db.name_theme_direction(root["id"], name)
             for source_id in root.get("duplicate_formal_ids", []):
                 outcome = self.db.adopt_direction_event(
@@ -220,9 +221,17 @@ class ThemeDirectionPool:
                         ),
                     )
 
-    def _roots(self) -> dict[str, dict]:
+    def _roots(self, now: datetime | None = None) -> dict[str, dict]:
         groups = {}
         for row in self.db.direction_tracking_rows():
+            if now is not None and not archive_tracking_active(row, now):
+                key = f"direction_tracking_stopped:{row['id']}"
+                if not self.db.get_metadata(key):
+                    self.db.set_metadata(key, json.dumps({
+                        "reason": "archived_creation_age_exceeded",
+                        "discovered_at": row.get("discovered_at"), "checked_at": now.isoformat(),
+                    }))
+                continue
             state = row.get("direction_state") or {}
             name = label_direction(state.get("name", "")) or state.get("name") or event_direction(
                 row["shared_tag"],
@@ -246,7 +255,10 @@ class ThemeDirectionPool:
         if root["status"] != "archived":
             return True
         current = MarketClock.normalize(now)
-        if day != current.strftime("%Y%m%d") or len({e["code"] for e in events}) < 4:
+        if not archive_tracking_active(root, now):
+            return False
+        sealed = self.db.sealed_codes_for_date(day, [e["code"] for e in events])
+        if day != current.strftime("%Y%m%d") or len(sealed) < MINIMUM_FORMAL_LIMIT_UPS:
             return False  # A historical replay is not renewed live resonance.
         archived = MarketClock.normalize(datetime.fromisoformat(root["archived_at"]))
         if day > archived.strftime("%Y%m%d"):
@@ -291,7 +303,7 @@ class ThemeDirectionPool:
         with self.lock:
             events = [e for e in events if is_mainboard(e["code"])]
             known = []
-            for name, root in self._roots().items():
+            for name, root in self._roots(now).items():
                 previous = {
                     m["code"] for m in root["members"]
                     if root["qualified_formal"] and is_mainboard(m["code"])
@@ -337,6 +349,8 @@ class ThemeDirectionPool:
                                 "direction": name,
                                 "theme_id": root["id"],
                                 "touch_count": len(matched),
+                                "sealed_count": len(self.db.sealed_codes_for_date(
+                                    day, [e["code"] for e in matched])),
                                 "member_codes": state["strong_codes"],
                                 "observed_at": now.isoformat(),
                                 "added_codes": sorted({e["code"] for e in matched} - previous),
@@ -365,12 +379,12 @@ class ThemeDirectionPool:
                         "cluster_method": "direction_continuation",
                     }
                 )
-            self.db.prune_direction_members(MarketClock.normalize(now).strftime("%Y%m%d"))
+            self.db.prune_direction_members(MarketClock.normalize(now).strftime("%Y%m%d"), now)
             return known
 
     def prepare_clusters(self, day: str, now: datetime, clusters: list[dict]) -> list[dict]:
         with self.lock:
-            roots, result = self._roots(), []
+            roots, result = self._roots(now), []
             clusters = consolidate_verified_directions(clusters)
             for item in clusters:
                 if len(set(item.get("member_codes") or [])) < 4:
@@ -446,7 +460,7 @@ class ThemeDirectionPool:
                 result.append({**item, "direction_name": name, "direction_context": context})
             return result
 
-    def admission_context(self, theme: dict) -> dict:
+    def admission_context(self, theme: dict, now: datetime | None = None) -> dict:
         saved = theme.get("direction_context") or {}
         evidence = [m.get("evidence") or {} for m in theme.get("members", [])]
         name = label_direction(saved.get("name", "")) or saved.get("name") or event_direction(
@@ -454,7 +468,7 @@ class ThemeDirectionPool:
             next((e.get("canonical_name") for e in evidence if e.get("canonical_name")), ""),
             next((e.get("common_logic") for e in evidence if e.get("common_logic")), ""),
         )
-        root = self._roots().get(name)
+        root = self._roots(now or MarketClock.china_now()).get(name)
         if root and int(root["id"]) == int(theme["id"]):
             root = None
         return {
@@ -504,10 +518,22 @@ class ThemeDirectionPool:
             name = context["name"]
             if not name:
                 raise DirectionDeferred("investable_direction_unresolved")
-            roots = self._roots()
+            roots = self._roots(now)
             root = roots.get(name)
+            previous_target = context.get("target_id")
+            if previous_target:
+                with self.db.connect() as con:
+                    old = con.execute(
+                        "SELECT status,discovered_at FROM candidate_themes WHERE id=?",
+                        (previous_target,),
+                    ).fetchone()
+                if old and not archive_tracking_active(dict(old), now):
+                    raise DirectionDeferred("archived_tracking_expired_during_verification")
             target = root["id"] if root else theme["id"]
             day = str(theme["day1_date"]).replace("-", "")
+            codes = {m["code"] for m in theme["members"] if m.get("active", 1)}
+            if len(self.db.sealed_codes_for_date(day, codes)) < MINIMUM_FORMAL_LIMIT_UPS:
+                raise DirectionDeferred("insufficient_sealed_limit_ups")
             if root and root["status"] == "archived":
                 codes = {m["code"] for m in theme["members"] if m.get("active", 1)}
                 events = [e for e in self.db.limit_touch_events(day) if e["code"] in codes]

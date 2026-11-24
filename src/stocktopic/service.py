@@ -38,6 +38,11 @@ from .scoring import ThemeScorer
 from .theme_directions import DirectionDeferred, ThemeDirectionPool
 from .theme_policy import policy_structured_event_clusters as structured_event_clusters
 from .themes import ThemeDiscovery
+from .tracking_policy import (
+    ARCHIVED_TRACKING_DAYS,
+    MINIMUM_FORMAL_LIMIT_UPS,
+    OPPORTUNITY_ALERT_CATEGORIES,
+)
 from .verification_cache import VerificationCache
 
 logger = logging.getLogger(__name__)
@@ -99,7 +104,9 @@ class StockTopicService:
         self.settings.ensure_directories()
         self.database.initialize()
         self.direction_pool.normalize_existing(self.clock.china_now())
-        self.database.prune_direction_members(self.clock.china_now().strftime("%Y%m%d"))
+        self.database.prune_direction_members(
+            self.clock.china_now().strftime("%Y%m%d"), self.clock.china_now(),
+        )
         recovered_ai = self.database.recover_interrupted_ai_analyses()
         if recovered_ai:
             self.database.set_metadata(
@@ -1023,10 +1030,25 @@ class StockTopicService:
                     continue
                 if len({m["code"] for m in theme.get("members", []) if m.get("active", 1)}) < 4:
                     continue
+                compact = str(theme["day1_date"]).replace("-", "")
+                sealed = self.database.sealed_codes_for_date(
+                    compact, [m["code"] for m in theme["members"] if m.get("active", 1)],
+                )
+                if len(sealed) < MINIMUM_FORMAL_LIMIT_UPS:
+                    reason = f"等待正式准入：当日实际涨停{len(sealed)}只，需至少4只；炸板不计入"
+                    if theme.get("admission_reason") != reason:
+                        self.database.set_admission_status(theme_id, "awaiting_ai", reason)
+                    self.database.set_metadata(f"admission_market_gate:{theme_id}", json.dumps({
+                        "trade_date": compact, "sealed_codes": sorted(sealed),
+                        "reason": "fewer_than_four_sealed_limit_ups",
+                    }))
+                    continue
                 try:
                     if not self._admission_budget_available(theme):
                         continue
-                    direction_context = self.direction_pool.admission_context(theme)
+                    direction_context = self.direction_pool.admission_context(
+                        theme, self.clock.china_now(),
+                    )
                     theme["direction_context"] = direction_context
                     self.database.set_admission_status(
                         theme_id, "analyzing", "正在进行60交易日新颖性与持续性审查"
@@ -1134,7 +1156,9 @@ class StockTopicService:
                         "source_available": source_count >= 1,
                         "duration_or_upside": duration_gate or upside_gate,
                         "valid_leader": str(item.get("leader_candidate_code") or "") in valid_codes,
-                        "market_breadth": len(set(trigger_codes)) >= 4,
+                        "market_breadth": len(self.database.sealed_codes_for_date(
+                            compact, trigger_codes,
+                        )) >= MINIMUM_FORMAL_LIMIT_UPS,
                     }
                     evidence_grade = _admission_evidence_grade(item.get("catalysts", []))
                     core_passed = all(core_checks.values())
@@ -1299,7 +1323,9 @@ class StockTopicService:
         finally:
             with self._ai_lock:
                 self._ai_inflight.difference_update(selected)
-            self.database.prune_direction_members(self.clock.china_now().strftime("%Y%m%d"))
+            self.database.prune_direction_members(
+                self.clock.china_now().strftime("%Y%m%d"), self.clock.china_now(),
+            )
 
     def _admission_budget_available(self, theme: dict) -> bool:
         now = self.clock.china_now()
@@ -1485,7 +1511,7 @@ class StockTopicService:
         leader_text = f"{leader.get('name', '')}({leader_code})" if leader_code else "未确认"
         body = (
             f"级别：{'正式题材' if level == 'formal' else '早期观察（证据待确认）'}\n"
-            f"触发：共同事件至少{self.settings.minimum_limit_touches}只股票当日形成强势信号\n"
+            f"触发：共同事件当日至少{MINIMUM_FORMAL_LIMIT_UPS}只股票实际涨停（炸板不计入）\n"
             f"核心股票：{stock_text or '等待行情补全'}\n"
             f"催化：{review.get('catalyst_summary') or '未提供'}\n"
             f"预估持续：{int(review.get('expected_duration_days') or 0)}个交易日\n"
@@ -1582,6 +1608,11 @@ class StockTopicService:
             dedupe_key, category, severity, title, body, theme_id, code
         )
         if alert_id is None:
+            return
+        if category not in OPPORTUNITY_ALERT_CATEGORIES:
+            self.database.set_metadata(f"alert_push_policy:{alert_id}", json.dumps({
+                "delivery": "local_only", "reason": "opportunities_only", "category": category,
+            }))
             return
         self.database.set_metadata(f"alert_push_channel:{alert_id}", "feishu")
         if not self.notifier.enabled:
@@ -1862,6 +1893,7 @@ class StockTopicService:
                 "eastmoney_intraday": self.database.get_metadata("eastmoney_intraday_probe"),
                 "feishu_group_robot": self.notifier.enabled,
                 "notification_channel": "feishu",
+                "notification_policy": "opportunities_only",
                 "wecom_group_robot": False,
                 "apns": False,
             },
@@ -1946,6 +1978,9 @@ class StockTopicService:
                 "leader_upside_threshold_pct": self.settings.leader_upside_threshold_pct,
                 "pool_identity": "investable_direction",
                 "archived_directions_keep_tracking": True,
+                "archived_tracking_max_age_days": ARCHIVED_TRACKING_DAYS,
+                "archived_tracking_age_basis": "original_discovered_at",
+                "formal_minimum_sealed_stocks": MINIMUM_FORMAL_LIMIT_UPS,
                 "continuation_novelty_veto": False,
                 "archived_reentry_minimum_strong_stocks": 4,
                 "automatic_member_addition": "local_graph_and_same_day_strength",

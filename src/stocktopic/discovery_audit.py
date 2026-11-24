@@ -216,7 +216,10 @@ def audit_date(db: AuditDatabase, day: str, codes: set[str], keywords: list[str]
             if not _relevant([item, members], codes, keywords):
                 continue
             item["members"] = members
-            for prefix in ("direction_state", "direction_event", "direction_archive"):
+            for prefix in (
+                "direction_state", "direction_event", "direction_archive",
+                "direction_tracking_stopped",
+            ):
                 saved_direction = con.execute("SELECT value FROM metadata WHERE key=?",
                                               (f"{prefix}:{item['id']}",)).fetchone()
                 item[prefix] = _json(saved_direction[0], {}) if saved_direction else {}

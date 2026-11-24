@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .db import Database
 from .display_invalidation import PREFIX, SECTIONS, enqueue, get_value, put_value
+from .tracking_policy import archive_tracking_active
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def epoch(con, section, theme_id):
 def headers(con):
     return [dict(r) for r in con.execute(
         "SELECT id,final_name,suggested_name,provisional_name,shared_tag,status,"
-        "admission_status,theme_level,pinned,day1_date,updated_at,"
+        "admission_status,theme_level,pinned,day1_date,discovered_at,updated_at,"
         "substr(admission_reason,1,120) reason_preview "
         "FROM candidate_themes WHERE status IN "
         "('pending','watching','confirmed','archived','rejected') "
@@ -166,6 +167,7 @@ class DisplaySnapshots:
             items = []
             for row in current:
                 item = {**known.get(row["id"], {"member_count": None}), **row}
+                item["tracking_active"] = archive_tracking_active(row, self.clock.china_now())
                 items.append(item)
             state = self._state(con, saved) if saved else {"state": "building"}
         return {"themes": items, "snapshot": state}
@@ -175,7 +177,8 @@ class DisplaySnapshots:
             con.execute("BEGIN")
             row = con.execute(
                 "SELECT id,final_name,suggested_name,provisional_name,status,admission_status,"
-                "theme_level,pinned,updated_at FROM candidate_themes WHERE id=?", (identifier,),
+                "theme_level,pinned,discovered_at,updated_at FROM candidate_themes WHERE id=?",
+                (identifier,),
             ).fetchone()
             if not row:
                 return None
@@ -184,6 +187,10 @@ class DisplaySnapshots:
                 return {"snapshot": {"state": "building"}, "id": identifier}
             result = copy.deepcopy(saved["data"])
             state = self._state(con, saved, section, identifier)
+            tracking = archive_tracking_active(dict(row), self.clock.china_now())
+            if not tracking:
+                state["state"] = "frozen"
+                state["last_error"] = None
             if section == "core":
                 result.update(dict(row))
                 # Removing a holding or archiving cannot be undone by an old projection.
@@ -191,7 +198,7 @@ class DisplaySnapshots:
                     "SELECT code FROM theme_members WHERE theme_id=? AND active=1", (identifier,),
                 )}
                 result["members"] = [m for m in result["members"] if m["code"] in active]
-            return {**result, "snapshot": state}
+            return {**result, "tracking_active": tracking, "snapshot": state}
 
     def status(self):
         with self.db.connect() as con:
@@ -216,10 +223,16 @@ class DisplaySnapshots:
             revision = get_value(con, "revision", 0)
             ids = {str(r[0]) for r in con.execute(
                 "SELECT id FROM candidate_themes WHERE status='confirmed'")}
+            expired = {str(row["id"]) for row in headers(con)
+                       if not archive_tracking_active(row, self.clock.china_now())}
             plan = {}
             for section, targets in pending.items():
                 selected = ids | (set(targets) - {"*"}) if "*" in targets else set(targets)
                 for identifier in selected:
+                    # Retain historical results after expiry. An explicit first view
+                    # may build a missing section once, without resuming tracking.
+                    if identifier in expired and get_value(con, f"theme:{identifier}:{section}"):
+                        continue
                     plan.setdefault(identifier, []).append(section)
             # New/formal pools are eagerly built; historical records build on demand.
             for identifier in ids:
